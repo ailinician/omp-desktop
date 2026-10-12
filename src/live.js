@@ -2815,6 +2815,20 @@
       const data = await _sendWithResponse({ type: "promote_queued_message", message: text });
       return data?.promoted === true;
     },
+    /** ⚡ on a queue-strip row (#47): promote a follow-up to a steer, then
+     *  the same id-less abort as Esc — omp resumes at once with its steering
+     *  queue. No abort when the run already ended, while an abort is in
+     *  flight (it would stop the resumed reply), or after a tab switch
+     *  during the promote (`_switchGen`); the message then goes at the next
+     *  step. Rationale and measured frame order:
+     *  docs/architecture/message-queue.md. Same result contract as
+     *  `removeQueuedMessage`. */
+    async sendQueuedNow(text, queue) {
+      const gen = _switchGen;
+      if (queue === "followUp" && !(await this.promoteQueuedMessage(text))) return false;
+      if (_switchGen === gen && state.isStreaming && !userAbortInFlight) this.abort();
+      return true;
+    },
     // ── Goal mode (app/goal.js) ──────────────────────────────────────────────
     /** Starts a goal on the active tab: what the composer sends in goal
      *  mode. `goal create` goes first, so the objective's turn already
