@@ -344,7 +344,7 @@ function SessionMinimap({ messages, hoveredIdx, onHover, onClick }) {
 function AmbientRail({
   ctx, activity, messages, microcopy, onClose, sparklineValues, hoveredMsgIdx, onMinimapHover, onMinimapClick,
   subagents, subagentPaneOpen, onOpenSubagent, onToggleSubagentPane, onOpenTree,
-  show = {},
+  show = {}, children,
 }) {
   // Use live tps samples. Before the first turn, sparklineValues is all zeros
   // which renders as a flat baseline — honest, not fake random data.
@@ -402,6 +402,7 @@ function AmbientRail({
           onOpen={onOpenSubagent} onTogglePane={onToggleSubagentPane} />
       )}
 
+      {children}
       {(show.minimap ?? true) && (
         <div className="rail-card glass" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 120 }}>
           <div className="rail-card-head">

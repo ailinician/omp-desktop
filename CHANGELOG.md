@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Collapse all / Expand all (#43): `/collapse-all` and `/expand-all` in the command bridge and the prompt box's `/` menu fold or unfold every tool card and thinking block in the current tab at once; blocks that arrive later follow your settings again. Both can be given a key in the shortcuts screen.
 - `/tweaks` opens the Tweaks panel from the command bridge or the prompt box, like the cog in the status bar.
 - Tweaks → Rail: show or hide the context gauge, agent radar, subagents card and minimap individually; the choice is kept across restarts (#51).
+- Rail widget plugins: any executable listed in `<app config>/widgets.json` that prints JSON v1 to stdout renders a card in the ambient rail; runs on tab activate, turn end, branch change or the card's refresh button; list items can insert text into the composer or open a link; each plugin card has its own toggle under Tweaks → Rail. Bundled examples in `examples/widgets/`, contract in `docs/widgets.md` (#49).
 
 ### Changed
 
@@ -22,7 +23,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.6.1] - 2026-10-12
 
 ### Added
-
 - Reorder tabs and projects by dragging (#40). Drag a project along the tab bar or the project sidebar, or a conversation within its project in the tab-bar dropdown or the sidebar; a line shows where it will land, and Esc cancels. `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown` move the current tab's project one place left or right (rebindable in the shortcuts screen). The order is kept when the app restarts.
 - Tool cards and thinking can be collapsed (#44). Everything starts expanded; once enough newer tool calls and thinking blocks have followed a long one, it folds down to its first few lines (a shell command to its last few). Short ones never fold on their own. Each has a chevron button to collapse or expand it by hand, which always wins and is kept when you switch tabs. Nothing folds while you are scrolled up reading. Set how many newer blocks to wait for, or turn auto-collapse off, under Tweaks → Chat.
 

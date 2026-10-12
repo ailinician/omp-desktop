@@ -20,7 +20,8 @@
 const {
   Icon, ChatView, Composer, CommandBridge, WindowChrome, TabBar, SubagentPane, ProjectSidebar, EmptyWorkspace,
   StatusBar, AmbientRail, ConversationTree, PlanKanban, HistoryModal, ChangesPanel, ApprovalRulesPanel, UsageStatsPanel, PromptHistoryModal, UpdateModal, useTweaks,
-  TweaksPanel, TweakSection, TweakRadio, TweakToggle, TweakColor, TweakSlider,
+  TweaksPanel, TweakSection, TweakRow, TweakRadio, TweakToggle, TweakColor, TweakSlider,
+  useWidgets, WidgetCard, WidgetErrorCard,
   TWEAK_DEFAULTS, NULL_MODEL, EMPTY_PROJECT, DEFAULT_PROFILE_ID,
   INTENT_FRAMING, APPROVAL_PROMPT,
   useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, timeNow,
@@ -225,6 +226,11 @@ function App() {
 
   const updater = useUpdater({ bridge, autoCheck: t.updateCheck ?? true, skipped: t.skippedUpdate, setTweak });
 
+  const widgets = useWidgets({
+    bridge, activeSessionId, activeProjectPath: activeProject.path, branch: activeProject.branch,
+    streaming, sessionIds, tweaks: t,
+  });
+
   // Handler map read through a ref so the dispatch effect never re-subscribes.
   const handlersRef = React.useRef({});
   useKeymapDispatch(handlersRef);
@@ -341,6 +347,10 @@ function App() {
   // sends it as a normal prompt, which omp executes.
   const [draftInsert, setDraftInsert] = React.useState(null);
   const handleInsertDraft = (text) => setDraftInsert({ text, nonce: Date.now() });
+  // Widget list items insert at the end of the draft (appends, like the ⌘K
+  // bridge above); the trailing space keeps typing flowing.
+  const handleWidgetInsert = React.useCallback(
+    text => setDraftInsert({ text: text + " ", nonce: Date.now() }), []);
 
   // Prompt-history picker (Ctrl+Up modal, issue #16) — same {text, nonce}
   // shape and rationale as draftInsert above, but always *replaces* the
@@ -749,7 +759,14 @@ function App() {
                   onMinimapHover={setHoveredMsgIdx}
                   onMinimapClick={handleMinimapClick}
                   show={{ gauge: t.railGauge ?? true, radar: t.railRadar ?? true, subagents: t.railSubagents ?? true, minimap: t.railMinimap ?? true }}
-                />
+                >
+                  {widgets.fatal && <WidgetErrorCard title="widgets.json" error={widgets.fatal} />}
+                  {widgets.configErrors.map((e, i) => <WidgetErrorCard key={i} title="widgets.json" error={e} />)}
+                  {widgets.plugins.map(p => (
+                    <WidgetCard key={p.id} plugin={p} run={widgets.runs[p.id]}
+                      onRefresh={() => widgets.refresh(p.id)} onInsert={handleWidgetInsert} />
+                  ))}
+                </AmbientRail>
               )}
             </div>
           </div>
@@ -885,6 +902,13 @@ function App() {
           <TweakToggle label="agent radar" value={t.railRadar ?? true} onChange={v => setTweak("railRadar", v)} />
           <TweakToggle label="subagents" value={t.railSubagents ?? true} onChange={v => setTweak("railSubagents", v)} />
           <TweakToggle label="minimap" value={t.railMinimap ?? true} onChange={v => setTweak("railMinimap", v)} />
+          {widgets.allPlugins.map(p => (
+            <TweakToggle key={p.id} label={`widget: ${p.title}`} value={t[`widget:${p.id}`] ?? true}
+              onChange={v => setTweak(`widget:${p.id}`, v)} />
+          ))}
+          <TweakRow label="plugins" value={widgets.configPath}>
+            <button className="btn outlined" onClick={widgets.reload}>reload widgets</button>
+          </TweakRow>
         </TweakSection>
         <TweakSection label="Session">
           <TweakSlider label="prompt history" value={t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT}
