@@ -9,7 +9,19 @@
 //! passed; the poll loop sees the flag and kills the child. Reader results
 //! come back over channels so a grandchild that inherited a pipe and outlives
 //! the plugin can only delay the result until the deadline, never past it.
+//!
+//! The context is written to stdin on its own thread, started after the
+//! readers, so a plugin that never reads stdin (or fills stdout before it
+//! does) cannot stall the caller: the poll loop alone owns the deadline. That
+//! thread is never joined; killing the child breaks the pipe and ends it.
+//! stderr keeps a rolling tail of [`STDERR_KEEP_BYTES`] (the end is what
+//! explains a failure) while the rest is drained and dropped.
+//!
+//! Every thread is created with `thread::Builder`. If the OS refuses one, the
+//! child is killed and reaped and the run fails with
+//! `could not start reader thread: …` instead of panicking out of the caller.
 
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -84,7 +96,6 @@ pub fn run_plugin(entry: &PluginEntry, ctx: &PluginContext) -> RunResult {
 fn run_inner(entry: &PluginEntry, ctx: &PluginContext) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_millis(entry.timeout_ms);
     let mut child = spawn(entry, ctx)?;
-    feed_stdin(&mut child, ctx);
 
     let (Some(out_pipe), Some(err_pipe)) = (child.stdout.take(), child.stderr.take()) else {
         kill(&mut child);
@@ -95,8 +106,11 @@ fn run_inner(entry: &PluginEntry, ctx: &PluginContext) -> Result<String, String>
         out_pipe,
         STDOUT_CAP_BYTES,
         Some(Arc::clone(&overflow)), // the reader thread raises the flag, this thread polls it
-    );
-    let stderr_rx = spawn_drain(err_pipe, STDERR_KEEP_BYTES, None);
+    )
+    .inspect_err(|_| kill(&mut child))?;
+    let stderr_rx =
+        spawn_drain(err_pipe, STDERR_KEEP_BYTES, None).inspect_err(|_| kill(&mut child))?;
+    feed_stdin(&mut child, ctx).inspect_err(|_| kill(&mut child))?;
 
     let status = wait_for_exit(&mut child, &overflow, deadline, entry.timeout_ms)?;
     let out = recv_until(&stdout_rx, deadline)
@@ -143,52 +157,66 @@ fn spawn(entry: &PluginEntry, ctx: &PluginContext) -> Result<Child, String> {
     })
 }
 
-/// Context on stdin, then close it so `cat`-style plugins terminate.
-fn feed_stdin(child: &mut Child, ctx: &PluginContext) {
+/// Context on stdin from a detached thread, which closes the pipe when done so
+/// `cat`-style plugins terminate. Never joined: a plugin that does not read
+/// stdin leaves the write blocked until the child is killed or exits.
+fn feed_stdin(child: &mut Child, ctx: &PluginContext) -> Result<(), String> {
     let Some(mut stdin) = child.stdin.take() else {
-        return;
+        return Ok(());
     };
     let payload = serde_json::json!({
         "version": 1, "project": ctx.project, "branch": ctx.branch,
         "remote": ctx.remote, "session": ctx.session, "trigger": ctx.trigger,
-    });
-    let _ = stdin.write_all(payload.to_string().as_bytes()); // a plugin that never reads stdin closes the pipe; that's fine
+    })
+    .to_string();
+    std::thread::Builder::new()
+        .name("widget-stdin".to_string())
+        .spawn(move || {
+            let _ = stdin.write_all(payload.as_bytes()); // a plugin that never reads stdin closes the pipe; that's fine
+        })
+        .map(drop) // detached on purpose; the handle is not needed
+        .map_err(|e| format!("could not start stdin thread: {e}"))
 }
 
-/// Drain `pipe` on a thread, keeping at most `keep` bytes. With `overflow`,
-/// exceeding `keep` raises the flag and stops reading (the caller kills the
-/// child); without it the excess is read and discarded so the writer never
-/// blocks on a full pipe.
+/// Drain `pipe` on a thread. With `overflow`, at most `keep` bytes are kept
+/// from the start; exceeding that raises the flag and stops reading (the
+/// caller kills the child). Without it the last `keep` bytes are kept and the
+/// rest is read and discarded so the writer never blocks on a full pipe.
 fn spawn_drain(
     mut pipe: impl Read + Send + 'static,
     keep: usize,
     overflow: Option<Arc<AtomicBool>>,
-) -> Receiver<std::io::Result<Vec<u8>>> {
+) -> Result<Receiver<std::io::Result<Vec<u8>>>, String> {
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 8192];
-        let result = loop {
-            match pipe.read(&mut chunk) {
-                Ok(0) => break Ok(buf),
-                Ok(n) => {
-                    let room = keep - buf.len();
-                    if n <= room {
-                        buf.extend_from_slice(&chunk[..n]);
-                    } else if let Some(flag) = &overflow {
-                        flag.store(true, Ordering::Relaxed);
-                        break Ok(buf);
-                    } else {
-                        buf.extend_from_slice(&chunk[..room]);
+    std::thread::Builder::new()
+        .name("widget-drain".to_string())
+        .spawn(move || {
+            let mut buf: VecDeque<u8> = VecDeque::new();
+            let mut chunk = [0u8; 8192];
+            let result = loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break Ok(Vec::from(buf)),
+                    Ok(n) => {
+                        if let Some(flag) = &overflow {
+                            if buf.len() + n > keep {
+                                flag.store(true, Ordering::Relaxed);
+                                break Ok(Vec::from(buf));
+                            }
+                            buf.extend(&chunk[..n]);
+                        } else {
+                            buf.extend(&chunk[..n]);
+                            let excess = buf.len().saturating_sub(keep);
+                            buf.drain(..excess);
+                        }
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => break Err(e),
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => break Err(e),
-            }
-        };
-        let _ = tx.send(result); // the receiver is gone after a timeout; nobody wants the bytes then
-    });
-    rx
+            };
+            let _ = tx.send(result); // the receiver is gone after a timeout; nobody wants the bytes then
+        })
+        .map_err(|e| format!("could not start reader thread: {e}"))?;
+    Ok(rx)
 }
 
 /// Poll until the child exits. Kills it and errors on deadline or when the
@@ -355,6 +383,47 @@ mod tests {
             "{r:?}"
         );
         assert!(r.stdout.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdin_write_cannot_outlast_the_deadline() {
+        let mut big = ctx();
+        big.remote = "x".repeat(200 * 1024);
+        let start = std::time::Instant::now();
+        let r = run_plugin(&entry(&["sh", "-c", "sleep 30"], 1_000), &big);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "must not block on stdin"
+        );
+        assert!(
+            r.error
+                .as_deref()
+                .is_some_and(|e| e.contains("timed out after 1000 ms")),
+            "{r:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stderr_keeps_the_tail_not_the_head() {
+        let r = run_plugin(
+            &entry(
+                &[
+                    "sh",
+                    "-c",
+                    "yes log | head -c 200000 >&2; echo FINAL-MARKER >&2; exit 2",
+                ],
+                5_000,
+            ),
+            &ctx(),
+        );
+        assert!(
+            r.error
+                .as_deref()
+                .is_some_and(|e| e.contains("FINAL-MARKER")),
+            "{r:?}"
+        );
     }
 
     #[test]
