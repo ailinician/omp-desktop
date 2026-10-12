@@ -2823,14 +2823,20 @@
      *  running step is aborted exactly as Esc does — a running command is
      *  killed and a goal pauses — and omp continues with every queued steer,
      *  this one among them, images included. Nothing is aborted while the
-     *  agent is not running (the promote alone then starts the turn), nor
-     *  after a switch away from the tab during the promote: the message
-     *  still goes at the next step. Same result contract as
-     *  `removeQueuedMessage`. */
+     *  agent is not running (the promote alone then starts the turn), while
+     *  an abort is still in flight (a second ⚡ or a double click would land
+     *  on the resumed turn and stop the reply to the steers just taken), nor
+     *  after any tab switch during the promote — `_switchGen`, since a reply
+     *  held back by a switch is replayed on the way back, when the tab is
+     *  active again but its run has moved on: the message still goes at the
+     *  next step. Frame order measured against omp 18.10.1: the abort's
+     *  `turn_end` and response arrive before the resumed `turn_start`, so
+     *  `userAbortInFlight` and then `state.isStreaming` cover the window.
+     *  Same result contract as `removeQueuedMessage`. */
     async sendQueuedNow(text, queue) {
-      const origin = activeSessionId;
+      const gen = _switchGen;
       if (queue === "followUp" && !(await this.promoteQueuedMessage(text))) return false;
-      if (activeSessionId === origin && state.isStreaming) this.abort();
+      if (_switchGen === gen && state.isStreaming && !userAbortInFlight) this.abort();
       return true;
     },
     // ── Goal mode (app/goal.js) ──────────────────────────────────────────────
