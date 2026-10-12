@@ -1,5 +1,5 @@
 //! Run one widget plugin: argv from the validated config, context via env +
-//! stdin JSON, stdout capped, wall-clock timeout, process killed on either.
+//! stdin JSON, stdout capped, wall-clock timeout, process tree killed on either.
 //! Synchronous and blocking — callers run it on `spawn_blocking`.
 //!
 //! A blocking `read` on the child's stdout cannot observe the deadline while
@@ -14,13 +14,16 @@
 //! readers, so the caller never waits on the write; the poll loop alone owns
 //! the deadline. That thread is never joined.
 //!
-//! Every [`PluginContext`] string is bounded to [`CONTEXT_FIELD_MAX_BYTES`] in
-//! [`context`]. Each value is also exported as an environment variable, and
-//! Linux limits one env string to 128 KiB, so an unbounded value would fail
-//! `spawn` with E2BIG. With the bound the stdin payload (five fields plus keys,
-//! < 11 KiB) always fits a pipe buffer (>= 16 KiB on macOS, Linux and Windows),
-//! so the writer completes at once even when the plugin never reads stdin and
-//! cannot outlive the run.
+//! Every [`PluginContext`] string except `project` is bounded to
+//! [`CONTEXT_FIELD_MAX_BYTES`] in [`context`]. Each value is also exported as an
+//! environment variable, and Linux limits one env string to 128 KiB, so an
+//! unbounded value would fail `spawn` with E2BIG. `project` is left intact: it
+//! is the plugin's working directory, so truncating it would change where the
+//! plugin runs, and the OS path limit already bounds it. The stdin payload is
+//! therefore at most `PATH_MAX` + 4 x 2048 bytes plus keys, far below any exec
+//! limit. On timeout or cap the whole process tree is killed (see
+//! [`ProcessSupervisor`]), which closes the plugin's stdin read end, so the
+//! detached stdin writer always fails and returns.
 //! stderr keeps a rolling tail of [`STDERR_KEEP_BYTES`] (the end is what
 //! explains a failure) while the rest is drained and dropped.
 //!
@@ -37,6 +40,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::agent::supervisor::ProcessSupervisor;
 use crate::widgets::config::PluginEntry;
 
 pub const STDOUT_CAP_BYTES: usize = 256 * 1024;
@@ -79,15 +83,33 @@ pub fn context(project: &Path, session: &str, trigger: &str) -> PluginContext {
             });
         url
     });
+    bounded_context(
+        project.to_string_lossy().into_owned(),
+        branch.unwrap_or_default(),
+        remote.unwrap_or_default(),
+        session.to_string(),
+        trigger.to_string(),
+    )
+}
+
+/// Assemble the context, bounding every string except `project` to
+/// [`CONTEXT_FIELD_MAX_BYTES`]. `project` is the plugin's cwd: truncating it
+/// would change where the plugin runs, and the OS path limit already bounds it.
+fn bounded_context(
+    project: String,
+    branch: String,
+    remote: String,
+    session: String,
+    trigger: String,
+) -> PluginContext {
     let mut ctx = PluginContext {
-        project: project.to_string_lossy().into_owned(),
-        branch: branch.unwrap_or_default(),
-        remote: remote.unwrap_or_default(),
-        session: session.to_string(),
-        trigger: trigger.to_string(),
+        project,
+        branch,
+        remote,
+        session,
+        trigger,
     };
     for field in [
-        &mut ctx.project,
         &mut ctx.branch,
         &mut ctx.remote,
         &mut ctx.session,
@@ -126,10 +148,10 @@ pub fn run_plugin(entry: &PluginEntry, ctx: &PluginContext) -> RunResult {
 
 fn run_inner(entry: &PluginEntry, ctx: &PluginContext) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_millis(entry.timeout_ms);
-    let mut child = spawn(entry, ctx)?;
+    let (mut child, supervisor) = spawn(entry, ctx)?;
 
     let (Some(out_pipe), Some(err_pipe)) = (child.stdout.take(), child.stderr.take()) else {
-        kill(&mut child);
+        kill_tree(&supervisor, &mut child);
         return Err("stdout or stderr pipe missing".to_string());
     };
     let overflow = Arc::new(AtomicBool::new(false));
@@ -138,12 +160,18 @@ fn run_inner(entry: &PluginEntry, ctx: &PluginContext) -> Result<String, String>
         STDOUT_CAP_BYTES,
         Some(Arc::clone(&overflow)), // the reader thread raises the flag, this thread polls it
     )
-    .inspect_err(|_| kill(&mut child))?;
-    let stderr_rx =
-        spawn_drain(err_pipe, STDERR_KEEP_BYTES, None).inspect_err(|_| kill(&mut child))?;
-    feed_stdin(&mut child, ctx).inspect_err(|_| kill(&mut child))?;
+    .inspect_err(|_| kill_tree(&supervisor, &mut child))?;
+    let stderr_rx = spawn_drain(err_pipe, STDERR_KEEP_BYTES, None)
+        .inspect_err(|_| kill_tree(&supervisor, &mut child))?;
+    feed_stdin(&mut child, ctx).inspect_err(|_| kill_tree(&supervisor, &mut child))?;
 
-    let status = wait_for_exit(&mut child, &overflow, deadline, entry.timeout_ms)?;
+    let status = wait_for_exit(
+        &mut child,
+        &supervisor,
+        &overflow,
+        deadline,
+        entry.timeout_ms,
+    )?;
     let out = recv_until(&stdout_rx, deadline)
         .ok_or_else(|| format!("timed out after {} ms", entry.timeout_ms))?
         .map_err(|e| format!("could not read stdout: {e}"))?;
@@ -160,7 +188,7 @@ fn run_inner(entry: &PluginEntry, ctx: &PluginContext) -> Result<String, String>
     String::from_utf8(out).map_err(|_| "stdout is not UTF-8".to_string())
 }
 
-fn spawn(entry: &PluginEntry, ctx: &PluginContext) -> Result<Child, String> {
+fn spawn(entry: &PluginEntry, ctx: &PluginContext) -> Result<(Child, ProcessSupervisor), String> {
     let Some((argv0, rest)) = entry.command.split_first() else {
         return Err("command is empty".to_string());
     };
@@ -182,15 +210,20 @@ fn spawn(entry: &PluginEntry, ctx: &PluginContext) -> Result<Child, String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::child_path::apply_child_path(&mut cmd);
-    cmd.spawn().map_err(|e| match e.kind() {
+    ProcessSupervisor::prepare(&mut cmd);
+    let child = cmd.spawn().map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => format!("command not found: {argv0}"),
         _ => format!("could not start {argv0}: {e}"),
-    })
+    })?;
+    let supervisor = ProcessSupervisor::attach(&child);
+    Ok((child, supervisor))
 }
 
 /// Context on stdin from a detached thread, which closes the pipe when done so
-/// `cat`-style plugins terminate. Never joined: the bounded payload always fits
-/// the pipe buffer, so the write ends at once even if the plugin never reads.
+/// `cat`-style plugins terminate. Never joined. If the plugin never reads, the
+/// write may block, but only until the run ends: timeout and cap kill the whole
+/// process tree, every holder of the pipe's read end dies, and `write_all`
+/// fails and returns.
 fn feed_stdin(child: &mut Child, ctx: &PluginContext) -> Result<(), String> {
     let Some(mut stdin) = child.stdin.take() else {
         return Ok(());
@@ -203,8 +236,8 @@ fn feed_stdin(child: &mut Child, ctx: &PluginContext) -> Result<(), String> {
     std::thread::Builder::new()
         .name("widget-stdin".to_string())
         .spawn(move || {
-            // Invariant: the payload is < 11 KiB (see CONTEXT_FIELD_MAX_BYTES),
-            // below every pipe buffer, so this write completes without a reader.
+            // Invariant: the run never leaves a descendant holding the read end
+            // after it ends (`kill_tree`), so this write cannot block forever.
             let _ = stdin.write_all(payload.as_bytes()); // a plugin that closed stdin early gives EPIPE; that's fine
         }) // `stdin` drops at the end of the closure, closing the pipe
         .map(drop) // detached on purpose; the handle is not needed
@@ -252,28 +285,29 @@ fn spawn_drain(
     Ok(rx)
 }
 
-/// Poll until the child exits. Kills it and errors on deadline or when the
-/// stdout reader reports the cap was passed.
+/// Poll until the child exits. Kills the process tree and errors on deadline
+/// or when the stdout reader reports the cap was passed.
 fn wait_for_exit(
     child: &mut Child,
+    supervisor: &ProcessSupervisor,
     overflow: &AtomicBool,
     deadline: Instant,
     timeout_ms: u64,
 ) -> Result<ExitStatus, String> {
     loop {
         if overflow.load(Ordering::Relaxed) {
-            kill(child);
+            kill_tree(supervisor, child);
             return Err(cap_error());
         }
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
             Ok(None) if Instant::now() >= deadline => {
-                kill(child);
+                kill_tree(supervisor, child);
                 return Err(format!("timed out after {timeout_ms} ms"));
             }
             Ok(None) => std::thread::sleep(POLL),
             Err(e) => {
-                kill(child);
+                kill_tree(supervisor, child);
                 return Err(format!("wait failed: {e}"));
             }
         }
@@ -290,8 +324,9 @@ fn recv_until(
         .ok()
 }
 
-fn kill(child: &mut Child) {
-    let _ = child.kill(); // already exited is fine
+/// Kill every process of the plugin's tree, then reap the direct child.
+fn kill_tree(supervisor: &ProcessSupervisor, child: &mut Child) {
+    supervisor.kill_tree();
     let _ = child.wait(); // reap; nothing useful to do on failure
 }
 
@@ -439,6 +474,38 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_grandchild_and_closes_stdin() {
+        let pidfile = std::env::temp_dir().join(format!("omp-widget-gc-{}", std::process::id()));
+        let script = format!("sleep 30 & echo $! > '{}'; wait", pidfile.display());
+        let r = run_plugin(&entry(&["sh", "-c", &script], 1_000), &ctx());
+        assert!(
+            r.error
+                .as_deref()
+                .is_some_and(|e| e.contains("timed out after 1000 ms")),
+            "{r:?}"
+        );
+        let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
+            .expect("plugin wrote the sleep pid")
+            .trim()
+            .parse()
+            .expect("pid");
+        let _ = std::fs::remove_file(&pidfile);
+        // `kill(pid, 0)` probes existence without signalling; a killed
+        // grandchild is reaped by init a moment later, so poll briefly.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let alive = loop {
+            // SAFETY: plain-integer FFI call; signal 0 only probes existence.
+            let alive = unsafe { libc::kill(pid, 0) == 0 };
+            if !alive || Instant::now() >= deadline {
+                break alive;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(!alive, "sleep grandchild {pid} survived the timeout");
+    }
+
     #[test]
     fn context_fields_are_bounded() {
         let mut s = "x".repeat(100 * 1024);
@@ -455,6 +522,23 @@ mod tests {
         let mut short = "abc".to_string();
         truncate_field(&mut short);
         assert_eq!(short, "abc");
+    }
+
+    #[test]
+    fn context_bounds_all_but_project() {
+        let long = || "x".repeat(100 * 1024);
+        // Longer than the field bound: the path is carried through unchanged.
+        let project = "p".repeat(3 * CONTEXT_FIELD_MAX_BYTES);
+        let c = bounded_context(project.clone(), long(), long(), long(), long());
+        assert_eq!(c.project, project, "project is untouched");
+        for (name, field) in [
+            ("branch", &c.branch),
+            ("remote", &c.remote),
+            ("session", &c.session),
+            ("trigger", &c.trigger),
+        ] {
+            assert_eq!(field.len(), CONTEXT_FIELD_MAX_BYTES, "{name} bounded");
+        }
     }
 
     #[cfg(unix)]

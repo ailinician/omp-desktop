@@ -19,7 +19,7 @@ mod inner;
 pub mod journal;
 mod reader;
 pub mod spawn;
-mod supervisor;
+pub mod supervisor;
 
 use std::collections::HashMap;
 use std::io::Write;
