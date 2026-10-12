@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Send a waiting message right away (#47). While the agent works, each steer and follow-up listed above the prompt box has a ⚡ button: it stops the agent's current step, as Esc does, and the agent continues at once with the message (and any other steers waiting). Before, a steer waited for the agent's next step and a follow-up until the agent was done.
+- Drop images onto the prompt box (#50). Drag image files from the file manager onto the prompt box to attach them, as with the attach button or a paste: they show as thumbnails you can remove, keep the text you already typed, and go out with the next message, text or not. Other files are ignored. A file dropped anywhere else in the window is refused, and so is a link dropped outside a text field (it would have opened in your browser).
 
 ## [0.6.1] - 2026-10-12
 

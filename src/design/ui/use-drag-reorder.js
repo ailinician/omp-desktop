@@ -14,8 +14,8 @@
      never also selects a tab or closes the dropdown. Escape cancels until
      the button is released.
 
-   Pointer events, not HTML5 drag and drop: on Windows, Tauri's native file
-   drop (`dragDropEnabled`, on by default) swallows HTML5 drag events. The
+   Pointer events, not HTML5 drag and drop: they give the click-vs-drag
+   threshold, Escape and capture without the browser's drag image. The
    pointer is captured on the item, so a release outside the window still
    ends the drag. Wrapped as an IIFE (AGENTS.md "IIFE rule"). */
 

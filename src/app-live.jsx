@@ -128,6 +128,27 @@ function App() {
   React.useEffect(() => {
     bridge?.setPromptHistoryLimit(t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT);
   }, [bridge, t.promptHistoryLimit]);
+  // Refuse a file or link drop no handler took (`refusesStrayDrop`), so the
+  // webview never navigates to it now that Tauri's native file drop is off
+  // (#50). The composer's handlers run first and accept their own drops.
+  React.useEffect(() => {
+    const { refusesStrayDrop } = window.OMP_IMAGES;
+    const { isTypingTarget } = window.OMP_KEYMAP;
+    const refuse = e => {
+      if (e.defaultPrevented) return;
+      const el = e.target;
+      const onEditable = el instanceof Element && isTypingTarget(el);
+      if (!refusesStrayDrop(e.dataTransfer, onEditable)) return;
+      e.preventDefault();
+      if (e.type === "dragover") e.dataTransfer.dropEffect = "none";
+    };
+    window.addEventListener("dragover", refuse);
+    window.addEventListener("drop", refuse);
+    return () => {
+      window.removeEventListener("dragover", refuse);
+      window.removeEventListener("drop", refuse);
+    };
+  }, []);
 
   // Fetch OAuth providers whenever the login view opens (ensures fresh auth status)
   React.useEffect(() => {

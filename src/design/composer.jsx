@@ -4,7 +4,7 @@
 
 const { Icon } = window;
 const { parseMentionQuery, applyMention } = window.OMP_MENTIONS;
-const { prepareImage, imageFilesFromTransfer, imageFilesFromClipboardAsync, toDataUrl, MAX_ATTACHMENTS } = window.OMP_IMAGES;
+const { prepareImage, carriesFiles, dropHoverAfter, imageFilesFromTransfer, imageFilesFromClipboardAsync, toDataUrl, MAX_ATTACHMENTS } = window.OMP_IMAGES;
 const { isDesktop, slashMenu, midPromptSlashToken, skillMenu, matchesQuery, insertText: slashInsertText } = window.OMP_SLASH;
 const {
   entryOf: draftEntryOf, updateEntry: updateDraftEntry, pruneEntries: pruneDrafts, DRAFT_IDLE, recallInDraft,
@@ -71,6 +71,11 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const listRef = React.useRef(null);
   const attachCounterRef = React.useRef(0);
   const fileInputRef     = React.useRef(null);
+  // Image drop from the OS file manager (#50): the element the drag is over
+  // (`dropHoverAfter`) lives in a ref, so crossing children re-renders only
+  // when the highlight itself flips.
+  const [dropActive, setDropActive] = React.useState(false);
+  const dropHoverRef = React.useRef(null);
 
   const cmds = window.OMP_DATA?.commands || [];
 
@@ -381,12 +386,11 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
 
   // Pick, downscale/re-encode and queue image files as pending attachments.
   // Silently drops files that fail to decode, and drops any that would push
-  // the batch over MAX_ATTACHMENTS or MAX_TOTAL_ATTACH_BYTES, rather than
-  // blocking the rest — same policy either way: keep what fits, drop the
-  // rest of this paste/pick silently (the user can always attach the
-  // dropped ones separately).
+  // the batch over MAX_ATTACHMENTS, rather than blocking the rest: keep what
+  // fits, drop the rest of this paste/pick/drop silently (the user can always
+  // attach the dropped ones separately).
   const addFiles = async (fileList) => {
-    // The tab this paste/pick belongs to: preparation is async, and the
+    // The tab this paste/pick/drop belongs to: preparation is async, and the
     // result must not land in whichever tab is active by then.
     const target = sessionId;
     const files = Array.from(fileList || []).filter(f => f.type.startsWith("image/"));
@@ -421,6 +425,26 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   };
   const removeAttachment = (attId) =>
     updateDraft(sessionId, d => ({ ...d, attachments: d.attachments.filter(a => a.id !== attId) }));
+
+  // Image files dropped from the OS file manager (#50) go the paste/pick
+  // way (`addFiles`: same preparation, limits and tab); non-images are
+  // ignored. One handler for all four drag events (dragleave is not
+  // cancelable, so its preventDefault is a no-op).
+  const onFileDrag = (e) => {
+    if (!carriesFiles(e.dataTransfer)) return;
+    // On dragover, accepting the drop is what makes the drop event fire at all.
+    e.preventDefault();
+    if (e.type === "dragover") {
+      e.dataTransfer.dropEffect = "copy";
+      return;
+    }
+    dropHoverRef.current = dropHoverAfter(dropHoverRef.current, e.type, e.target);
+    setDropActive(dropHoverRef.current !== null);
+    if (e.type === "drop") {
+      addFiles(imageFilesFromTransfer(e.dataTransfer));
+      taRef.current?.focus();
+    }
+  };
 
   // Collapse long pastes (session-ui.js shouldCollapsePaste) into a token
   // so the textarea stays navigable; the chip strip above shows and
@@ -517,7 +541,8 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const cycleThinkingHint = hintFor("app.thinking.cycle", "⇧Tab");
 
   return (
-    <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}`}>
+    <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}${dropActive ? " drop-on" : ""}`}
+      onDragEnter={onFileDrag} onDragOver={onFileDrag} onDragLeave={onFileDrag} onDrop={onFileDrag}>
       {planMode && (
         <div className="plan-strip">
           <Icon name="plan" size={12} color="var(--amber)" />

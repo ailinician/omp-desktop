@@ -1,5 +1,5 @@
 /* ═════════════════════════════════════════════════════════════════════
-   app/image-attach.js — turn picked/pasted image Files into omp
+   app/image-attach.js — turn picked/pasted/dropped image Files into omp
    `ImageContent` blocks ({ type: "image", data: <base64>, mimeType }),
    the shape the `prompt` / `steer` / `follow_up` RPC commands accept.
    ═════════════════════════════════════════════════════════════════════ */
@@ -52,6 +52,41 @@
       || bytes > MAX_PASSTHROUGH_BYTES
       || width > MAX_EDGE_PX
       || height > MAX_EDGE_PX;
+  }
+
+  // During dragenter/dragover only `types` is readable — the data itself
+  // stays hidden until the drop. `types` is an array in current engines
+  // and a DOMStringList in older WebKit; Array.from reads both.
+  function carriesType(dt, type) {
+    return Array.from(dt?.types ?? []).includes(type);
+  }
+
+  // Whether a drag carries files from outside the page (the OS file
+  // manager). A text selection dragged inside the app carries no "Files",
+  // so it keeps the browser's own handling.
+  function carriesFiles(dt) {
+    return carriesType(dt, "Files");
+  }
+
+  // Whether a drag no handler took must be refused, so the webview's own
+  // drop never navigates to it (navigation_guard.rs would open a dropped
+  // link in the system browser). A file is refused everywhere; a link
+  // (`text/uri-list`) only off an editable field, which inserts it as text.
+  function refusesStrayDrop(dt, onEditable) {
+    return carriesFiles(dt) || (!onEditable && carriesType(dt, "text/uri-list"));
+  }
+
+  // The element a file drag is over inside the drop zone, after one
+  // dragenter/dragleave/drop that reached the zone (`null`: not over it).
+  // Engines fire dragenter on the new element before dragleave on the old
+  // one, so a leave only ends the hover when it leaves the element last
+  // entered, i.e. the next one is outside the zone. Unlike a depth count,
+  // this survives a leave that never arrives: one whose element was
+  // removed mid-drag goes to the detached node, not to the zone.
+  function dropHoverAfter(current, type, target) {
+    if (type === "dragenter") return target;
+    if (type === "dragleave") return target === current ? null : current;
+    return null;
   }
 
   // Image Files carried by a paste/drop DataTransfer. Engines differ on
@@ -155,6 +190,9 @@
     toDataUrl,
     fitWithin,
     needsReencode,
+    carriesFiles,
+    refusesStrayDrop,
+    dropHoverAfter,
     imageFilesFromTransfer,
     imageFilesFromClipboardAsync,
     prepareImage,
