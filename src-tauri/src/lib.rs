@@ -24,8 +24,6 @@ mod recent_projects;
 mod saved_sessions;
 mod stats;
 mod updater;
-// Not yet called from a Tauri command; remove once the widget commands are wired up.
-#[allow(dead_code, unused_imports)]
 mod widgets;
 mod workspace;
 
@@ -558,6 +556,66 @@ async fn workspace_reject(path: String, rel_path: String) -> Result<(), String> 
         .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Path of `<app_config_dir>/widgets.json`; managed in `setup`.
+pub struct WidgetConfigPath(pub PathBuf);
+
+#[tauri::command]
+fn widget_config_path(store: State<'_, WidgetConfigPath>) -> String {
+    store.0.to_string_lossy().into_owned()
+}
+
+/// Validated `widgets.json`. Reads the file on every call — the Tweaks
+/// panel's "Reload widgets" is this command.
+#[tauri::command]
+async fn widget_config(
+    store: State<'_, WidgetConfigPath>,
+) -> Result<widgets::WidgetConfig, String> {
+    let path = store.0.clone(); // moved into the blocking closure; `State` cannot cross it
+    tauri::async_runtime::spawn_blocking(move || widgets::load(&path))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Branch/remote context the frontend passes back into `run_widget_plugin`'s
+/// trigger bookkeeping and shows in the card tooltip.
+#[tauri::command]
+async fn widget_context(
+    path: String,
+    session_id: String,
+    trigger: String,
+) -> Result<widgets::PluginContext, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        widgets::context(Path::new(&path), &session_id, &trigger)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))
+}
+
+/// Run one configured plugin by id. The command line is resolved from the
+/// config here — the frontend can only name an id.
+#[tauri::command]
+async fn run_widget_plugin(
+    plugin_id: String,
+    path: String,
+    session_id: String,
+    trigger: String,
+    store: State<'_, WidgetConfigPath>,
+) -> Result<widgets::RunResult, String> {
+    let config_path = store.0.clone(); // see `widget_config`
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = widgets::load(&config_path)?;
+        let entry = config
+            .plugins
+            .iter()
+            .find(|p| p.id == plugin_id && p.enabled)
+            .ok_or_else(|| format!("unknown or disabled widget plugin \"{plugin_id}\""))?;
+        let ctx = widgets::context(Path::new(&path), &session_id, &trigger);
+        Ok(widgets::run_plugin(entry, &ctx))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 /// Usage statistics for the "Usage" panel — see `stats::fetch`. Scoped to
 /// `profile` (the active tab's profile — resolved the same way as
 /// `list_saved_sessions`), *not* every profile at once: `omp stats`
@@ -840,6 +898,8 @@ fn setup(app: &tauri::App) {
     app.manage(Arc::new(keybindings::overlay::OverlayStore::new(
         config_dir.join("keybindings.json"),
     )));
+    // Rail widget plugins: <app_config_dir>/widgets.json (read on demand).
+    app.manage(WidgetConfigPath(config_dir.join("widgets.json")));
     // Recently opened projects: <app_config_dir>/recent-projects.json.
     app.manage(Arc::new(recent_projects::RecentProjectsStore::new(
         config_dir.join("recent-projects.json"),
@@ -937,6 +997,10 @@ pub fn run() {
             workspace_diff,
             workspace_accept,
             workspace_reject,
+            widget_config_path,
+            widget_config,
+            widget_context,
+            run_widget_plugin,
             usage_stats,
             goal_continuation_get,
             goal_continuation_set,

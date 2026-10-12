@@ -3234,6 +3234,38 @@
       await _invokeSafe("workspace_reject", { path, relPath });
     },
 
+    // ── Rail widget plugins (src-tauri/src/widgets/) ──────────────────────
+    /** Validated widgets.json; a rejected invoke is surfaced as `fatal`. */
+    async widgetConfig() {
+      const empty = { plugins: [], errors: [] };
+      if (!window.__TAURI__) return empty;
+      try {
+        return await window.__TAURI__.core.invoke("widget_config");
+      } catch (err) {
+        return { ...empty, fatal: String(err?.message ?? err) };
+      }
+    },
+    async widgetConfigPath() {
+      return _invokeSafe("widget_config_path", {}, "");
+    },
+    /** Branch/remote of a tab's project, or empty strings when none. */
+    async widgetContext(sessionId, trigger) {
+      const path = sessionRegistry.get(sessionId)?.path ?? "";
+      const empty = { project: path, branch: "", remote: "", session: sessionId, trigger };
+      return _invokeSafe("widget_context", { path, sessionId, trigger }, empty);
+    },
+    /** Run one plugin by id for a tab. Never rejects: failures are `error`. */
+    async runWidgetPlugin(pluginId, sessionId, trigger) {
+      const path = sessionRegistry.get(sessionId)?.path ?? "";
+      const fallback = { pluginId, stdout: null, error: "desktop bridge unavailable", durationMs: 0 };
+      if (!window.__TAURI__) return fallback;
+      try {
+        return await window.__TAURI__.core.invoke("run_widget_plugin", { pluginId, path, sessionId, trigger });
+      } catch (err) {
+        return { ...fallback, error: String(err?.message ?? err) };
+      }
+    },
+
     /** Usage statistics for the active tab's profile — see usage_stats in
      *  lib.rs / stats.rs::fetch. Unlike the workspace methods above, this
      *  is not scoped to the active tab's *project*, but it IS scoped to
