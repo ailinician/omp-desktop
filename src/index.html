@@ -163,6 +163,8 @@
        Dependency-free IIFE; app/use-widgets.jsx, design/widgets/*.jsx and
        app-live.jsx destructure window.OMP_WIDGETS at top level. -->
   <script src="app/widgets.js"></script>
+  <!-- Pure run bookkeeping; app/use-widgets.jsx destructures it. -->
+  <script src="app/widgets-schedule.js"></script>
 
   <!-- Design components (unchanged — from src/design/ copy) -->
   <script src="design/tweaks/style.js"></script>
@@ -290,6 +292,9 @@
        window.OMP_SESSION_UI, window.OMP_GOAL and window.OMP_TURN_STATUS
        at top level. -->
   <script type="text/babel" src="app/use-goal-mode.jsx"></script>
+  <!-- Rail widgets hook; destructures window.OMP_WIDGETS / OMP_WIDGET_SCHEDULE
+       at top level. -->
+  <script type="text/babel" src="app/use-widgets.jsx"></script>
   <script type="text/babel" src="app/use-conversation-tree.jsx"></script>
 
   <script type="text/babel" src="app-live.jsx"></script>

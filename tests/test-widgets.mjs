@@ -148,4 +148,68 @@ check("wantsTrigger honours the plugin's list and always allows manual", () => {
 });
 check("tweakKey is namespaced", () => { assert.equal(W.tweakKey("git"), "widget:git"); });
 
+// ── schedule ──────────────────────────────────────────────────────────────
+new Function("window", readFileSync(join(root, "src/app/widgets-schedule.js"), "utf8"))(win);
+const S = win.OMP_WIDGET_SCHEDULE;
+const okResult = { ok: true, widget: { status: "ok", blocks: [], skipped: 0 }, durationMs: 5 };
+
+check("start marks running and returns run=true", () => {
+  const { state, seq, run } = S.start(S.EMPTY, "s1", "git", "activate");
+  assert.equal(run, true);
+  assert.equal(S.runOf(state, "s1", "git").state, "running");
+  assert.equal(seq, 1);
+});
+check("a second start while running is coalesced into one queued trigger", () => {
+  let { state } = S.start(S.EMPTY, "s1", "git", "activate");
+  const r2 = S.start(state, "s1", "git", "turn_end"); state = r2.state;
+  const r3 = S.start(state, "s1", "git", "manual"); state = r3.state;
+  assert.equal(r2.run, false); assert.equal(r3.run, false);
+  assert.equal(S.runOf(state, "s1", "git").queued, "manual", "latest trigger wins");
+});
+check("finish stores the result and hands back the queued trigger once", () => {
+  let { state, seq } = S.start(S.EMPTY, "s1", "git", "activate");
+  state = S.start(state, "s1", "git", "branch").state;
+  const f = S.finish(state, "s1", "git", seq, okResult);
+  assert.equal(f.next, "branch");
+  assert.equal(S.runOf(f.state, "s1", "git").state, "ok");
+  assert.equal(S.runOf(f.state, "s1", "git").queued, undefined);
+});
+check("a stale finish (old seq) is ignored", () => {
+  let { state, seq: s1 } = S.start(S.EMPTY, "s1", "git", "activate");
+  const f1 = S.finish(state, "s1", "git", s1, okResult); state = f1.state;
+  const { state: st2, seq: s2 } = S.start(state, "s1", "git", "manual"); state = st2;
+  const stale = S.finish(state, "s1", "git", s1, { ok: false, error: "old", durationMs: 1 });
+  assert.equal(S.runOf(stale.state, "s1", "git").state, "running", "old seq must not overwrite");
+  const fresh = S.finish(state, "s1", "git", s2, okResult);
+  assert.equal(S.runOf(fresh.state, "s1", "git").state, "ok");
+});
+check("late result is keyed by the session it was started for", () => {
+  let { state, seq } = S.start(S.EMPTY, "s1", "git", "activate");
+  state = S.start(state, "s2", "git", "activate").state;
+  const f = S.finish(state, "s1", "git", seq, { ok: false, error: "boom", durationMs: 1 });
+  assert.equal(S.runOf(f.state, "s1", "git").state, "error");
+  assert.equal(S.runOf(f.state, "s2", "git").state, "running");
+});
+check("an error keeps lastOkAt from the previous success and drops the widget", () => {
+  let { state, seq } = S.start(S.EMPTY, "s1", "git", "activate");
+  state = S.finish(state, "s1", "git", seq, { ...okResult, at: 1000 }).state;
+  const again = S.start(state, "s1", "git", "manual"); state = again.state;
+  state = S.finish(state, "s1", "git", again.seq, { ok: false, error: "x", durationMs: 1, at: 2000 }).state;
+  const r = S.runOf(state, "s1", "git");
+  assert.equal(r.state, "error"); assert.equal(r.lastOkAt, 1000); assert.equal(r.widget, undefined);
+});
+check("a running run keeps the previous widget for the stale display", () => {
+  let { state, seq } = S.start(S.EMPTY, "s1", "git", "activate");
+  state = S.finish(state, "s1", "git", seq, okResult).state;
+  state = S.start(state, "s1", "git", "manual").state;
+  assert.ok(S.runOf(state, "s1", "git").widget, "widget kept while running");
+});
+check("prune drops closed sessions", () => {
+  let { state } = S.start(S.EMPTY, "s1", "git", "activate");
+  state = S.start(state, "s2", "git", "activate").state;
+  state = S.prune(state, ["s2"]);
+  assert.equal(S.runOf(state, "s1", "git"), undefined);
+  assert.ok(S.runOf(state, "s2", "git"));
+});
+
 console.log(`test-widgets: ${passed} checks passed`);
