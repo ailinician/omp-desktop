@@ -22,6 +22,7 @@ Feature internals (RPC frames, state machines, measured omp behaviour) live in `
 |`external-open.md`|"Open with OMP Desktop" on macOS/Windows/Linux|`external_open.rs`, `src-tauri/packaging/`|
 |`frontend-load-order.md`|full `src/index.html` script-order rationale|`src/index.html`|
 |`release-frontend.md`|`dist/` build, CSP check, `?v=` asset stamping|`scripts/build-frontend.mjs`|
+|`docs/widgets.md`|rail widget plugins (config, contract, limits)|`src-tauri/src/widgets/`, `app/widgets*.js`, `app/use-widgets.jsx`, `design/widgets/`|
 
 ## Commands
 
@@ -58,6 +59,8 @@ Regression files are mostly named after the `src/app/<name>.js` module they cove
 |`src-tauri/src/{git,git_watcher,workspace,files}.rs`|branch/HEAD info, `.git/HEAD` watcher, Changes panel, `@`-mention paths|
 |`src-tauri/src/{omp_cli,stats,goal_config}.rs`|one-shot `omp <subcommand>` runs (Usage panel, goal auto-continue)|
 |`src-tauri/src/{approval,model_usage,updater,external_open,child_path,navigation_guard}.rs`|tool-approval rules, model MRU, updater, OS folder opens, child PATH, webview navigation guard|
+|`src-tauri/src/widgets/`|rail widget plugins: `config.rs` (`widgets.json` load/validate), `run.rs` (spawn, timeout, stdout cap, process-group kill)|
+|`src/app/widgets*.js`, `src/app/use-widgets.jsx`, `src/design/widgets/`|widget output parser + limits (`widgets.js`), per-tab scheduling (`widgets-schedule.js`), hook, card and block renderers|
 |`src-tauri/packaging/`|Info.plist, Linux `.desktop`, Windows folder verb (`.nsh` + `.wxs`)|
 |`src/live.js`|the bridge: per-session live state, `sessionRegistry`, `window.OMP_BRIDGE`|
 |`src/adapter.js`|pure RPC ↔ UI shape transforms|

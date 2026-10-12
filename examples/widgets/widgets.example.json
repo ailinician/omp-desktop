@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "plugins": [
+    { "id": "git",   "title": "Git",      "command": ["bash", "/ABSOLUTE/PATH/examples/widgets/git.sh"] },
+    { "id": "hello", "title": "Hello",    "command": ["python3", "/ABSOLUTE/PATH/examples/widgets/hello.py"], "triggers": ["manual"] },
+    { "id": "node",  "title": "Hello JS", "command": ["node", "/ABSOLUTE/PATH/examples/widgets/hello.mjs"], "enabled": false },
+    { "id": "mcp",   "title": "MCP echo", "command": ["uv", "run", "--with", "mcp", "/ABSOLUTE/PATH/examples/widgets/mcp-tool.py"], "triggers": ["manual"], "timeoutMs": 30000, "enabled": false }
+  ]
+}
