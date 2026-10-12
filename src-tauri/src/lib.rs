@@ -24,6 +24,9 @@ mod recent_projects;
 mod saved_sessions;
 mod stats;
 mod updater;
+// Not yet called from a Tauri command; remove once the widget commands are wired up.
+#[allow(dead_code, unused_imports)]
+mod widgets;
 mod workspace;
 
 use agent::AgentBridge;
