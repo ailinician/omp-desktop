@@ -11,9 +11,16 @@
 //! the plugin can only delay the result until the deadline, never past it.
 //!
 //! The context is written to stdin on its own thread, started after the
-//! readers, so a plugin that never reads stdin (or fills stdout before it
-//! does) cannot stall the caller: the poll loop alone owns the deadline. That
-//! thread is never joined; killing the child breaks the pipe and ends it.
+//! readers, so the caller never waits on the write; the poll loop alone owns
+//! the deadline. That thread is never joined.
+//!
+//! Every [`PluginContext`] string is bounded to [`CONTEXT_FIELD_MAX_BYTES`] in
+//! [`context`]. Each value is also exported as an environment variable, and
+//! Linux limits one env string to 128 KiB, so an unbounded value would fail
+//! `spawn` with E2BIG. With the bound the stdin payload (five fields plus keys,
+//! < 11 KiB) always fits a pipe buffer (>= 16 KiB on macOS, Linux and Windows),
+//! so the writer completes at once even when the plugin never reads stdin and
+//! cannot outlive the run.
 //! stderr keeps a rolling tail of [`STDERR_KEEP_BYTES`] (the end is what
 //! explains a failure) while the rest is drained and dropped.
 //!
@@ -38,6 +45,8 @@ const STDERR_KEEP_BYTES: usize = 64 * 1024;
 /// How much of a failing run's stderr (or stdout) the error keeps.
 const ERR_TAIL_CHARS: usize = 300;
 const POLL: Duration = Duration::from_millis(25);
+/// Upper bound for every [`PluginContext`] string, see the module docs.
+const CONTEXT_FIELD_MAX_BYTES: usize = 2048;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PluginContext {
@@ -70,13 +79,35 @@ pub fn context(project: &Path, session: &str, trigger: &str) -> PluginContext {
             });
         url
     });
-    PluginContext {
+    let mut ctx = PluginContext {
         project: project.to_string_lossy().into_owned(),
         branch: branch.unwrap_or_default(),
         remote: remote.unwrap_or_default(),
         session: session.to_string(),
         trigger: trigger.to_string(),
+    };
+    for field in [
+        &mut ctx.project,
+        &mut ctx.branch,
+        &mut ctx.remote,
+        &mut ctx.session,
+        &mut ctx.trigger,
+    ] {
+        truncate_field(field);
     }
+    ctx
+}
+
+/// Cut `field` to at most [`CONTEXT_FIELD_MAX_BYTES`] on a char boundary.
+fn truncate_field(field: &mut String) {
+    if field.len() <= CONTEXT_FIELD_MAX_BYTES {
+        return;
+    }
+    let mut end = CONTEXT_FIELD_MAX_BYTES;
+    while !field.is_char_boundary(end) {
+        end -= 1;
+    }
+    field.truncate(end);
 }
 
 pub fn run_plugin(entry: &PluginEntry, ctx: &PluginContext) -> RunResult {
@@ -158,8 +189,8 @@ fn spawn(entry: &PluginEntry, ctx: &PluginContext) -> Result<Child, String> {
 }
 
 /// Context on stdin from a detached thread, which closes the pipe when done so
-/// `cat`-style plugins terminate. Never joined: a plugin that does not read
-/// stdin leaves the write blocked until the child is killed or exits.
+/// `cat`-style plugins terminate. Never joined: the bounded payload always fits
+/// the pipe buffer, so the write ends at once even if the plugin never reads.
 fn feed_stdin(child: &mut Child, ctx: &PluginContext) -> Result<(), String> {
     let Some(mut stdin) = child.stdin.take() else {
         return Ok(());
@@ -172,8 +203,10 @@ fn feed_stdin(child: &mut Child, ctx: &PluginContext) -> Result<(), String> {
     std::thread::Builder::new()
         .name("widget-stdin".to_string())
         .spawn(move || {
-            let _ = stdin.write_all(payload.as_bytes()); // a plugin that never reads stdin closes the pipe; that's fine
-        })
+            // Invariant: the payload is < 11 KiB (see CONTEXT_FIELD_MAX_BYTES),
+            // below every pipe buffer, so this write completes without a reader.
+            let _ = stdin.write_all(payload.as_bytes()); // a plugin that closed stdin early gives EPIPE; that's fine
+        }) // `stdin` drops at the end of the closure, closing the pipe
         .map(drop) // detached on purpose; the handle is not needed
         .map_err(|e| format!("could not start stdin thread: {e}"))
 }
@@ -387,11 +420,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn stdin_write_cannot_outlast_the_deadline() {
-        let mut big = ctx();
-        big.remote = "x".repeat(200 * 1024);
+    fn max_size_context_does_not_block_a_plugin_that_ignores_stdin() {
+        let mut full = ctx();
+        full.session = "x".repeat(CONTEXT_FIELD_MAX_BYTES);
+        full.remote = "x".repeat(CONTEXT_FIELD_MAX_BYTES);
+        full.branch = "x".repeat(CONTEXT_FIELD_MAX_BYTES);
         let start = std::time::Instant::now();
-        let r = run_plugin(&entry(&["sh", "-c", "sleep 30"], 1_000), &big);
+        let r = run_plugin(&entry(&["sh", "-c", "sleep 30"], 1_000), &full);
         assert!(
             start.elapsed() < std::time::Duration::from_secs(5),
             "must not block on stdin"
@@ -402,6 +437,24 @@ mod tests {
                 .is_some_and(|e| e.contains("timed out after 1000 ms")),
             "{r:?}"
         );
+    }
+
+    #[test]
+    fn context_fields_are_bounded() {
+        let mut s = "x".repeat(100 * 1024);
+        truncate_field(&mut s);
+        assert!(s.len() <= CONTEXT_FIELD_MAX_BYTES);
+        assert!(s.is_char_boundary(s.len()));
+
+        // 3-byte chars: the cap falls inside a char, so the cut must back off.
+        let mut multi = "€".repeat(CONTEXT_FIELD_MAX_BYTES);
+        truncate_field(&mut multi);
+        assert!(multi.len() <= CONTEXT_FIELD_MAX_BYTES);
+        assert!(multi.chars().all(|c| c == '€'));
+
+        let mut short = "abc".to_string();
+        truncate_field(&mut short);
+        assert_eq!(short, "abc");
     }
 
     #[cfg(unix)]
