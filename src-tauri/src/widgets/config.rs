@@ -49,10 +49,11 @@ struct RawMatch {
     remote: Option<String>,
 }
 
+/// Plugin entries stay raw JSON so one malformed entry cannot fail the file.
 #[derive(serde::Deserialize)]
 struct RawFile {
     version: Option<u64>,
-    plugins: Option<Vec<RawEntry>>,
+    plugins: Option<Vec<serde_json::Value>>,
 }
 
 pub fn load(path: &Path) -> Result<WidgetConfig, String> {
@@ -72,8 +73,11 @@ pub fn load(path: &Path) -> Result<WidgetConfig, String> {
         None => return Err("widgets.json: missing \"version\"".to_string()),
     }
     let mut out = WidgetConfig::default();
-    for (i, raw) in file.plugins.unwrap_or_default().into_iter().enumerate() {
-        match validate(raw, i, &out.plugins) {
+    for (i, value) in file.plugins.unwrap_or_default().into_iter().enumerate() {
+        let result = serde_json::from_value::<RawEntry>(value)
+            .map_err(|e| format!("plugin #{i}: {e}"))
+            .and_then(|raw| validate(raw, i, &out.plugins));
+        match result {
             Ok(entry) => out.plugins.push(entry),
             Err(e) => out.errors.push(e),
         }
@@ -214,5 +218,25 @@ mod tests {
         assert!(c.errors.iter().any(|e| e.contains("Bad Id")));
         assert!(c.errors.iter().any(|e| e.contains("duplicate")));
         assert!(c.errors.iter().any(|e| e.contains("nocmd")));
+    }
+
+    #[test]
+    fn bad_entry_types_are_isolated() {
+        let p = tmp(
+            "types",
+            br#"{"version":1,"plugins":[
+            {"id":"bad","command":"true"},
+            {"id":"ok","command":["true"]},
+            {"id":"x","title":5,"command":["a"]}
+        ]}"#,
+        );
+        let c = load(&p).expect("entry type errors are not fatal");
+        assert_eq!(
+            c.plugins.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["ok"]
+        );
+        assert_eq!(c.errors.len(), 2, "{:?}", c.errors);
+        assert!(c.errors.iter().any(|e| e.contains("#0")), "{:?}", c.errors);
+        assert!(c.errors.iter().any(|e| e.contains("#2")), "{:?}", c.errors);
     }
 }
