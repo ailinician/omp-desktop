@@ -41,6 +41,59 @@ check("a drag from the file manager is a file drag; a text or link drag is not",
   assert.equal(I.carriesFiles({}), false);
 });
 
+check("a stray drop is refused for a file anywhere, for a link only off an editable field", () => {
+  const fileDrag = { types: ["Files"] };
+  const linkDrag = { types: ["text/uri-list", "text/plain"] };
+  const textDrag = { types: ["text/plain", "text/html"] };
+  assert.equal(I.refusesStrayDrop(fileDrag, false), true);
+  assert.equal(I.refusesStrayDrop(fileDrag, true), true, "a file never drops into a field as navigation");
+  assert.equal(I.refusesStrayDrop(linkDrag, false), true, "a link dropped on the chat would open the system browser");
+  assert.equal(I.refusesStrayDrop({ types: domStringList("text/uri-list") }, false), true);
+  assert.equal(I.refusesStrayDrop(linkDrag, true), false, "a link dropped into the textarea goes in as text");
+  assert.equal(I.refusesStrayDrop(textDrag, false), false, "a text selection keeps the browser's handling");
+  assert.equal(I.refusesStrayDrop(null, false), false);
+});
+
+// Replays dragenter/dragleave/drop events that reached the drop zone and
+// returns the hover after each one.
+const hoverTrace = events => {
+  let cur = null;
+  return events.map(([type, target]) => (cur = I.dropHoverAfter(cur, type, target)));
+};
+
+check("crossing children inside the drop zone keeps the hover; leaving it ends it", () => {
+  const zone = {}, textarea = {}, button = {};
+  // Engines fire dragenter on the new element before dragleave on the old.
+  const trace = hoverTrace([
+    ["dragenter", zone],
+    ["dragenter", textarea], ["dragleave", zone],
+    ["dragenter", button], ["dragleave", textarea],
+    ["dragenter", zone], ["dragleave", button],
+    ["dragleave", zone],
+  ]);
+  assert.deepEqual(trace.map(h => h !== null), [true, true, true, true, true, true, true, false]);
+});
+
+check("a leave lost to a child removed mid-drag does not leave the hover stuck", () => {
+  const zone = {}, sendButton = {}, abortButton = {};
+  // The hovered send button unmounts when a turn starts: its dragleave goes
+  // to the detached node and never reaches the zone.
+  const trace = hoverTrace([
+    ["dragenter", zone],
+    ["dragenter", sendButton], ["dragleave", zone],
+    ["dragenter", abortButton],
+    ["dragenter", zone], ["dragleave", abortButton],
+    ["dragleave", zone],
+  ]);
+  assert.equal(trace.at(-1), null);
+});
+
+check("a drop ends the hover; Escape over a child does too", () => {
+  const zone = {}, textarea = {};
+  assert.equal(hoverTrace([["dragenter", zone], ["dragenter", textarea], ["dragleave", zone], ["drop", textarea]]).at(-1), null);
+  assert.equal(hoverTrace([["dragenter", zone], ["dragenter", textarea], ["dragleave", zone], ["dragleave", textarea]]).at(-1), null);
+});
+
 check("a drop yields only its images, from items", () => {
   const png = file("a.png", "image/png");
   const pdf = file("b.pdf", "application/pdf");

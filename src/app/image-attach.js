@@ -54,6 +54,10 @@
       || height > MAX_EDGE_PX;
   }
 
+  function carriesType(dt, type) {
+    return !!dt && Array.from(dt.types ?? []).includes(type);
+  }
+
   // Whether a drag carries files from outside the page (the OS file
   // manager). During dragenter/dragover only `types` is readable — the
   // files themselves stay hidden until the drop — and a text selection
@@ -61,7 +65,28 @@
   // own handling. `types` is an array in current engines and a
   // DOMStringList in older WebKit; Array.from reads both.
   function carriesFiles(dt) {
-    return !!dt && Array.from(dt.types ?? []).includes("Files");
+    return carriesType(dt, "Files");
+  }
+
+  // Whether a drag no handler took must be refused, so the webview's own
+  // drop never navigates to it (navigation_guard.rs would open a dropped
+  // link in the system browser). A file is refused everywhere; a link
+  // (`text/uri-list`) only off an editable field, which inserts it as text.
+  function refusesStrayDrop(dt, onEditable) {
+    return carriesFiles(dt) || (!onEditable && carriesType(dt, "text/uri-list"));
+  }
+
+  // The element a file drag is over inside the drop zone, after one
+  // dragenter/dragleave/drop that reached the zone (`null`: not over it).
+  // Engines fire dragenter on the new element before dragleave on the old
+  // one, so a leave only ends the hover when it leaves the element last
+  // entered, i.e. the next one is outside the zone. Unlike a depth count,
+  // this survives a leave that never arrives: one whose element was
+  // removed mid-drag goes to the detached node, not to the zone.
+  function dropHoverAfter(current, type, target) {
+    if (type === "dragenter") return target;
+    if (type === "dragleave") return target === current ? null : current;
+    return null;
   }
 
   // Image Files carried by a paste/drop DataTransfer. Engines differ on
@@ -166,6 +191,8 @@
     fitWithin,
     needsReencode,
     carriesFiles,
+    refusesStrayDrop,
+    dropHoverAfter,
     imageFilesFromTransfer,
     imageFilesFromClipboardAsync,
     prepareImage,

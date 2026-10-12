@@ -4,7 +4,7 @@
 
 const { Icon } = window;
 const { parseMentionQuery, applyMention } = window.OMP_MENTIONS;
-const { prepareImage, carriesFiles, imageFilesFromTransfer, imageFilesFromClipboardAsync, toDataUrl, MAX_ATTACHMENTS } = window.OMP_IMAGES;
+const { prepareImage, carriesFiles, dropHoverAfter, imageFilesFromTransfer, imageFilesFromClipboardAsync, toDataUrl, MAX_ATTACHMENTS } = window.OMP_IMAGES;
 const { isDesktop, slashMenu, midPromptSlashToken, skillMenu, matchesQuery, insertText: slashInsertText } = window.OMP_SLASH;
 const {
   entryOf: draftEntryOf, updateEntry: updateDraftEntry, pruneEntries: pruneDrafts, DRAFT_IDLE, recallInDraft,
@@ -72,10 +72,10 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const attachCounterRef = React.useRef(0);
   const fileInputRef     = React.useRef(null);
   // Image drop from the OS file manager (#50). dragenter/dragleave fire
-  // for every child the pointer crosses, so the highlight follows a depth
-  // count rather than the last event.
+  // for every child the pointer crosses, so the highlight follows the
+  // element last entered (`dropHoverAfter`) rather than the last event.
   const [dropActive, setDropActive] = React.useState(false);
-  const dropDepthRef = React.useRef(0);
+  const dropHoverRef = React.useRef(null);
 
   const cmds = window.OMP_DATA?.commands || [];
 
@@ -432,11 +432,14 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   // takes the drag before the page sees it. Only a drag carrying files is
   // taken: a text selection dragged into the textarea keeps the browser's
   // own handling. Non-image files are ignored, as the picker would.
+  const trackDropHover = (e) => {
+    dropHoverRef.current = dropHoverAfter(dropHoverRef.current, e.type, e.target);
+    setDropActive(dropHoverRef.current !== null);
+  };
   const onDragEnter = (e) => {
     if (!carriesFiles(e.dataTransfer)) return;
     e.preventDefault();
-    dropDepthRef.current += 1;
-    setDropActive(true);
+    trackDropHover(e);
   };
   const onDragOver = (e) => {
     if (!carriesFiles(e.dataTransfer)) return;
@@ -445,15 +448,12 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
     e.dataTransfer.dropEffect = "copy";
   };
   const onDragLeave = (e) => {
-    if (!carriesFiles(e.dataTransfer)) return;
-    dropDepthRef.current = Math.max(0, dropDepthRef.current - 1);
-    if (dropDepthRef.current === 0) setDropActive(false);
+    if (carriesFiles(e.dataTransfer)) trackDropHover(e);
   };
   const onDrop = (e) => {
     if (!carriesFiles(e.dataTransfer)) return;
     e.preventDefault();
-    dropDepthRef.current = 0;
-    setDropActive(false);
+    trackDropHover(e);
     addFiles(imageFilesFromTransfer(e.dataTransfer));
     taRef.current?.focus();
   };

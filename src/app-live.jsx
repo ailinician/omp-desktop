@@ -128,16 +128,20 @@ function App() {
   React.useEffect(() => {
     bridge?.setPromptHistoryLimit(t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT);
   }, [bridge, t.promptHistoryLimit]);
-  // A file dropped anywhere but the composer (which takes images, #50) is
-  // refused: with Tauri's native file drop off (`dragDropEnabled: false`),
-  // the webview would otherwise open the dropped file in place of the app
-  // (navigation_guard.rs blocks that navigation, but the drop should not
-  // even look accepted). The composer's handlers run first and accept their
-  // own drops, so only unhandled ones get here.
+  // A file dropped anywhere but the composer (which takes images, #50), or a
+  // link dropped off an editable field, is refused: with Tauri's native file
+  // drop off (`dragDropEnabled: false`), the webview would otherwise navigate
+  // to it (navigation_guard.rs blocks a file and opens a link in the system
+  // browser, but the drop should not even look accepted). The composer's
+  // handlers run first and accept their own drops, so only unhandled ones
+  // get here.
   React.useEffect(() => {
-    const { carriesFiles } = window.OMP_IMAGES;
+    const { refusesStrayDrop } = window.OMP_IMAGES;
     const refuse = e => {
-      if (!carriesFiles(e.dataTransfer) || e.defaultPrevented) return;
+      if (e.defaultPrevented) return;
+      const el = e.target;
+      const onEditable = el instanceof Element && (!!el.closest("textarea, input") || el.isContentEditable);
+      if (!refusesStrayDrop(e.dataTransfer, onEditable)) return;
       e.preventDefault();
       if (e.type === "dragover") e.dataTransfer.dropEffect = "none";
     };
