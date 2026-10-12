@@ -113,10 +113,11 @@ const JobRow = React.memo(function JobRow({ msg, idx, highlighted }) {
   );
 });
 
-// Collapsible blocks (#44): `autoCollapse`/`collapseAfter` are the tweaks,
-// `collapseOverrides` this tab's `_id → collapsed` toggles, and
-// `onToggleCollapse(id, collapsed)` flips one (app/chat-collapse.js).
-function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, onAskAnswer, onAskDialogAnswer, onConfirmAsk, onCancelAsk, onGrantApproval, onStopRetry, hasProjectPath, onInspectSubagent, autoCollapse, collapseAfter, collapseOverrides, onToggleCollapse }) {
+// Collapsible blocks (#44, #43): `foldModes` (`{ thinking, tool }`) and
+// `collapseAfter` are the tweaks, `collapseOverrides` this tab's
+// `_id → collapsed` toggles, and `onToggleCollapse(id, collapsed)` flips one
+// (app/chat-collapse.js).
+function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, onAskAnswer, onAskDialogAnswer, onConfirmAsk, onCancelAsk, onGrantApproval, onStopRetry, hasProjectPath, onInspectSubagent, foldModes, collapseAfter, collapseOverrides, onToggleCollapse }) {
   const scrollRef   = React.useRef(null);
   const pinnedRef   = React.useRef(true);   // assume start pinned to bottom
   const prevTopRef  = React.useRef(0);
@@ -198,9 +199,9 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
   }
 
   const collapsed = React.useMemo(() => _CV_collapseStates(messages, {
-    auto: autoCollapse, after: collapseAfter, overrides: collapseOverrides,
+    ...foldModes, after: collapseAfter, overrides: collapseOverrides,
     horizonId: collapseHorizon, hidden: window.OMP_TURN_STATUS.isHidden,
-  }), [messages, autoCollapse, collapseAfter, collapseOverrides, collapseHorizon]);
+  }), [messages, foldModes.thinking, foldModes.tool, collapseAfter, collapseOverrides, collapseHorizon]);
 
   return (
     <div className="chat-wrap">

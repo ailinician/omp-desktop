@@ -32,7 +32,7 @@ const {
   entryOf, updateEntry, pruneEntries,
   PLAN_IDLE, togglePlan, enterPlan, approvePlan, annotatePlan, markPlanSent,
 } = window.OMP_SESSION_UI;
-const { NO_OVERRIDES: NO_COLLAPSE_OVERRIDES } = window.OMP_COLLAPSE;
+const { NO_OVERRIDES: NO_COLLAPSE_OVERRIDES, foldModes: _foldModes, overridesForAll: _collapseOverridesForAll } = window.OMP_COLLAPSE;
 
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
@@ -184,6 +184,12 @@ function App() {
   const handleToggleCollapse = React.useCallback(
     (id, collapsed) => setCollapseOverrides(m => updateEntry(m, planKey, NO_COLLAPSE_OVERRIDES, o => ({ ...o, [id]: !collapsed }))),
     [planKey]);
+  const foldModes = _foldModes(t);
+  // Collapse all / Expand all: one toggle per block in this tab, replacing
+  // the tab's earlier ones; later blocks follow the modes again.
+  const handleCollapseAll = (collapsed) => setCollapseOverrides(m => updateEntry(m, planKey, NO_COLLAPSE_OVERRIDES,
+    () => _collapseOverridesForAll(messages, collapsed, { hidden: window.OMP_TURN_STATUS.isHidden })));
+  const openTweaks = () => window.postMessage({ type: "__activate_edit_mode" }, "*");
   // Tab ids, for dropping the per-tab state of closed tabs (here and in
   // the composer's drafts). live.js rebuilds `sessions` on every snapshot,
   // streaming deltas included, so the list is memoised on the ids' content:
@@ -378,6 +384,9 @@ function App() {
     else if (c.name === "history")   { setHistoryOpen(true); }
     else if (c.name === "shortcuts") { setShortcutsOpen(true); }
     else if (c.name === "check-updates") { updater.check(); }
+    else if (c.name === "collapse-all")  { handleCollapseAll(true); }
+    else if (c.name === "expand-all")    { handleCollapseAll(false); }
+    else if (c.name === "tweaks")    { openTweaks(); }
   };
 
   const handleResumeSession = async (session) => {
@@ -530,6 +539,8 @@ function App() {
     "desktop.session.compact": () => bridge?.compact(),
     "desktop.session.export":  () => bridge?.exportHtml(),
     "desktop.update.check":    updater.check,
+    "desktop.chat.collapseAll": () => handleCollapseAll(true),
+    "desktop.chat.expandAll":  () => handleCollapseAll(false),
   };
 
   // Profile switch applies to the active tab only: its omp process is
@@ -639,7 +650,7 @@ function App() {
                     hoveredMsgIdx={hoveredMsgIdx}
                     hasProjectPath={!!activeProject?.path}
                     onInspectSubagent={subagentUi.open}
-                    autoCollapse={t.autoCollapse ?? true}
+                    foldModes={foldModes}
                     collapseAfter={t.collapseAfter}
                     collapseOverrides={tabCollapseOverrides}
                     onToggleCollapse={handleToggleCollapse}
@@ -692,7 +703,7 @@ function App() {
                   onRules={() => setRulesOpen(true)}
                   onStats={() => setStatsOpen(true)}
                   onTree={() => setTreeOpen(v => !v)}
-                  onTweaks={() => window.postMessage({ type: '__activate_edit_mode' }, '*')}
+                  onTweaks={openTweaks}
                   autosave={t.autosave ?? true}
                   onAutosave={v => setTweak("autosave", v)}
                 />
@@ -857,11 +868,12 @@ function App() {
             onChange={v => setTweak("sidebar", v)} />
         </TweakSection>
         <TweakSection label="Chat">
-          {/* Tool cards and thinking (#44, app/chat-collapse.js): a long block
-              folds to a few lines once this many newer blocks follow it. */}
-          <TweakToggle label="auto-collapse" value={t.autoCollapse ?? true}
-            onChange={v => setTweak("autoCollapse", v)} />
-          {(t.autoCollapse ?? true) && (
+          {/* Tool cards and thinking (#44, #43): modes in app/chat-collapse.js. */}
+          <TweakRadio label="thinking" value={foldModes.thinking} options={window.OMP_COLLAPSE.MODES}
+            onChange={v => setTweak("foldThinking", v)} />
+          <TweakRadio label="tool output" value={foldModes.tool} options={window.OMP_COLLAPSE.MODES}
+            onChange={v => setTweak("foldTools", v)} />
+          {Object.values(foldModes).includes("auto") && (
             <TweakSlider label="collapse after" value={window.OMP_COLLAPSE.clampAfter(t.collapseAfter)}
               min={window.OMP_COLLAPSE.MIN_AFTER} max={window.OMP_COLLAPSE.MAX_AFTER} step={1} unit=" newer"
               onChange={v => setTweak("collapseAfter", v)} />

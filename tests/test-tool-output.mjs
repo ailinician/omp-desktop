@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Regression script for the bash branch of finalizeToolCard (src/adapter.js):
-// the finished card's display lines and the text its copy button puts on
-// the clipboard (issue #33). The card shows omp's result text as streamed,
-// notices included; the copy text drops the model-facing notices omp
-// appends (exit code, wall time, artifact footer).
+// Regression script for finalizeToolCard (src/adapter.js): the bash branch's
+// display lines and the text its copy button puts on the clipboard (issue
+// #33) — the card shows omp's result text as streamed, notices included; the
+// copy text drops the model-facing notices omp appends (exit code, wall
+// time, artifact footer) — and omp's failure flag on any card (#43).
 // Run: node tests/test-tool-output.mjs
 
 import assert from "node:assert/strict";
@@ -80,6 +80,12 @@ check("the card shows the last 20 lines; the copy text keeps them all", () => {
 check("non-text result blocks are ignored", () => {
   const c = finish("png written", {}, [{ type: "image", data: "AAAA", mimeType: "image/png" }]);
   assert.equal(c.outputText, "png written");
+});
+
+check("a call omp reports as failed is marked, so a folded card stays open (#43)", () => {
+  const event = (isError) => ({ result: { content: [{ type: "text", text: "boom" }], details: { exitCode: 2 } }, isError });
+  assert.equal(finalizeToolCard(card, event(true)).isError, true);
+  assert.equal(finalizeToolCard(card, event(false)).isError, false);
 });
 
 console.log(`tool-output: ${passed} checks passed`);

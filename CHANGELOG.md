@@ -10,6 +10,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Send a waiting message right away (#47). While the agent works, each steer and follow-up listed above the prompt box has a ⚡ button: it stops the agent's current step, as Esc does, and the agent continues at once with the message (and any other steers waiting). Before, a steer waited for the agent's next step and a follow-up until the agent was done.
 - Drop images onto the prompt box (#50). Drag image files from the file manager onto the prompt box to attach them, as with the attach button or a paste: they show as thumbnails you can remove, keep the text you already typed, and go out with the next message, text or not. Other files are ignored. A file dropped anywhere else in the window is refused, and so is a link dropped outside a text field (it would have opened in your browser).
+- Collapse all / Expand all (#43): `/collapse-all` and `/expand-all` in the command bridge and the prompt box's `/` menu fold or unfold every tool card and thinking block in the current tab at once; blocks that arrive later follow your settings again. Both can be given a key in the shortcuts screen.
+- `/tweaks` opens the Tweaks panel from the command bridge or the prompt box, like the cog in the status bar.
+
+### Changed
+
+- Thinking and tool output fold separately (#43). Under Tweaks → Chat, *thinking* and *tool output* each choose auto (fold a long block once enough newer ones follow it, as before), open (never fold on their own) or folded (start folded). Folded tool output still shows a running command, an edit's diff and a call that failed. They replace the auto-collapse switch; if you had turned it off, both start as open.
+- The collapse button on tool cards and thinking now shows what a click does: a down chevron on a collapsed block expands it, and an up chevron on an open block collapses it. Before, a collapsed block showed a right chevron and an open one a down chevron, which read as "expand". The button is also larger and grows with the font size set under Tweaks → Look, like the text beside it.
 
 ## [0.6.1] - 2026-10-12
 

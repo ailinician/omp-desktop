@@ -10,6 +10,7 @@
 // this file and throw 'Identifier already declared'.
 
 (function () {
+  // `foldThinking` / `foldTools`: null until picked (OMP_COLLAPSE.foldModes).
   const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
     "theme": "aurora",
     "density": "compact",
@@ -21,7 +22,8 @@
     "fontSize":  100,
     "autosave":  true,
     "promptHistoryLimit": 100,
-    "autoCollapse": true,
+    "foldThinking": null,
+    "foldTools": null,
     "collapseAfter": 5,
     "updateCheck": true,
     "skippedUpdate": null,

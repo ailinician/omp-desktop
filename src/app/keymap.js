@@ -51,6 +51,8 @@
     { id: "desktop.session.compact", label: "Compact session",         group: "Session", scope: "global",   defaultKeys: [] },
     { id: "desktop.session.export",  label: "Export session to HTML",  group: "Session", scope: "global",   defaultKeys: [] },
     { id: "desktop.update.check",    label: "Check for updates",       group: "View",    scope: "global",   defaultKeys: [] },
+    { id: "desktop.chat.collapseAll", label: "Collapse all blocks",    group: "View",    scope: "global",   defaultKeys: [] },
+    { id: "desktop.chat.expandAll",  label: "Expand all blocks",       group: "View",    scope: "global",   defaultKeys: [] },
   ];
 
   // ── Chord algebra ─────────────────────────────────────────────────────────

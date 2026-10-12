@@ -81,6 +81,8 @@ pub const ACTION_IDS: &[&str] = &[
     "desktop.session.compact",
     "desktop.session.export",
     "desktop.update.check",
+    "desktop.chat.collapseAll",
+    "desktop.chat.expandAll",
 ];
 
 // ── public types ──────────────────────────────────────────────────────────────

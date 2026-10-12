@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Regression script for src/app/chat-collapse.js — which tool cards and
-// thinking blocks the chat shows collapsed (#44).
+// thinking blocks the chat shows collapsed (#44), per kind (#43).
 // Run: node tests/test-chat-collapse.mjs
 
 import assert from "node:assert/strict";
@@ -88,10 +88,53 @@ check("a streaming reply whose thinking grows in place gets its toggle, and ages
   assert.deepEqual(C.collapseStates(msgs, { after: 1 }), { 1: true, 2: false });
 });
 
-check("auto off: nothing collapses unless the user collapses it", () => {
+// A finished reply whose thinking runs ~20 wrapped lines.
+const think = (id, extra = {}) => ({ _id: id, kind: "assistant", thought: "word ".repeat(400), ...extra });
+const edit  = (id, extra = {}) => ({ _id: id, kind: "tool", tool: "edit", status: "ok", diff: new Array(10).fill({}), ...extra });
+
+check("open: nothing collapses unless the user collapses it", () => {
   const msgs = longRun(6);
-  const states = C.collapseStates(msgs, { auto: false, after: 1, overrides: { 2: true } });
+  const states = C.collapseStates(msgs, { thinking: "open", tool: "open", after: 1, overrides: { 2: true } });
   assert.deepEqual(states, { 1: false, 2: true, 3: false, 4: false, 5: false, 6: false });
+});
+
+check("folded tool output: every card starts collapsed, short and newest ones too", () => {
+  const msgs = [bash(1, LONG), bash(2, SHORT), bash(3, LONG)];
+  assert.deepEqual(C.collapseStates(msgs, { tool: "folded", after: 30 }), { 1: true, 2: true, 3: true });
+});
+
+check("folded tool output keeps a running card, an edit's diff and a failed call open", () => {
+  const msgs = [edit(1), bash(2, LONG, { isError: true }), bash(3, LONG, { status: "running" }), bash(4, LONG)];
+  assert.deepEqual(C.collapseStates(msgs, { tool: "folded", after: 1 }), { 1: false, 2: false, 3: false, 4: true });
+});
+
+check("auto collapses an old edit and an old failed call like any other card", () => {
+  const msgs = [edit(1), bash(2, LONG, { isError: true }), ...longRun(2, 3)];
+  assert.deepEqual(C.collapseStates(msgs, { after: 2 }), { 1: true, 2: true, 3: false, 4: false });
+});
+
+check("folded thinking starts collapsed, even while the reply streams", () => {
+  const msgs = [think(1), think(2, { streaming: true })];
+  assert.deepEqual(C.collapseStates(msgs, { thinking: "folded", after: 30 }), { 1: true, 2: true });
+});
+
+check("each kind follows its own mode", () => {
+  const msgs = [think(1), bash(2, LONG), think(3), bash(4, LONG)];
+  assert.deepEqual(C.collapseStates(msgs, { thinking: "open", tool: "folded", after: 1 }),
+    { 1: false, 2: true, 3: false, 4: true });
+  assert.deepEqual(C.collapseStates(msgs, { thinking: "folded", tool: "open", after: 1 }),
+    { 1: true, 2: false, 3: true, 4: false });
+});
+
+check("in auto, blocks of the other kind still age a block, whatever their own mode", () => {
+  const msgs = [bash(1, LONG), think(2), think(3)];
+  assert.deepEqual(C.collapseStates(msgs, { thinking: "open", tool: "auto", after: 2 }), { 1: true, 2: false, 3: false });
+});
+
+check("the user's toggle beats folded and open", () => {
+  const msgs = [bash(1, LONG), think(2)];
+  assert.deepEqual(C.collapseStates(msgs, { thinking: "open", tool: "folded", overrides: { 1: false, 2: true } }),
+    { 1: false, 2: true });
 });
 
 check("while reading history, blocks after the horizon do not collapse older ones", () => {
@@ -152,6 +195,34 @@ check("a collapsed bash card shows its last non-blank lines, notices included", 
   const out = ["18", "19", "20", "", "", "Wall time: 0.04 seconds", ""].map(line => ({ line, color: "fg-3" }));
   assert.deepEqual(C.bashPreview(out).map(l => l.line), ["19", "20", "Wall time: 0.04 seconds"]);
   assert.deepEqual(C.bashPreview([{ line: "", color: "fg" }]), []);
+});
+
+check("foldModes: a picked mode wins; unset or unknown falls back to the old auto-collapse switch", () => {
+  assert.deepEqual(C.foldModes({}), { thinking: "auto", tool: "auto" });
+  assert.deepEqual(C.foldModes(undefined), { thinking: "auto", tool: "auto" });
+  assert.deepEqual(C.foldModes({ foldThinking: null, foldTools: null, autoCollapse: false }), { thinking: "open", tool: "open" });
+  assert.deepEqual(C.foldModes({ foldThinking: "folded", foldTools: "bogus", autoCollapse: false }), { thinking: "folded", tool: "open" });
+  assert.deepEqual(C.foldModes({ foldTools: "folded", autoCollapse: true }), { thinking: "auto", tool: "folded" });
+});
+
+check("overridesForAll sets every block with a toggle, skips tiny and hidden ones; later blocks follow the modes", () => {
+  const msgs = [bash(1, LONG), bash(2, TINY), think(3), bash(4, LONG, { superseded: true }), bash(5, SHORT)];
+  const hidden = m => !!m.superseded;
+  const all = C.overridesForAll(msgs, true, { hidden });
+  assert.deepEqual(all, { 1: true, 3: true, 5: true });
+  assert.deepEqual(C.overridesForAll(msgs, false, { hidden }), { 1: false, 3: false, 5: false });
+  const later = [...msgs, bash(6, LONG)];
+  assert.deepEqual(C.collapseStates(later, { after: 30, overrides: all, hidden }), { 1: true, 3: true, 5: true, 6: false });
+});
+
+check("Expand all covers a running card still too short for a toggle: it stays expanded once it grows", () => {
+  const running = bash(1, 0, { status: "running" });
+  const all = C.overridesForAll([running], false);
+  assert.deepEqual(all, { 1: false });
+  const finished = bash(1, LONG);
+  assert.deepEqual(C.collapseStates([finished], { tool: "folded", overrides: all }), { 1: false });
+  // Without the toggle, folded would have collapsed it.
+  assert.deepEqual(C.collapseStates([finished], { tool: "folded" }), { 1: true });
 });
 
 console.log(`chat-collapse: ${passed} checks passed`);

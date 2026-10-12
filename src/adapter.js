@@ -344,7 +344,8 @@
       }
     }
 
-    return { ...card, status: "ok", duration, ...extra };
+    // `isError`: omp's verdict; a failed call stays open under "folded".
+    return { ...card, status: "ok", duration, isError: !!event.isError, ...extra };
   }
 
   // ── tool_execution_update → partial card update (streaming) ─────────────────

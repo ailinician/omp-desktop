@@ -281,8 +281,14 @@
    app/chat-collapse.js decides; ui/collapse-toggle.jsx is the control.
    A collapsed block keeps `--collapse-lines` (set on .chat-pad from
    OMP_COLLAPSE.PREVIEW_LINES) in view and fades out where it is cut. */
-.btn.icon.collapse-toggle { flex: none; width: 20px; height: 20px; }
+/* Sized in em of the button's rem-based text size, so the control grows
+   with the font-size tweak and the density like the text beside it. */
+.btn.icon.collapse-toggle { flex: none; width: 2em; height: 2em; }
 .btn.collapse-toggle:focus-visible { outline-offset: -2px; }
+/* The icon shows what a click does: a down chevron expands a collapsed
+   block, the same chevron turned up collapses an open one. */
+.collapse-toggle svg { width: 1.75em; height: 1.75em; transition: transform 120ms; }
+.collapse-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
 .collapse-clip {
   max-height: calc(var(--collapse-lines) * 1.55em + 18px);
   overflow: hidden;
