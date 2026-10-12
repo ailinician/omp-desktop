@@ -585,10 +585,11 @@ async fn widget_context(
     trigger: String,
 ) -> Result<widgets::PluginContext, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        widgets::context(Path::new(&path), &session_id, &trigger)
+        widgets::validate_widget_args(&path, &trigger)?;
+        Ok(widgets::context(Path::new(&path), &session_id, &trigger))
     })
     .await
-    .map_err(|e| format!("join error: {e}"))
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 /// Run one configured plugin by id. The command line is resolved from the
@@ -603,6 +604,7 @@ async fn run_widget_plugin(
 ) -> Result<widgets::RunResult, String> {
     let config_path = store.0.clone(); // see `widget_config`
     tauri::async_runtime::spawn_blocking(move || {
+        widgets::validate_widget_args(&path, &trigger)?;
         let config = widgets::load(&config_path)?;
         let entry = config
             .plugins

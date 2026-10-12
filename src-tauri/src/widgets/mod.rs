@@ -7,5 +7,5 @@
 pub mod config;
 pub mod run;
 
-pub use config::{load, WidgetConfig};
+pub use config::{load, validate_widget_args, WidgetConfig};
 pub use run::{context, run_plugin, PluginContext, RunResult};

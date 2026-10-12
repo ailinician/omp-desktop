@@ -55,13 +55,13 @@ PY
 | `version` | yes | Must be `1`. Anything else rejects the whole file with one error card in the rail. |
 | `id` | yes | `[a-z0-9-]{1,32}`, unique. Also the key of the card's Tweaks toggle (`widget:<id>`). |
 | `title` | no | Shown in the card head; default = `id`. |
-| `command` | yes | argv array; element 0 is resolved via PATH. No shell interpretation. `~` is **not** expanded; write absolute paths. |
+| `command` | yes | argv array; element 0 is a bare program name (resolved via PATH) or an absolute path; a relative path such as `./x` or `bin/x` is rejected, because the working directory is the untrusted project. No shell interpretation. `~` is **not** expanded; write absolute paths, also for script *arguments*. |
 | `match` | no | All keys optional, all given keys must match. `path`: the project path starts with this prefix. `remote`: the fetch URL of the default remote contains this substring. No `match` = applies to every project. |
 | `triggers` | no | Default all four: `activate` (tab became active or project changed), `turn_end` (streaming went true→false), `branch` (branch chip changed), `manual` (refresh button). `manual` is always allowed even if omitted. |
 | `timeoutMs` | no | Default 10000, clamped 1000..60000. |
 | `enabled` | no | Default true. Disabled plugins are listed but never run. |
 
-A malformed plugin entry is skipped with an error card for that entry; the other plugins still run. A missing `widgets.json` means no plugins and no error.
+At most 32 entries are read; the rest are ignored with one error card. A malformed plugin entry is skipped with an error card for that entry; the other plugins still run. A missing `widgets.json` means no plugins and no error.
 
 ## Input
 

@@ -8,6 +8,8 @@ pub const TIMEOUT_DEFAULT_MS: u64 = 10_000;
 pub const TIMEOUT_MIN_MS: u64 = 1_000;
 pub const TIMEOUT_MAX_MS: u64 = 60_000;
 pub const TRIGGERS: [&str; 4] = ["activate", "turn_end", "branch", "manual"];
+/// Entries past this many in `widgets.json` are not validated; one error reports them.
+pub const MAX_PLUGINS: usize = 32;
 const SUPPORTED_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -73,7 +75,14 @@ pub fn load(path: &Path) -> Result<WidgetConfig, String> {
         None => return Err("widgets.json: missing \"version\"".to_string()),
     }
     let mut out = WidgetConfig::default();
-    for (i, value) in file.plugins.unwrap_or_default().into_iter().enumerate() {
+    let entries = file.plugins.unwrap_or_default();
+    if entries.len() > MAX_PLUGINS {
+        out.errors.push(format!(
+            "widgets.json: {} plugin entries ignored (at most {MAX_PLUGINS} are read)",
+            entries.len() - MAX_PLUGINS
+        ));
+    }
+    for (i, value) in entries.into_iter().take(MAX_PLUGINS).enumerate() {
         let result = serde_json::from_value::<RawEntry>(value)
             .map_err(|e| format!("plugin #{i}: {e}"))
             .and_then(|raw| validate(raw, i, &out.plugins));
@@ -83,6 +92,22 @@ pub fn load(path: &Path) -> Result<WidgetConfig, String> {
         }
     }
     Ok(out)
+}
+
+/// Checks the IPC arguments of `widget_context` / `run_widget_plugin`: a known
+/// trigger, and a project path that is empty (tab without project) or an
+/// absolute existing directory.
+pub fn validate_widget_args(path: &str, trigger: &str) -> Result<(), String> {
+    if !TRIGGERS.contains(&trigger) {
+        return Err("invalid trigger".to_string());
+    }
+    if !path.is_empty() {
+        let p = Path::new(path);
+        if !p.is_absolute() || !p.is_dir() {
+            return Err("project path must be an absolute directory".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn id_ok(id: &str) -> bool {
@@ -107,6 +132,14 @@ fn validate(raw: RawEntry, index: usize, seen: &[PluginEntry]) -> Result<PluginE
     if command.first().is_none_or(String::is_empty) {
         return Err(format!(
             "plugin \"{id}\": command must be a non-empty argv array"
+        ));
+    }
+    // The working directory is the untrusted project: a relative program path
+    // (`./x`, `bin/x`) would resolve inside it.
+    let argv0 = command.first().map_or("", String::as_str);
+    if argv0.contains(['/', '\\']) && !Path::new(argv0).is_absolute() {
+        return Err(format!(
+            "plugin \"{id}\": command path must be absolute or a bare program name"
         ));
     }
     let mut triggers: Vec<String> = raw.triggers.map_or_else(
@@ -218,6 +251,73 @@ mod tests {
         assert!(c.errors.iter().any(|e| e.contains("Bad Id")));
         assert!(c.errors.iter().any(|e| e.contains("duplicate")));
         assert!(c.errors.iter().any(|e| e.contains("nocmd")));
+    }
+
+    #[test]
+    fn relative_command_paths_are_rejected() {
+        let abs = if cfg!(windows) {
+            "C:\\x\\run"
+        } else {
+            "/abs/x"
+        };
+        let body = format!(
+            r#"{{"version":1,"plugins":[
+            {{"id":"dot","command":["./x"]}},
+            {{"id":"sub","command":["bin/x"]}},
+            {{"id":"back","command":["bin\\x"]}},
+            {{"id":"abs","command":[{abs:?}]}},
+            {{"id":"bare","command":["bash"]}}
+        ]}}"#
+        );
+        let c = load(&tmp("argv0", body.as_bytes())).expect("ok");
+        assert_eq!(
+            c.plugins.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["abs", "bare"]
+        );
+        assert_eq!(c.errors.len(), 3, "{:?}", c.errors);
+        assert!(
+            c.errors
+                .iter()
+                .all(|e| e.contains("command path must be absolute or a bare program name")),
+            "{:?}",
+            c.errors
+        );
+    }
+
+    #[test]
+    fn plugin_count_is_capped() {
+        let entries: Vec<String> = (0..=MAX_PLUGINS)
+            .map(|i| format!(r#"{{"id":"p{i}","command":["true"]}}"#))
+            .collect();
+        let body = format!(r#"{{"version":1,"plugins":[{}]}}"#, entries.join(","));
+        let c = load(&tmp("cap", body.as_bytes())).expect("ok");
+        assert_eq!(c.plugins.len(), MAX_PLUGINS);
+        assert_eq!(c.errors.len(), 1, "{:?}", c.errors);
+        assert!(
+            c.errors[0].contains("1 plugin entries ignored"),
+            "{:?}",
+            c.errors
+        );
+    }
+
+    #[test]
+    fn widget_args_are_validated() {
+        let dir = std::env::temp_dir();
+        let dir = dir.to_str().expect("utf-8 temp dir");
+        assert_eq!(validate_widget_args(dir, "manual"), Ok(()));
+        assert_eq!(validate_widget_args("", "turn_end"), Ok(()), "no project");
+        assert_eq!(
+            validate_widget_args(dir, "rm -rf"),
+            Err("invalid trigger".to_string())
+        );
+        let msg = Err("project path must be an absolute directory".to_string());
+        assert_eq!(validate_widget_args("relative/dir", "manual"), msg);
+        // "." exists, so only the absoluteness check rejects it.
+        assert_eq!(validate_widget_args(".", "manual"), msg);
+        assert_eq!(
+            validate_widget_args(&format!("{dir}/omp-widgets-no-such-dir"), "manual"),
+            msg
+        );
     }
 
     #[test]

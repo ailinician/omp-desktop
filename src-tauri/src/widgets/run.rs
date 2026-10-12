@@ -518,8 +518,15 @@ mod tests {
     fn context_fields_are_bounded() {
         let mut s = "x".repeat(100 * 1024);
         truncate_field(&mut s);
-        assert!(s.len() <= CONTEXT_FIELD_MAX_BYTES);
-        assert!(s.is_char_boundary(s.len()));
+        assert_eq!(s.len(), CONTEXT_FIELD_MAX_BYTES);
+
+        // 2-byte chars, 3000 bytes: the cut must keep only whole chars.
+        let mut umlauts = "ä".repeat(1500);
+        truncate_field(&mut umlauts);
+        assert!(umlauts.len() <= CONTEXT_FIELD_MAX_BYTES);
+        let bytes = umlauts.into_bytes();
+        let text = String::from_utf8(bytes).expect("cut left valid UTF-8");
+        assert_eq!(text.chars().last(), Some('ä'), "last char is complete");
 
         // 3-byte chars: the cap falls inside a char, so the cut must back off.
         let mut multi = "€".repeat(CONTEXT_FIELD_MAX_BYTES);
@@ -536,9 +543,19 @@ mod tests {
     fn context_bounds_all_but_project() {
         let long = || "x".repeat(100 * 1024);
         // Longer than the field bound: the path is carried through unchanged.
-        let project = "p".repeat(3 * CONTEXT_FIELD_MAX_BYTES);
-        let c = bounded_context(project.clone(), long(), long(), long(), long());
-        assert_eq!(c.project, project, "project is untouched");
+        let c = bounded_context(
+            "p".repeat(3 * CONTEXT_FIELD_MAX_BYTES),
+            long(),
+            long(),
+            long(),
+            long(),
+        );
+        assert_eq!(
+            c.project.len(),
+            3 * CONTEXT_FIELD_MAX_BYTES,
+            "project is untouched"
+        );
+        assert!(c.project.bytes().all(|b| b == b'p'));
         for (name, field) in [
             ("branch", &c.branch),
             ("remote", &c.remote),
