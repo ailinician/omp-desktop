@@ -40,6 +40,16 @@ check("version 2 is rejected with the supported version named", () => {
   assert.equal(r.ok, false);
   assert.match(r.error, /version 2.*supports 1/);
 });
+check("non-primitive version is an error, not an exception", () => {
+  const r = W.parseOutput('{"version":{"toString":null}}');
+  assert.equal(r.ok, false);
+  assert.match(r.error, /invalid version/);
+});
+check("string version is rejected", () => {
+  const r = out({ version: "1", blocks: [] });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /invalid version/);
+});
 check("missing blocks array is an error", () => {
   assert.equal(out({ version: 1 }).ok, false);
 });

@@ -113,7 +113,7 @@ Top level:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `version` | yes | Must be `1`; anything else → error card "plugin reports version N, this desktop supports 1". |
+| `version` | yes | Must be the number `1`; another number → error card "plugin reports version N, this desktop supports 1"; a non-number → "plugin reports an invalid version, …". |
 | `status` | no | `ok` \| `warn` \| `error` \| `neutral` (default `neutral`); tints the card head dot. |
 | `blocks` | yes | Array, max 32. |
 

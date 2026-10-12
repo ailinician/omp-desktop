@@ -48,7 +48,13 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
     setSched(started.state); schedRef.current = started.state;
     if (!started.run) return;
     bridge.runWidgetPlugin(plugin.id, sid, trigger).then(res => {
-      const parsed = res.error != null ? { ok: false, error: res.error } : _UW.parseOutput(res.stdout ?? "");
+      let parsed;
+      try {
+        parsed = res.error != null ? { ok: false, error: res.error } : _UW.parseOutput(res.stdout ?? "");
+      } catch (err) {
+        // finish() must always run, or the plugin's slot stays "running" forever.
+        parsed = { ok: false, error: "could not parse plugin output: " + String(err?.message ?? err) };
+      }
       const done = _UWS.finish(schedRef.current, sid, plugin.id, started.seq, { ...parsed, durationMs: res.durationMs });
       setSched(done.state); schedRef.current = done.state;
       // A tab closed while its run was in flight must not spawn the follow-up.

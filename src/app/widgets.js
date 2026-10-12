@@ -51,6 +51,7 @@
       return { ok: false, error: `stdout is not JSON: ${clip(String(stdout ?? ""), 120).trim()}` };
     }
     if (!doc || typeof doc !== "object") return { ok: false, error: "stdout is not a JSON object" };
+    if (typeof doc.version !== "number") return { ok: false, error: `plugin reports an invalid version, this desktop supports ${VERSION}` };
     if (doc.version !== VERSION) return { ok: false, error: `plugin reports version ${doc.version}, this desktop supports ${VERSION}` };
     if (!Array.isArray(doc.blocks)) return { ok: false, error: "output has no \"blocks\" array" };
     let skipped = 0;
