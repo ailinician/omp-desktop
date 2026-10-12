@@ -151,7 +151,7 @@ fn run_inner(entry: &PluginEntry, ctx: &PluginContext) -> Result<String, String>
     let (mut child, supervisor) = spawn(entry, ctx)?;
 
     let (Some(out_pipe), Some(err_pipe)) = (child.stdout.take(), child.stderr.take()) else {
-        kill_tree(&supervisor, &mut child);
+        terminate(&supervisor, &mut child);
         return Err("stdout or stderr pipe missing".to_string());
     };
     let overflow = Arc::new(AtomicBool::new(false));
@@ -160,10 +160,10 @@ fn run_inner(entry: &PluginEntry, ctx: &PluginContext) -> Result<String, String>
         STDOUT_CAP_BYTES,
         Some(Arc::clone(&overflow)), // the reader thread raises the flag, this thread polls it
     )
-    .inspect_err(|_| kill_tree(&supervisor, &mut child))?;
+    .inspect_err(|_| terminate(&supervisor, &mut child))?;
     let stderr_rx = spawn_drain(err_pipe, STDERR_KEEP_BYTES, None)
-        .inspect_err(|_| kill_tree(&supervisor, &mut child))?;
-    feed_stdin(&mut child, ctx).inspect_err(|_| kill_tree(&supervisor, &mut child))?;
+        .inspect_err(|_| terminate(&supervisor, &mut child))?;
+    feed_stdin(&mut child, ctx).inspect_err(|_| terminate(&supervisor, &mut child))?;
 
     let status = wait_for_exit(
         &mut child,
@@ -296,18 +296,18 @@ fn wait_for_exit(
 ) -> Result<ExitStatus, String> {
     loop {
         if overflow.load(Ordering::Relaxed) {
-            kill_tree(supervisor, child);
+            terminate(supervisor, child);
             return Err(cap_error());
         }
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
             Ok(None) if Instant::now() >= deadline => {
-                kill_tree(supervisor, child);
+                terminate(supervisor, child);
                 return Err(format!("timed out after {timeout_ms} ms"));
             }
             Ok(None) => std::thread::sleep(POLL),
             Err(e) => {
-                kill_tree(supervisor, child);
+                terminate(supervisor, child);
                 return Err(format!("wait failed: {e}"));
             }
         }
@@ -324,9 +324,17 @@ fn recv_until(
         .ok()
 }
 
-/// Kill every process of the plugin's tree, then reap the direct child.
-fn kill_tree(supervisor: &ProcessSupervisor, child: &mut Child) {
+/// Kill the plugin's process tree, then reap the direct child.
+///
+/// `ProcessSupervisor::kill_tree` is a no-op when the supervisor could not be
+/// attached (on Windows, creating or assigning the Job Object can fail). The
+/// direct-child `kill` is the fallback so the following `wait` cannot block on a
+/// plugin that is still running. After a successful tree kill it is idempotent:
+/// on an already-dead process `Child::kill` returns `Ok` or `InvalidInput`, and
+/// both are ignored.
+fn terminate(supervisor: &ProcessSupervisor, child: &mut Child) {
     supervisor.kill_tree();
+    let _ = child.kill();
     let _ = child.wait(); // reap; nothing useful to do on failure
 }
 
