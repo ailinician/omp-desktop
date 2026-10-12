@@ -19,9 +19,14 @@ A widget is a small program, in any language, that the desktop runs on demand. I
 
 A ten-line shell script works the same way:
 
-```sh
-#!/bin/sh
-printf '{"version":1,"blocks":[{"type":"text","text":"project: %s"}]}\n' "$OMP_WIDGET_PROJECT"
+```bash
+#!/usr/bin/env bash
+python3 - "$OMP_WIDGET_PROJECT" "$OMP_WIDGET_BRANCH" <<'PY'
+import json, sys
+project, branch = sys.argv[1], sys.argv[2]
+print(json.dumps({"version": 1, "status": "ok", "blocks": [
+    {"type": "kv", "rows": [{"k": "project", "v": project}, {"k": "branch", "v": branch}]}]}))
+PY
 ```
 
 ## Config reference
