@@ -2815,6 +2815,24 @@
       const data = await _sendWithResponse({ type: "promote_queued_message", message: text });
       return data?.promoted === true;
     },
+    /** ⚡ on a queue-strip row (#47): deliver the message now rather than
+     *  at the agent's next step. omp has no "deliver this one now" command,
+     *  but after a user `abort` it resumes the run at once with its steering
+     *  queue (agent-session `#drainStrandedQueuedMessages`; follow-ups keep
+     *  waiting). So a follow-up is promoted to a steer first, then the
+     *  running step is aborted exactly as Esc does — a running command is
+     *  killed and a goal pauses — and omp continues with every queued steer,
+     *  this one among them, images included. Nothing is aborted while the
+     *  agent is not running (the promote alone then starts the turn), nor
+     *  after a switch away from the tab during the promote: the message
+     *  still goes at the next step. Same result contract as
+     *  `removeQueuedMessage`. */
+    async sendQueuedNow(text, queue) {
+      const origin = activeSessionId;
+      if (queue === "followUp" && !(await this.promoteQueuedMessage(text))) return false;
+      if (activeSessionId === origin && state.isStreaming) this.abort();
+      return true;
+    },
     // ── Goal mode (app/goal.js) ──────────────────────────────────────────────
     /** Starts a goal on the active tab: what the composer sends in goal
      *  mode. `goal create` goes first, so the objective's turn already

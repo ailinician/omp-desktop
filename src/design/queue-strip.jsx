@@ -1,10 +1,12 @@
 /* queue-strip.jsx — the steers and follow-ups omp holds for the agent,
    above the composer. One row per message, from omp's own queue snapshot
    (app/message-queue.js) plus "sending" rows omp has not acknowledged
-   yet. ✕ removes a message, ✎ takes it back into the prompt box, ↑ turns
-   a follow-up into a steer. Every action is omp's: a row only goes away
-   with omp's next queue snapshot, and `false` from the bridge means the
-   message was already delivered. composer.jsx re-keys this per tab. */
+   yet. ⚡ (while the agent works) stops the current step so the message
+   goes in at once, ↑ turns a follow-up into a steer, ✎ takes a message
+   back into the prompt box, ✕ removes it. Every action is omp's: a row
+   only goes away with omp's next queue snapshot, and `false` from the
+   bridge means the message was already delivered. composer.jsx re-keys
+   this per tab. */
 
 const { Icon: _QS_Icon } = window;
 const { rows: _QS_rows } = window.OMP_QUEUE;
@@ -14,7 +16,7 @@ const _QS_NOTICE_MS = 4000;
 // The shared ghost icon button (styles.css), sized down for the row.
 const _QS_BTN = "btn icon ghost queue-btn";
 
-function QueueStrip({ queue, sending, onRemove, onPromote, onEdit }) {
+function QueueStrip({ queue, sending, canSendNow, onSendNow, onRemove, onPromote, onEdit }) {
   const rows = React.useMemo(() => _QS_rows(queue, sending), [queue, sending]);
   // One request at a time across the strip: omp acts on the first
   // matching message, so a second request for a duplicate text would
@@ -53,6 +55,13 @@ function QueueStrip({ queue, sending, onRemove, onPromote, onEdit }) {
             <span className="queue-text" title={r.text}>{r.text}</span>
             {note && <span className="queue-note">{note}</span>}
             {!r.sending && (<>
+              {canSendNow && (
+                <button className={_QS_BTN} disabled={busy} onClick={() => run(r, onSendNow)}
+                  title="send now: stop the agent's current step (as Esc does) and deliver this message at once"
+                  aria-label="send now">
+                  <_QS_Icon name="bolt" size={11} />
+                </button>
+              )}
               {r.kind === "followUp" && (
                 <button className={_QS_BTN} disabled={busy} onClick={() => run(r, onPromote)}
                   title="steer now: deliver at the agent's next step" aria-label="steer now">

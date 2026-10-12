@@ -305,6 +305,7 @@ function App() {
   // Queue strip actions: resolve `true` once omp edited its queue.
   const handleRemoveQueued  = (text, kind) => bridge?.removeQueuedMessage(text, kind);
   const handlePromoteQueued = text => bridge?.promoteQueuedMessage(text);
+  const handleSendQueuedNow = (text, kind) => bridge?.sendQueuedNow(text, kind);
 
   // CommandBridge (⌘K) picking a non-desktop (RPC) command — no local
   // handler exists for it, unlike handleCommand's desktop entries. It has
@@ -655,6 +656,7 @@ function App() {
                     queueSending={queueSending}
                     onRemoveQueued={handleRemoveQueued}
                     onPromoteQueued={handlePromoteQueued}
+                    onSendQueuedNow={handleSendQueuedNow}
                   />
                 </>)}
                 <StatusBar
