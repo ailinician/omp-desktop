@@ -1,0 +1,27 @@
+/* layout/widgets.css — rail widget plugin cards (design/widgets/). */
+.wdg-card { display: flex; flex-direction: column; gap: 6px; }
+.wdg-card .rail-card-head { gap: 6px; }
+.wdg-meta { margin-left: auto; }
+.wdg-stale > :not(.rail-card-head) { opacity: 0.5; }
+.wdg-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-5); flex: none; }
+.tone-ok    > .rail-card-head .wdg-dot, .wdg-item.tone-ok .wdg-dot, .wdg-status.tone-ok .wdg-dot    { background: var(--accent); }
+.tone-warn  > .rail-card-head .wdg-dot, .wdg-item.tone-warn .wdg-dot, .wdg-status.tone-warn .wdg-dot  { background: var(--amber); }
+.tone-error > .rail-card-head .wdg-dot, .wdg-item.tone-error .wdg-dot, .wdg-status.tone-error .wdg-dot { background: var(--rose); }
+.wdg-label { color: var(--fg-4); font-size: var(--d-text-xs); }
+.wdg-value { color: var(--fg-2); font-size: var(--d-text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wdg-status, .wdg-item { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.wdg-number { display: flex; align-items: baseline; gap: 6px; }
+.wdg-number-value { font-size: var(--d-text-lg); color: var(--fg); }
+.wdg-tube { height: 4px; border-radius: 2px; background: color-mix(in oklab, var(--fg-5) 40%, transparent); overflow: hidden; }
+.wdg-fill { height: 100%; background: var(--accent); }
+.wdg-text { color: var(--fg-3); font-size: var(--d-text-sm); white-space: pre-wrap; word-break: break-word; }
+.wdg-kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; }
+.wdg-list { display: flex; flex-direction: column; gap: 3px; }
+.wdg-item-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.wdg-item-label { color: var(--fg-2); font-size: var(--d-text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wdg-item-detail { color: var(--fg-4); font-size: var(--d-text-xs); }
+.wdg-item-actions { display: none; gap: 2px; flex: none; }
+.wdg-item:hover .wdg-item-actions { display: flex; }
+.wdg-link { justify-content: flex-start; height: 22px; }
+.wdg-error { color: var(--rose); font-size: var(--d-text-xs); font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word; }
+.wdg-note { color: var(--fg-5); font-size: var(--d-text-xs); }
