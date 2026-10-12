@@ -5,5 +5,7 @@
 //! one implementation and one regression test.
 
 pub mod config;
+pub mod run;
 
 pub use config::{load, PluginEntry, WidgetConfig};
+pub use run::{context, run_plugin, PluginContext, RunResult};
