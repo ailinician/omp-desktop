@@ -7,10 +7,14 @@ const { OMP_WIDGETS: _UW, OMP_WIDGET_SCHEDULE: _UWS } = window;
 
 function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, streaming, sessionIds, tweaks }) {
   const [config, setConfig] = React.useState({ plugins: [], errors: [], fatal: null, path: "" });
-  const [ctx, setCtx]       = React.useState({ project: "", remote: "" });
+  // `ctx` carries the session it was read for, so a stale one (tab just
+  // switched, widgetContext still in flight) is never matched against the new tab.
+  const [ctx, setCtx]       = React.useState({ sessionId: null, project: "", remote: "" });
   const [sched, setSched]   = React.useState(_UWS.EMPTY);
   const schedRef = React.useRef(sched);
   schedRef.current = sched;
+  const sessionIdsRef = React.useRef(sessionIds);
+  sessionIdsRef.current = sessionIds;
 
   const reload = React.useCallback(async () => {
     if (!bridge) return;
@@ -22,15 +26,20 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
   // Context (branch/remote) for the active tab — re-read when the tab, its
   // project or its branch chip changes.
   React.useEffect(() => {
-    if (!bridge || !activeSessionId) { setCtx({ project: "", remote: "" }); return; }
+    if (!bridge || !activeSessionId) { setCtx({ sessionId: null, project: "", remote: "" }); return; }
     let live = true;
-    bridge.widgetContext(activeSessionId, "activate").then(c => { if (live) setCtx(c); });
+    bridge.widgetContext(activeSessionId, "activate").then(c => {
+      if (live) setCtx({ sessionId: activeSessionId, project: c.project, remote: c.remote });
+    });
     return () => { live = false; };
   }, [bridge, activeSessionId, activeProjectPath, branch]);
 
+  const ctxCurrent = ctx.sessionId === activeSessionId;
   const plugins = React.useMemo(
-    () => _UW.applicable(config.plugins, ctx).filter(p => (tweaks[_UW.tweakKey(p.id)] ?? true)),
-    [config.plugins, ctx, tweaks]);
+    () => ctxCurrent
+      ? _UW.applicable(config.plugins, ctx).filter(p => (tweaks[_UW.tweakKey(p.id)] ?? true))
+      : [],
+    [config.plugins, ctx, ctxCurrent, tweaks]);
 
   // The one place a run is started. `sid` is captured here so a result that
   // lands after a tab switch still goes to the tab it was started for.
@@ -42,7 +51,8 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
       const parsed = res.error != null ? { ok: false, error: res.error } : _UW.parseOutput(res.stdout ?? "");
       const done = _UWS.finish(schedRef.current, sid, plugin.id, started.seq, { ...parsed, durationMs: res.durationMs });
       setSched(done.state); schedRef.current = done.state;
-      if (done.next) launch(sid, plugin, done.next);
+      // A tab closed while its run was in flight must not spawn the follow-up.
+      if (done.next && sessionIdsRef.current.includes(sid)) launch(sid, plugin, done.next);
     });
   }, [bridge]);
 
@@ -52,22 +62,31 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
   }, [activeSessionId, plugins, launch]);
 
   // activate: tab/project changed, or the applicable plugin set changed for it.
+  // Plugins are empty until this tab's context has arrived, so the effect
+  // re-runs (pluginKey changes) exactly once with the right plugin set.
   const pluginKey = plugins.map(p => p.id).join("\0");
-  React.useEffect(() => { fire("activate"); }, [activeSessionId, activeProjectPath, pluginKey]); // eslint-disable-line react-hooks/exhaustive-deps
-  // turn_end: streaming true → false.
-  const wasStreaming = React.useRef(streaming);
   React.useEffect(() => {
-    if (wasStreaming.current && !streaming) fire("turn_end");
-    wasStreaming.current = streaming;
-  }, [streaming, fire]);
+    if (ctxCurrent) fire("activate");
+  }, [activeSessionId, activeProjectPath, pluginKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  // turn_end: streaming true → false within the same tab (a tab switch is not a turn end).
+  const wasStreaming = React.useRef({ sessionId: activeSessionId, streaming });
+  React.useEffect(() => {
+    if (_UWS.turnEnded(wasStreaming.current, { sessionId: activeSessionId, streaming })) fire("turn_end");
+    wasStreaming.current = { sessionId: activeSessionId, streaming };
+  }, [activeSessionId, streaming, fire]);
   // branch: chip changed (skip the initial mount, activate covers it).
   const lastBranch = React.useRef(branch);
   React.useEffect(() => {
     if (lastBranch.current !== branch && lastBranch.current !== undefined) fire("branch");
     lastBranch.current = branch;
   }, [branch, fire]);
-  // Closed tabs drop their results.
-  React.useEffect(() => { setSched(s => _UWS.prune(s, sessionIds)); }, [sessionIds]);
+  // Closed tabs drop their results. Goes through schedRef like start/finish
+  // so a result landing in the same tick sees the pruned state.
+  React.useEffect(() => {
+    const next = _UWS.prune(schedRef.current, sessionIds);
+    schedRef.current = next;
+    setSched(next);
+  }, [sessionIds]);
 
   const refresh = React.useCallback((pluginId) => {
     const p = plugins.find(x => x.id === pluginId);

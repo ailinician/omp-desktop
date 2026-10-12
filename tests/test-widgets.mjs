@@ -211,5 +211,11 @@ check("prune drops closed sessions", () => {
   assert.equal(S.runOf(state, "s1", "git"), undefined);
   assert.ok(S.runOf(state, "s2", "git"));
 });
+check("turnEnded fires only for streaming true to false within one tab", () => {
+  assert.equal(S.turnEnded({ sessionId: "a", streaming: true }, { sessionId: "a", streaming: false }), true);
+  assert.equal(S.turnEnded({ sessionId: "a", streaming: true }, { sessionId: "b", streaming: false }), false, "tab switch");
+  assert.equal(S.turnEnded({ sessionId: "a", streaming: false }, { sessionId: "a", streaming: true }), false);
+  assert.equal(S.turnEnded({ sessionId: "a", streaming: true }, { sessionId: "a", streaming: true }), false);
+});
 
 console.log(`test-widgets: ${passed} checks passed`);

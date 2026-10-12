@@ -37,5 +37,8 @@
     return { runs };
   }
 
-  window.OMP_WIDGET_SCHEDULE = { EMPTY, start, finish, prune, runOf };
+  // turn_end only counts inside one tab: streaming true → false across a tab switch is not a turn end.
+  const turnEnded = (prev, next) => prev.sessionId === next.sessionId && prev.streaming && !next.streaming;
+
+  window.OMP_WIDGET_SCHEDULE = { EMPTY, start, finish, prune, runOf, turnEnded };
 })();
