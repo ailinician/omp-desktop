@@ -1,5 +1,5 @@
 /* ═════════════════════════════════════════════════════════════════════
-   app/image-attach.js — turn picked/pasted image Files into omp
+   app/image-attach.js — turn picked/pasted/dropped image Files into omp
    `ImageContent` blocks ({ type: "image", data: <base64>, mimeType }),
    the shape the `prompt` / `steer` / `follow_up` RPC commands accept.
    ═════════════════════════════════════════════════════════════════════ */
@@ -52,6 +52,16 @@
       || bytes > MAX_PASSTHROUGH_BYTES
       || width > MAX_EDGE_PX
       || height > MAX_EDGE_PX;
+  }
+
+  // Whether a drag carries files from outside the page (the OS file
+  // manager). During dragenter/dragover only `types` is readable — the
+  // files themselves stay hidden until the drop — and a text selection
+  // dragged inside the app carries no "Files", so it keeps the browser's
+  // own handling. `types` is an array in current engines and a
+  // DOMStringList in older WebKit; Array.from reads both.
+  function carriesFiles(dt) {
+    return !!dt && Array.from(dt.types ?? []).includes("Files");
   }
 
   // Image Files carried by a paste/drop DataTransfer. Engines differ on
@@ -155,6 +165,7 @@
     toDataUrl,
     fitWithin,
     needsReencode,
+    carriesFiles,
     imageFilesFromTransfer,
     imageFilesFromClipboardAsync,
     prepareImage,

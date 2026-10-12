@@ -4,7 +4,7 @@
 
 const { Icon } = window;
 const { parseMentionQuery, applyMention } = window.OMP_MENTIONS;
-const { prepareImage, imageFilesFromTransfer, imageFilesFromClipboardAsync, toDataUrl, MAX_ATTACHMENTS } = window.OMP_IMAGES;
+const { prepareImage, carriesFiles, imageFilesFromTransfer, imageFilesFromClipboardAsync, toDataUrl, MAX_ATTACHMENTS } = window.OMP_IMAGES;
 const { isDesktop, slashMenu, midPromptSlashToken, skillMenu, matchesQuery, insertText: slashInsertText } = window.OMP_SLASH;
 const {
   entryOf: draftEntryOf, updateEntry: updateDraftEntry, pruneEntries: pruneDrafts, DRAFT_IDLE, recallInDraft,
@@ -71,6 +71,11 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const listRef = React.useRef(null);
   const attachCounterRef = React.useRef(0);
   const fileInputRef     = React.useRef(null);
+  // Image drop from the OS file manager (#50). dragenter/dragleave fire
+  // for every child the pointer crosses, so the highlight follows a depth
+  // count rather than the last event.
+  const [dropActive, setDropActive] = React.useState(false);
+  const dropDepthRef = React.useRef(0);
 
   const cmds = window.OMP_DATA?.commands || [];
 
@@ -381,12 +386,11 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
 
   // Pick, downscale/re-encode and queue image files as pending attachments.
   // Silently drops files that fail to decode, and drops any that would push
-  // the batch over MAX_ATTACHMENTS or MAX_TOTAL_ATTACH_BYTES, rather than
-  // blocking the rest — same policy either way: keep what fits, drop the
-  // rest of this paste/pick silently (the user can always attach the
-  // dropped ones separately).
+  // the batch over MAX_ATTACHMENTS, rather than blocking the rest: keep what
+  // fits, drop the rest of this paste/pick/drop silently (the user can always
+  // attach the dropped ones separately).
   const addFiles = async (fileList) => {
-    // The tab this paste/pick belongs to: preparation is async, and the
+    // The tab this paste/pick/drop belongs to: preparation is async, and the
     // result must not land in whichever tab is active by then.
     const target = sessionId;
     const files = Array.from(fileList || []).filter(f => f.type.startsWith("image/"));
@@ -421,6 +425,38 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   };
   const removeAttachment = (attId) =>
     updateDraft(sessionId, d => ({ ...d, attachments: d.attachments.filter(a => a.id !== attId) }));
+
+  // Image files dropped from the OS file manager (#50) go the paste/pick
+  // way (`addFiles`: same preparation, limits and tab). Needs the window's
+  // `dragDropEnabled: false` (tauri.conf.json), or Tauri's native file drop
+  // takes the drag before the page sees it. Only a drag carrying files is
+  // taken: a text selection dragged into the textarea keeps the browser's
+  // own handling. Non-image files are ignored, as the picker would.
+  const onDragEnter = (e) => {
+    if (!carriesFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    dropDepthRef.current += 1;
+    setDropActive(true);
+  };
+  const onDragOver = (e) => {
+    if (!carriesFiles(e.dataTransfer)) return;
+    // Accepting the drop here is what makes the drop event fire at all.
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+  const onDragLeave = (e) => {
+    if (!carriesFiles(e.dataTransfer)) return;
+    dropDepthRef.current = Math.max(0, dropDepthRef.current - 1);
+    if (dropDepthRef.current === 0) setDropActive(false);
+  };
+  const onDrop = (e) => {
+    if (!carriesFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    dropDepthRef.current = 0;
+    setDropActive(false);
+    addFiles(imageFilesFromTransfer(e.dataTransfer));
+    taRef.current?.focus();
+  };
 
   // Collapse long pastes (session-ui.js shouldCollapsePaste) into a token
   // so the textarea stays navigable; the chip strip above shows and
@@ -517,7 +553,8 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const cycleThinkingHint = hintFor("app.thinking.cycle", "⇧Tab");
 
   return (
-    <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}`}>
+    <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}${dropActive ? " drop-on" : ""}`}
+      onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
       {planMode && (
         <div className="plan-strip">
           <Icon name="plan" size={12} color="var(--amber)" />

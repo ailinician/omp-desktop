@@ -128,6 +128,26 @@ function App() {
   React.useEffect(() => {
     bridge?.setPromptHistoryLimit(t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT);
   }, [bridge, t.promptHistoryLimit]);
+  // A file dropped anywhere but the composer (which takes images, #50) is
+  // refused: with Tauri's native file drop off (`dragDropEnabled: false`),
+  // the webview would otherwise open the dropped file in place of the app
+  // (navigation_guard.rs blocks that navigation, but the drop should not
+  // even look accepted). The composer's handlers run first and accept their
+  // own drops, so only unhandled ones get here.
+  React.useEffect(() => {
+    const { carriesFiles } = window.OMP_IMAGES;
+    const refuse = e => {
+      if (!carriesFiles(e.dataTransfer) || e.defaultPrevented) return;
+      e.preventDefault();
+      if (e.type === "dragover") e.dataTransfer.dropEffect = "none";
+    };
+    window.addEventListener("dragover", refuse);
+    window.addEventListener("drop", refuse);
+    return () => {
+      window.removeEventListener("dragover", refuse);
+      window.removeEventListener("drop", refuse);
+    };
+  }, []);
 
   // Fetch OAuth providers whenever the login view opens (ensures fresh auth status)
   React.useEffect(() => {

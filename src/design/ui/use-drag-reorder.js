@@ -14,10 +14,13 @@
      never also selects a tab or closes the dropdown. Escape cancels until
      the button is released.
 
-   Pointer events, not HTML5 drag and drop: on Windows, Tauri's native file
-   drop (`dragDropEnabled`, on by default) swallows HTML5 drag events. The
-   pointer is captured on the item, so a release outside the window still
-   ends the drag. Wrapped as an IIFE (AGENTS.md "IIFE rule"). */
+   Pointer events, not HTML5 drag and drop: chosen while Tauri's native
+   file drop (`dragDropEnabled`) still swallowed HTML5 drag events on
+   Windows. It is off since the composer's image drop (#50), but pointer
+   events stay: they give the click-vs-drag threshold, Escape and capture
+   without the browser's drag image. The pointer is captured on the item,
+   so a release outside the window still ends the drag. Wrapped as an IIFE
+   (AGENTS.md "IIFE rule"). */
 
 (function () {
   const { pastThreshold, dropSlot } = window.OMP_DRAG_REORDER;
