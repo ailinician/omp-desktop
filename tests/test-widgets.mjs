@@ -80,6 +80,27 @@ check("kv rows need string k and v", () => {
   assert.deepEqual(r.widget.blocks[0].rows, [{ k: "a", v: "b" }]);
 });
 
+check("inherited Object.prototype keys are not block types", () => {
+  const r = out({ version: 1, blocks: [{ type: "__proto__" }, { type: "constructor" }, { type: "toString" }, { type: "text", text: "ok" }] });
+  assert.deepEqual(r.widget.blocks, [{ type: "text", text: "ok" }]);
+  assert.equal(r.widget.skipped, 3);
+});
+check("non-number non-string numeric fields never throw", () => {
+  const r = out({ version: 1, blocks: [
+    { type: "number", label: "n", value: { toString: null } },
+    { type: "progress", label: "p", value: { toString: null } },
+    { type: "progress", label: "q", value: 1, max: { toString: null } },
+    { type: "text", text: "ok" },
+  ] });
+  assert.deepEqual(r.widget.blocks, [{ type: "progress", label: "q", value: 1, max: 1 }, { type: "text", text: "ok" }]);
+  assert.equal(r.widget.skipped, 2);
+});
+check("link without label caps the label but keeps the full url", () => {
+  const url = "https://example.com/" + "a".repeat(480);
+  const r = out({ version: 1, blocks: [{ type: "link", url }] });
+  assert.equal(r.widget.blocks[0].label.length, 200);
+  assert.equal(r.widget.blocks[0].url.length, 500);
+});
 // ── safeUrl / insertText ──────────────────────────────────────────────────
 check("only http(s) urls are opened", () => {
   assert.equal(W.safeUrl("https://x.y/z"), "https://x.y/z");
@@ -113,6 +134,12 @@ check("path prefix and remote substring must both match when given", () => {
 });
 check("path match is prefix on path separators, not on characters", () => {
   assert.deepEqual(W.applicable([plugin({ matchPath: "/Users/me/GIT" })], { project: "/Users/me/GITHUB/x", remote: "" }), []);
+});
+check("matchPath \"/\" matches any absolute project, not relative ones", () => {
+  const ids = (project) => W.applicable([plugin({ matchPath: "/" })], { project, remote: "" }).length;
+  assert.equal(ids("/a/b"), 1);
+  assert.equal(ids("/"), 1);
+  assert.equal(ids("relative/x"), 0);
 });
 check("wantsTrigger honours the plugin's list and always allows manual", () => {
   assert.equal(W.wantsTrigger(plugin({ triggers: ["branch"] }), "branch"), true);

@@ -13,7 +13,7 @@
 
   const clip = (v, max) => (typeof v === "string" ? v.replace(/\u0000/g, "").slice(0, max) : "");
   const tone = (t) => (TONES.has(t) ? t : "neutral");
-  const num = (v) => { const n = typeof v === "number" ? v : Number(v); return Number.isFinite(n) ? n : null; };
+  const num = (v) => { if (typeof v !== "number" && typeof v !== "string") return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
 
   function safeUrl(url) {
     if (typeof url !== "string") return null;
@@ -35,15 +35,15 @@
   }
 
   // One normaliser per block type; `null` = skip the block.
-  const BLOCKS = {
+  const BLOCKS = Object.assign(Object.create(null), {
     status: (b) => { const label = clip(b.label, LIMITS.short), value = clip(b.value, LIMITS.short); return label || value ? { type: "status", label, value, tone: tone(b.tone) } : null; },
     number: (b) => { const value = num(b.value); if (value === null) return null; const out = { type: "number", label: clip(b.label, LIMITS.short), value }; const unit = clip(b.unit, LIMITS.short); if (unit) out.unit = unit; return out; },
     progress: (b) => { const value = num(b.value); if (value === null) return null; const max = Math.max(1, num(b.max) ?? 1); return { type: "progress", label: clip(b.label, LIMITS.short), value: Math.min(Math.max(0, value), max), max }; },
     text: (b) => { const text = clip(b.text, LIMITS.long); return text ? { type: "text", text } : null; },
     kv: (b) => { const rows = (Array.isArray(b.rows) ? b.rows : []).filter(r => r && typeof r.k === "string" && typeof r.v === "string").slice(0, LIMITS.rows).map(r => ({ k: clip(r.k, LIMITS.short), v: clip(r.v, LIMITS.short) })); return rows.length ? { type: "kv", rows } : null; },
     list: (b) => { const items = (Array.isArray(b.items) ? b.items : []).map(item).filter(Boolean).slice(0, LIMITS.items); return items.length ? { type: "list", items } : null; },
-    link: (b) => { const url = safeUrl(b.url); const label = clip(b.label, LIMITS.short) || url; return url ? { type: "link", label, url } : null; },
-  };
+    link: (b) => { const url = safeUrl(b.url); return url ? { type: "link", label: clip(b.label, LIMITS.short) || clip(url, LIMITS.short), url } : null; },
+  });
 
   function parseOutput(stdout) {
     let doc;
@@ -56,7 +56,7 @@
     let skipped = 0;
     const blocks = [];
     for (const raw of doc.blocks.slice(0, LIMITS.blocks)) {
-      const norm = raw && typeof raw === "object" && BLOCKS[raw.type] ? BLOCKS[raw.type](raw) : null;
+      const norm = raw && typeof raw === "object" && typeof raw.type === "string" && Object.hasOwn(BLOCKS, raw.type) ? BLOCKS[raw.type](raw) : null;
       if (norm) blocks.push(norm); else skipped++;
     }
     return { ok: true, widget: { status: tone(doc.status), blocks, skipped } };
@@ -67,7 +67,8 @@
   const norm = (p) => String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
   function pathMatches(prefix, project) {
     const a = norm(prefix), b = norm(project);
-    return !!a && (b === a || b.startsWith(a + "/"));
+    if (!a) return /^[/\\]+$/.test(String(prefix ?? "")) && /^[/\\]/.test(String(project ?? ""));
+    return b === a || b.startsWith(a + "/");
   }
   function applicable(plugins, ctx) {
     return (plugins ?? []).filter(p => p.enabled !== false
