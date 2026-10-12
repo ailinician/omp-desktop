@@ -54,16 +54,16 @@
       || height > MAX_EDGE_PX;
   }
 
+  // During dragenter/dragover only `types` is readable — the data itself
+  // stays hidden until the drop. `types` is an array in current engines
+  // and a DOMStringList in older WebKit; Array.from reads both.
   function carriesType(dt, type) {
-    return !!dt && Array.from(dt.types ?? []).includes(type);
+    return Array.from(dt?.types ?? []).includes(type);
   }
 
   // Whether a drag carries files from outside the page (the OS file
-  // manager). During dragenter/dragover only `types` is readable — the
-  // files themselves stay hidden until the drop — and a text selection
-  // dragged inside the app carries no "Files", so it keeps the browser's
-  // own handling. `types` is an array in current engines and a
-  // DOMStringList in older WebKit; Array.from reads both.
+  // manager). A text selection dragged inside the app carries no "Files",
+  // so it keeps the browser's own handling.
   function carriesFiles(dt) {
     return carriesType(dt, "Files");
   }

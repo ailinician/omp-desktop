@@ -128,19 +128,16 @@ function App() {
   React.useEffect(() => {
     bridge?.setPromptHistoryLimit(t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT);
   }, [bridge, t.promptHistoryLimit]);
-  // A file dropped anywhere but the composer (which takes images, #50), or a
-  // link dropped off an editable field, is refused: with Tauri's native file
-  // drop off (`dragDropEnabled: false`), the webview would otherwise navigate
-  // to it (navigation_guard.rs blocks a file and opens a link in the system
-  // browser, but the drop should not even look accepted). The composer's
-  // handlers run first and accept their own drops, so only unhandled ones
-  // get here.
+  // Refuse a file or link drop no handler took (`refusesStrayDrop`), so the
+  // webview never navigates to it now that Tauri's native file drop is off
+  // (#50). The composer's handlers run first and accept their own drops.
   React.useEffect(() => {
     const { refusesStrayDrop } = window.OMP_IMAGES;
+    const { isTypingTarget } = window.OMP_KEYMAP;
     const refuse = e => {
       if (e.defaultPrevented) return;
       const el = e.target;
-      const onEditable = el instanceof Element && (!!el.closest("textarea, input") || el.isContentEditable);
+      const onEditable = el instanceof Element && isTypingTarget(el);
       if (!refusesStrayDrop(e.dataTransfer, onEditable)) return;
       e.preventDefault();
       if (e.type === "dragover") e.dataTransfer.dropEffect = "none";

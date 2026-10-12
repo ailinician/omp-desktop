@@ -9,9 +9,13 @@
 }
 .composer.plan-on { background: linear-gradient(180deg, color-mix(in oklab, var(--amber) 8%, transparent), transparent); }
 /* An image file dragged over the composer (#50): the whole composer is the
-   drop target. An inset ring, so it never shifts the layout. The
-   `.goal-on` arm outranks goal.css's tint, which loads after this file. */
-.composer.drop-on, .composer.goal-on.drop-on { box-shadow: inset 0 0 0 2px var(--accent); background: color-mix(in oklab, var(--accent) 6%, transparent); }
+   drop target. An overlay with an inset ring, so it never shifts the layout
+   and never competes with the plan/goal tints for `background`. */
+.composer.drop-on::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  box-shadow: inset 0 0 0 2px var(--accent);
+  background: color-mix(in oklab, var(--accent) 6%, transparent);
+}
 .plan-strip {
   display: flex; align-items: center; gap: 8px;
   font-size: var(--d-text-sm);

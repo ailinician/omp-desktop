@@ -71,9 +71,9 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const listRef = React.useRef(null);
   const attachCounterRef = React.useRef(0);
   const fileInputRef     = React.useRef(null);
-  // Image drop from the OS file manager (#50). dragenter/dragleave fire
-  // for every child the pointer crosses, so the highlight follows the
-  // element last entered (`dropHoverAfter`) rather than the last event.
+  // Image drop from the OS file manager (#50): the element the drag is over
+  // (`dropHoverAfter`) lives in a ref, so crossing children re-renders only
+  // when the highlight itself flips.
   const [dropActive, setDropActive] = React.useState(false);
   const dropHoverRef = React.useRef(null);
 
@@ -427,35 +427,23 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
     updateDraft(sessionId, d => ({ ...d, attachments: d.attachments.filter(a => a.id !== attId) }));
 
   // Image files dropped from the OS file manager (#50) go the paste/pick
-  // way (`addFiles`: same preparation, limits and tab). Needs the window's
-  // `dragDropEnabled: false` (tauri.conf.json), or Tauri's native file drop
-  // takes the drag before the page sees it. Only a drag carrying files is
-  // taken: a text selection dragged into the textarea keeps the browser's
-  // own handling. Non-image files are ignored, as the picker would.
-  const trackDropHover = (e) => {
+  // way (`addFiles`: same preparation, limits and tab); non-images are
+  // ignored. One handler for all four drag events (dragleave is not
+  // cancelable, so its preventDefault is a no-op).
+  const onFileDrag = (e) => {
+    if (!carriesFiles(e.dataTransfer)) return;
+    // On dragover, accepting the drop is what makes the drop event fire at all.
+    e.preventDefault();
+    if (e.type === "dragover") {
+      e.dataTransfer.dropEffect = "copy";
+      return;
+    }
     dropHoverRef.current = dropHoverAfter(dropHoverRef.current, e.type, e.target);
     setDropActive(dropHoverRef.current !== null);
-  };
-  const onDragEnter = (e) => {
-    if (!carriesFiles(e.dataTransfer)) return;
-    e.preventDefault();
-    trackDropHover(e);
-  };
-  const onDragOver = (e) => {
-    if (!carriesFiles(e.dataTransfer)) return;
-    // Accepting the drop here is what makes the drop event fire at all.
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "copy";
-  };
-  const onDragLeave = (e) => {
-    if (carriesFiles(e.dataTransfer)) trackDropHover(e);
-  };
-  const onDrop = (e) => {
-    if (!carriesFiles(e.dataTransfer)) return;
-    e.preventDefault();
-    trackDropHover(e);
-    addFiles(imageFilesFromTransfer(e.dataTransfer));
-    taRef.current?.focus();
+    if (e.type === "drop") {
+      addFiles(imageFilesFromTransfer(e.dataTransfer));
+      taRef.current?.focus();
+    }
   };
 
   // Collapse long pastes (session-ui.js shouldCollapsePaste) into a token
@@ -554,7 +542,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
 
   return (
     <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}${dropActive ? " drop-on" : ""}`}
-      onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
+      onDragEnter={onFileDrag} onDragOver={onFileDrag} onDragLeave={onFileDrag} onDrop={onFileDrag}>
       {planMode && (
         <div className="plan-strip">
           <Icon name="plan" size={12} color="var(--amber)" />
