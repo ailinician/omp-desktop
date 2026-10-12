@@ -3,7 +3,7 @@
 # Contract: docs/widgets.md. Needs git; prints JSON v1 to stdout.
 set -euo pipefail
 cd "${OMP_WIDGET_PROJECT:-.}"
-json_escape() { python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().rstrip("\n")))' ; }
+json_escape() { python3 -I -c 'import json,sys; print(json.dumps(sys.stdin.read().rstrip("\n")))' ; }
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   printf '{"version":1,"status":"neutral","blocks":[{"type":"text","text":"not a git repository"}]}\n'; exit 0
 fi

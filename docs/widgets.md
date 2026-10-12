@@ -11,7 +11,7 @@ A widget is a small program, in any language, that the desktop runs on demand. I
 
    ```json
    { "version": 1, "plugins": [
-     { "id": "hello", "title": "Hello", "command": ["python3", "/absolute/path/to/hello.py"] }
+     { "id": "hello", "title": "Hello", "command": ["python3", "-I", "/absolute/path/to/hello.py"] }
    ] }
    ```
 
@@ -21,7 +21,7 @@ A ten-line shell script works the same way:
 
 ```bash
 #!/usr/bin/env bash
-python3 - "$OMP_WIDGET_PROJECT" "$OMP_WIDGET_BRANCH" <<'PY'
+python3 -I - "$OMP_WIDGET_PROJECT" "$OMP_WIDGET_BRANCH" <<'PY'
 import json, sys
 project, branch = sys.argv[1], sys.argv[2]
 print(json.dumps({"version": 1, "status": "ok", "blocks": [
@@ -165,6 +165,7 @@ The previous successful result stays visible (dimmed) while a run is in flight. 
 - Timeout (default 10 s, max 60 s) kills the process group; stdout is capped at 256 KiB.
 - Plugin stderr is never shown except as the error tail of a failed run.
 - Only `http:`/`https:` URLs are opened. Plugin output is rendered as text only, never HTML.
+- The working directory is the project, which is untrusted (a cloned repo can contain any file). Run interpreters in isolated mode so project files are never imported: `python3 -I` (ignores the cwd, `PYTHON*` variables and user site-packages; `python3 -c` and `python3 -` otherwise put the cwd on `sys.path`, so a repo's `json.py` would run). Node only loads project-local code if your script requires relative paths. Give script *arguments* as absolute paths too. The bundled `git.sh` uses `python3 -I`; `hello.py` and `mcp-tool.py` are started with an absolute script path (`python3 -I <abs path>`, `uv run … <abs path>`), so the interpreter puts the script's own directory, not the cwd, on the path.
 - A plugin runs with your user's permissions and environment: only list programs you trust.
 
 ## Examples
