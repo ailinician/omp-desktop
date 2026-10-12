@@ -14,6 +14,7 @@ Feature internals (RPC frames, state machines, measured omp behaviour) live in `
 |`message-queue.md`|steer/follow-up queue strip|`app/message-queue.js`, `design/queue-strip.jsx`|
 |`ask-dialog.md`|omp's ask tool dialog, tool-approval prompts, auto-approval rows|`app/ask-dialog.js`, `chat/ask-dialog.jsx`, `app/approval.js`, `chat/approval-row.jsx`, `approval.rs`|
 |`turn-status.md`|run state, failed requests, auto-retry rows, job rows|`app/turn-status.js`|
+|`chat-collapse.md`|collapsible tool cards and thinking, auto-collapse, per-tab toggles|`app/chat-collapse.js`, `ui/collapse-toggle.jsx`, `chat/chat-view.jsx`|
 |`subagents.md`|subagent manager|`app/subagents.js`, `design/subagents/`|
 |`conversation-tree.md`|conversation tree + prompt-cache model, branch/fork|`conversation_tree/`, `app/conversation-tree*.js`|
 |`goal-mode.md`|goal mode, auto-continue|`app/goal.js`, `goal_config.rs`|

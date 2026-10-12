@@ -1,7 +1,8 @@
 /* chat/tool-card.jsx — Linear/Raycast-style card for one tool call,
    plus ScrubbableDiff (shown for `edit` tools with a parsed diff). */
 
-const { Icon: _TC_Icon, TOOL_META: _TC_TOOL_META, EvalCell: _TC_EvalCell, CopyButton: _TC_Copy, CopyHost: _TC_CopyHost } = window;
+const { Icon: _TC_Icon, TOOL_META: _TC_TOOL_META, EvalCell: _TC_EvalCell, CopyButton: _TC_Copy, CopyHost: _TC_CopyHost, CollapseToggle: _TC_Collapse } = window;
+const { bashPreview: _TC_bashPreview } = window.OMP_COLLAPSE;
 
 function ScrubbableDiff({ msg }) {
   const total = msg.diff.length;
@@ -147,9 +148,13 @@ function TaskPanel({ subagents, onInspect }) {
   );
 }
 
-function ToolCard({ msg, idx, highlighted, onInspectSubagent }) {
+// `collapsed`: true/false when the body has a toggle, undefined when it is
+// too short to collapse (app/chat-collapse.js). Collapsed, the body keeps a
+// few lines in view: bash its last ones, everything else its first.
+function ToolCard({ msg, idx, highlighted, onInspectSubagent, collapsed, onToggleCollapse }) {
   const meta    = _TC_TOOL_META[msg.tool] || { color: "var(--fg-3)", icon: "circle", label: msg.tool };
   const running = msg.status === "running";
+  const bashLines = collapsed && msg.output ? _TC_bashPreview(msg.output) : msg.output;
   return (
     <div className={`row tool fade-up${highlighted ? " mm-hot" : ""}`} data-msg-idx={idx}>
       <div className="ass-rail">
@@ -175,58 +180,63 @@ function ToolCard({ msg, idx, highlighted, onInspectSubagent }) {
             </span>
           )}
           <span className="chip muted mono">{msg.time}</span>
+          {collapsed !== undefined && (
+            <_TC_Collapse collapsed={collapsed} onToggle={() => onToggleCollapse(msg._id, collapsed)} />
+          )}
         </div>
 
-        {msg.tool === "search" && msg.preview && (
-          <div className="tool-search">
-            {msg.preview.map((p, i) => (
-              <div key={i} className={`search-row ${p.hot ? "hot" : ""}`}>
-                <_TC_Icon name="file" size={11} color={p.hot ? "var(--accent)" : "var(--fg-3)"} />
-                <span className="mono" style={{ color: p.hot ? "var(--fg)" : "var(--fg-2)" }}>{p.file}</span>
-                <span className="mono" style={{ color: "var(--fg-4)", marginLeft: "auto" }}>{p.hits} hits</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {msg.tool === "read" && (
-          <div className="tool-foot mono">
-            <span style={{ color: "var(--fg-3)" }}>↳</span>
-            <span style={{ color: "var(--fg-2)" }}>{msg.target}</span>
-            <span style={{ color: "var(--fg-4)" }}>· {msg.summary}</span>
-          </div>
-        )}
-
-        {msg.tool === "edit" && msg.diff && <ScrubbableDiff msg={msg} />}
-        {msg.tool === "edit" && !msg.diff && (
-          <div className="tool-foot mono">
-            <span style={{ color: "var(--fg-3)" }}>↳</span>
-            <span style={{ color: "var(--fg-2)" }}>{msg.target}</span>
-            <span style={{ color: "var(--diff-add-fg)", marginLeft: 8 }} className="mono">+{msg.adds || 0}</span>
-            <span style={{ color: "var(--diff-rm-fg)", marginLeft: 4 }} className="mono">−{msg.rems || 0}</span>
-            {running && <span className="shimmer-text" style={{ marginLeft: "auto" }}>writing patch…</span>}
-          </div>
-        )}
-
-        {msg.tool === "bash" && msg.output && (
-          // Copies the whole output, not just the lines shown.
-          <_TC_CopyHost label="Copy output" text={msg.outputText}>
-            <pre className="tool-bash mono selectable">
-              {msg.output.map((l, i) => (
-                <div key={i} style={{ color: `var(--${l.color})` }}>{l.line}</div>
+        <div className={collapsed ? `collapse-clip${msg.tool === "bash" ? " from-end" : ""}` : undefined}>
+          {msg.tool === "search" && msg.preview && (
+            <div className="tool-search">
+              {msg.preview.map((p, i) => (
+                <div key={i} className={`search-row ${p.hot ? "hot" : ""}`}>
+                  <_TC_Icon name="file" size={11} color={p.hot ? "var(--accent)" : "var(--fg-3)"} />
+                  <span className="mono" style={{ color: p.hot ? "var(--fg)" : "var(--fg-2)" }}>{p.file}</span>
+                  <span className="mono" style={{ color: "var(--fg-4)", marginLeft: "auto" }}>{p.hits} hits</span>
+                </div>
               ))}
-            </pre>
-          </_TC_CopyHost>
-        )}
+            </div>
+          )}
 
-        {msg.tool === "eval" && msg.cells && (
-          <div className="tool-eval">
-            {msg.cells.map((cell, i) => <_TC_EvalCell key={i} cell={cell} />)}
-          </div>
-        )}
-        {msg.tool === "task" && msg.subagents?.length > 0 && (
-          <TaskPanel subagents={msg.subagents} onInspect={onInspectSubagent} />
-        )}
+          {msg.tool === "read" && (
+            <div className="tool-foot mono">
+              <span style={{ color: "var(--fg-3)" }}>↳</span>
+              <span style={{ color: "var(--fg-2)" }}>{msg.target}</span>
+              <span style={{ color: "var(--fg-4)" }}>· {msg.summary}</span>
+            </div>
+          )}
+
+          {msg.tool === "edit" && msg.diff && <ScrubbableDiff msg={msg} />}
+          {msg.tool === "edit" && !msg.diff && (
+            <div className="tool-foot mono">
+              <span style={{ color: "var(--fg-3)" }}>↳</span>
+              <span style={{ color: "var(--fg-2)" }}>{msg.target}</span>
+              <span style={{ color: "var(--diff-add-fg)", marginLeft: 8 }} className="mono">+{msg.adds || 0}</span>
+              <span style={{ color: "var(--diff-rm-fg)", marginLeft: 4 }} className="mono">−{msg.rems || 0}</span>
+              {running && <span className="shimmer-text" style={{ marginLeft: "auto" }}>writing patch…</span>}
+            </div>
+          )}
+
+          {msg.tool === "bash" && bashLines && (
+            // Copies the whole output, not just the lines shown.
+            <_TC_CopyHost label="Copy output" text={msg.outputText}>
+              <pre className="tool-bash mono selectable">
+                {bashLines.map((l, i) => (
+                  <div key={i} style={{ color: `var(--${l.color})` }}>{l.line}</div>
+                ))}
+              </pre>
+            </_TC_CopyHost>
+          )}
+
+          {msg.tool === "eval" && msg.cells && (
+            <div className="tool-eval">
+              {msg.cells.map((cell, i) => <_TC_EvalCell key={i} cell={cell} />)}
+            </div>
+          )}
+          {msg.tool === "task" && msg.subagents?.length > 0 && (
+            <TaskPanel subagents={msg.subagents} onInspect={onInspectSubagent} />
+          )}
+        </div>
       </div>
     </div>
   );

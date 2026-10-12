@@ -21,6 +21,8 @@
     "fontSize":  100,
     "autosave":  true,
     "promptHistoryLimit": 100,
+    "autoCollapse": true,
+    "collapseAfter": 5,
     "updateCheck": true,
     "skippedUpdate": null,
     "sidebar": true

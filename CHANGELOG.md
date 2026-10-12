@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Reorder tabs and projects by dragging (#40). Drag a project along the tab bar or the project sidebar, or a conversation within its project in the tab-bar dropdown or the sidebar; a line shows where it will land, and Esc cancels. `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown` move the current tab's project one place left or right (rebindable in the shortcuts screen). The order is kept when the app restarts.
+- Tool cards and thinking can be collapsed (#44). Everything starts expanded; once enough newer tool calls and thinking blocks have followed a long one, it folds down to its first few lines (a shell command to its last few). Short ones never fold on their own. Each has a chevron button to collapse or expand it by hand, which always wins and is kept when you switch tabs. Nothing folds while you are scrolled up reading. Set how many newer blocks to wait for, or turn auto-collapse off, under Tweaks → Chat.
 
 ### Changed
 

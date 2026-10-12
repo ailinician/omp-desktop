@@ -119,6 +119,13 @@ check("a failure's persisted copy keeps omp's live retryable verdict", () => {
   assert.equal(persisted[1].failure.retryable, null, "the persisted copy is not mutated");
 });
 
+check("a persisted copy keeps its live entry's _id, so its key and collapse toggle survive", () => {
+  const persisted = adapt([userMsg("go", 1), replyMsg("ok", 2)]);
+  const merged = mergeTranscript([{ ...liveUser("go", 1), _id: 7 }, { ...liveBubble("ok", 2), _id: 8 }], persisted);
+  assert.deepEqual(Array.from(merged, m => m._id), [7, 8]);
+  assert.equal(persisted[1]._id, undefined, "the persisted copy is not mutated");
+});
+
 check("a reply's retries chip survives the merge; omp never persists it", () => {
   // Recovered after one failed attempt: the attempt is gone from get_messages,
   // its hidden bubble stays, the reply's copy keeps the chip.

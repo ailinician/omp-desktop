@@ -70,6 +70,12 @@
        top level, so this must load before it. -->
   <script src="app/scroll-pin.js"></script>
 
+  <!-- Collapsible tool cards and thinking (#44): which blocks are collapsed.
+       Dependency-free IIFE; design/chat/chat-view.jsx, tool-card.jsx and
+       app-live.jsx destructure window.OMP_COLLAPSE at top level, so this
+       must load before them. -->
+  <script src="app/chat-collapse.js"></script>
+
   <!-- Prompt history (issue #16): pure list/navigation helpers, in-memory
        only. Dependency-free IIFE; composer.jsx references window.
        OMP_PROMPT_HISTORY, and live.js reads it at its own top-level IIFE
@@ -170,6 +176,10 @@
   <!-- Copy buttons (issue #33); markdown.jsx, plan-annotations.jsx and the
        chat/ components destructure its exports at top level. -->
   <script type="text/babel" src="design/ui/copy-button.jsx"></script>
+  <!-- Expand/collapse control of tool cards and thinking (#44);
+       destructures window.Icon, and assistant-bubble.jsx and tool-card.jsx
+       destructure it at top level. -->
+  <script type="text/babel" src="design/ui/collapse-toggle.jsx"></script>
   <script type="text/babel" src="design/ui/sparks.jsx"></script>
   <script type="text/babel" src="design/ui/markdown.jsx"></script>
   <script type="text/babel" src="design/ui/plan-annotations.jsx"></script>

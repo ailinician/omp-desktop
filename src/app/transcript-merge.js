@@ -27,15 +27,17 @@
     return Number.isFinite(m.ts) ? `${m.kind}:${m.ts}` : null;
   }
 
-  // `copy` with what only the live bubble knows: omp's `retryable` verdict
-  // (sent only in the live `prompt_result`, never persisted) and its part in
-  // omp's automatic retries (app/turn-status.js) — the `retries` chip of the
-  // reply they ended on, with the failure a stopped attempt took from its
+  // `copy` with what only the live bubble knows: its identity, `_id` (the
+  // React key, and what per-entry UI state such as app/chat-collapse.js's
+  // toggles is keyed by), omp's `retryable` verdict (sent only in the live
+  // `prompt_result`, never persisted) and its part in omp's automatic
+  // retries (app/turn-status.js) — the `retries` chip of the reply they
+  // ended on, with the failure a stopped attempt took from its
   // retry row (the persisted copy of an aborted message carries none), or,
   // for an attempt omp retried but kept in its context (a failed tool-call
   // turn), staying `retried` / `superseded` with its failure still pending.
   function _withLiveFields(copy, live) {
-    let out = copy;
+    let out = live._id == null ? copy : { ...copy, _id: live._id };
     const verdict = live.failure?.retryable;
     if (typeof verdict === "boolean" && copy.failure && copy.failure.retryable !== verdict) {
       out = { ...out, failure: { ...copy.failure, retryable: verdict } };

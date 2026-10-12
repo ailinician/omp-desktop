@@ -2,7 +2,7 @@
    a failed request's failure) + InlinePlan (mini-plan rendered inline in the
    first plan reply). */
 
-const { Icon: _ChatIcon, MarkdownContent: _ChatMd, AnnotablePlan: _ChatAP, CopyButton: _ChatCopy } = window;
+const { Icon: _ChatIcon, MarkdownContent: _ChatMd, AnnotablePlan: _ChatAP, CopyButton: _ChatCopy, CollapseToggle: _ChatCollapse } = window;
 
 function InlinePlan({ plan }) {
   return (
@@ -82,7 +82,9 @@ function _AB_Retries({ retries: r }) {
   return <span className={`chip mono ${r.outcome === "recovered" ? "warn" : "muted"}`} title={title}>{label}</span>;
 }
 
-function AssistantBubble({ msg, idx, highlighted, annotable, annotations, onAnnotate }) {
+// `thoughtCollapsed`: true/false when the thinking has a toggle, undefined
+// when it is too short to collapse (app/chat-collapse.js).
+function AssistantBubble({ msg, idx, highlighted, annotable, annotations, onAnnotate, thoughtCollapsed, onToggleCollapse }) {
   // A failed request has no text of its own; its copy is the provider's error.
   const copyText = msg.streaming ? "" : (_messageText(msg) || msg.failure?.raw || "");
   return (
@@ -107,9 +109,14 @@ function AssistantBubble({ msg, idx, highlighted, annotable, annotations, onAnno
           <_ChatCopy className="ass-copy" label="Copy message" text={copyText} />
         </div>
         {msg.thought && (
-          <div className="thought selectable">
-            <span className="mono" style={{ color: "var(--fg-4)" }}>// </span>
-            <span style={{ color: "var(--fg-3)", fontStyle: "italic" }}>{msg.thought}</span>
+          <div className={`thought selectable${thoughtCollapsed ? " is-collapsed" : ""}`}>
+            <div className="thought-text">
+              <span className="mono" style={{ color: "var(--fg-4)" }}>// </span>
+              <span style={{ color: "var(--fg-3)", fontStyle: "italic" }}>{msg.thought}</span>
+            </div>
+            {thoughtCollapsed !== undefined && (
+              <_ChatCollapse collapsed={thoughtCollapsed} onToggle={() => onToggleCollapse(msg._id, thoughtCollapsed)} />
+            )}
           </div>
         )}
         {msg.blocks?.map((b, i) => {

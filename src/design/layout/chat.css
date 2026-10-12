@@ -83,6 +83,7 @@
   text-wrap: pretty;
 }
 .thought {
+  display: flex; align-items: flex-start; gap: 6px;
   margin: 4px 0 8px;
   padding: 6px 10px;
   border-left: 2px solid var(--lilac);
@@ -90,6 +91,14 @@
   border-radius: 0 6px 6px 0;
   font-size: var(--d-text-sm);
 }
+.thought-text { flex: 1; min-width: 0; }
+/* Collapsed (#44, see "Collapsible blocks" below). */
+.thought.is-collapsed .thought-text {
+  display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--collapse-lines); line-clamp: var(--collapse-lines);
+  overflow: hidden;
+}
+.thought .collapse-toggle { margin: -2px -4px 0 0; }
 
 /* A failed request (assistant-bubble.jsx `_AB_Failure`) */
 .ass-glyph.failed { border-color: color-mix(in oklab, var(--rose) 45%, var(--line-bright)); }
@@ -267,6 +276,30 @@
   max-height: 180px; overflow-y: auto;
 }
 .tool-bash > div { line-height: 1.55; }
+
+/* ── Collapsible blocks (#44): tool card bodies and thinking ─────────
+   app/chat-collapse.js decides; ui/collapse-toggle.jsx is the control.
+   A collapsed block keeps `--collapse-lines` (set on .chat-pad from
+   OMP_COLLAPSE.PREVIEW_LINES) in view and fades out where it is cut. */
+.btn.icon.collapse-toggle { flex: none; width: 20px; height: 20px; }
+.btn.collapse-toggle:focus-visible { outline-offset: -2px; }
+.collapse-clip {
+  max-height: calc(var(--collapse-lines) * 1.55em + 18px);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 45%, transparent);
+  mask-image: linear-gradient(to bottom, #000 45%, transparent);
+}
+/* bash keeps its last lines (tool-card.jsx renders only those): fade the
+   top, and when wrapped lines still overflow, cut them off the top too, so
+   the final line (often the exit code or wall time) stays in view. The
+   floating copy button moves to the bottom, out of the fade. */
+.collapse-clip.from-end {
+  display: flex; flex-direction: column; justify-content: flex-end;
+  -webkit-mask-image: linear-gradient(to top, #000 45%, transparent);
+  mask-image: linear-gradient(to top, #000 45%, transparent);
+}
+.collapse-clip.from-end > * { flex: none; }
+.collapse-clip.from-end .copy-btn.is-floating { top: auto; bottom: 6px; }
 
 /* ── Copy buttons (#33, ui/copy-button.jsx) ─────────────────────────
    Icon and label are pseudo-elements, so a button adds no text to a manual

@@ -32,6 +32,7 @@ const {
   entryOf, updateEntry, pruneEntries,
   PLAN_IDLE, togglePlan, enterPlan, approvePlan, annotatePlan, markPlanSent,
 } = window.OMP_SESSION_UI;
+const { NO_OVERRIDES: NO_COLLAPSE_OVERRIDES } = window.OMP_COLLAPSE;
 
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
@@ -54,6 +55,10 @@ function App() {
   // Plan mode is per tab (issue #28; app/session-ui.js): one entry per
   // session id, read through `plan` and written through `updatePlan` below.
   const [plans, setPlans] = React.useState({});
+  // Collapsed/expanded tool cards and thinking the user toggled (#44;
+  // app/chat-collapse.js): per tab, `_id → collapsed`, so a tab switch —
+  // which remounts ChatView — keeps them.
+  const [collapseOverrides, setCollapseOverrides] = React.useState({});
 
   // Cross-component highlight: hovering a minimap cell lights up the
   // matching chat bubble; clicking scrolls to it.
@@ -154,13 +159,20 @@ function App() {
     fn => setPlans(m => updateEntry(m, planKey, PLAN_IDLE, fn)), [planKey]);
   const handleAnnotate = React.useCallback(
     (idx, value) => updatePlan(p => annotatePlan(p, idx, value)), [updatePlan]);
+  const tabCollapseOverrides = entryOf(collapseOverrides, planKey, NO_COLLAPSE_OVERRIDES);
+  const handleToggleCollapse = React.useCallback(
+    (id, collapsed) => setCollapseOverrides(m => updateEntry(m, planKey, NO_COLLAPSE_OVERRIDES, o => ({ ...o, [id]: !collapsed }))),
+    [planKey]);
   // Tab ids, for dropping the per-tab state of closed tabs (here and in
   // the composer's drafts). live.js rebuilds `sessions` on every snapshot,
   // streaming deltas included, so the list is memoised on the ids' content:
   // the prune effects run only when a tab opens or closes.
   const sessionIdsKey = sessions.map(s => s.id).join("\0");
   const sessionIds = React.useMemo(() => (sessionIdsKey ? sessionIdsKey.split("\0") : []), [sessionIdsKey]);
-  React.useEffect(() => { setPlans(m => pruneEntries(m, sessionIds)); }, [sessionIds]);
+  React.useEffect(() => {
+    setPlans(m => pruneEntries(m, sessionIds));
+    setCollapseOverrides(m => pruneEntries(m, sessionIds));
+  }, [sessionIds]);
   // Profile chip text for a tab/project: none for the built-in profile (same
   // expression as TabBar's own copy, which labels the tab bar).
   const profileLabel = id =>
@@ -605,6 +617,10 @@ function App() {
                     hoveredMsgIdx={hoveredMsgIdx}
                     hasProjectPath={!!activeProject?.path}
                     onInspectSubagent={subagentUi.open}
+                    autoCollapse={t.autoCollapse ?? true}
+                    collapseAfter={t.collapseAfter}
+                    collapseOverrides={tabCollapseOverrides}
+                    onToggleCollapse={handleToggleCollapse}
                   />
                   <Composer
                     sessionId={planKey}
@@ -816,6 +832,17 @@ function App() {
           />
           <TweakToggle label="project sidebar" value={t.sidebar ?? true}
             onChange={v => setTweak("sidebar", v)} />
+        </TweakSection>
+        <TweakSection label="Chat">
+          {/* Tool cards and thinking (#44, app/chat-collapse.js): a long block
+              folds to a few lines once this many newer blocks follow it. */}
+          <TweakToggle label="auto-collapse" value={t.autoCollapse ?? true}
+            onChange={v => setTweak("autoCollapse", v)} />
+          {(t.autoCollapse ?? true) && (
+            <TweakSlider label="collapse after" value={window.OMP_COLLAPSE.clampAfter(t.collapseAfter)}
+              min={window.OMP_COLLAPSE.MIN_AFTER} max={window.OMP_COLLAPSE.MAX_AFTER} step={1} unit=" newer"
+              onChange={v => setTweak("collapseAfter", v)} />
+          )}
         </TweakSection>
         <TweakSection label="Session">
           <TweakSlider label="prompt history" value={t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT}
