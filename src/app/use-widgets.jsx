@@ -164,7 +164,9 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
   // set comes from the config, not from the ctx-gated `plugins`, so it is
   // stable while a tab's context is pending; `match` is checked per run.
   const globalTimed = _UW.globalPlugins(config.plugins, tweaks).filter(p => p.intervalMs);
-  const globalKey = globalTimed.map(p => p.id + ":" + p.intervalMs).join("\0");
+  // `match` is part of the key: a reload that only changes `matchPath`/
+  // `matchRemote` must replace the timer, whose closure holds the matcher.
+  const globalKey = globalTimed.map(p => [p.id, p.intervalMs, p.matchPath ?? "", p.matchRemote ?? ""].join(":")).join("\0");
   React.useEffect(
     () => startIntervals(globalTimed),
     [globalKey, startIntervals]); // eslint-disable-line react-hooks/exhaustive-deps
