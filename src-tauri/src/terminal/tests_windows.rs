@@ -52,9 +52,19 @@ impl Collector {
 }
 
 /// `id` registered with the temp dir as its folder, its default shell
-/// opened.
+/// opened, and the pseudo console's start-up cursor query answered.
+/// `portable-pty` creates the console with `PSEUDOCONSOLE_INHERIT_CURSOR`,
+/// so conhost first asks the terminal where the cursor is (`ESC[6n`) and
+/// runs nothing until a reply comes back; in the app xterm.js answers it.
 fn open(id: &str) -> (TerminalManager, Arc<Collector>) {
-    open_with(TerminalManager::new(None), id)
+    let (manager, out) = open_with(TerminalManager::new(None), id);
+    assert!(
+        wait_until(SLOW, || out.text().contains("\x1b[6n")),
+        "no cursor query; output: {:?}",
+        out.text()
+    );
+    manager.write(id, "\x1b[1;1R").unwrap();
+    (manager, out)
 }
 
 /// Whether a `ping` whose command line contains `marker` is running.
