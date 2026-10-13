@@ -945,7 +945,8 @@ function App() {
             <TweakToggle key={r.tweak} label={r.label} value={t[r.tweak] ?? true}
               onChange={v => setTweak(r.tweak, v)} />
           ))}
-          <TweakRow label="plugins" value={widgets.configPath ?? "unavailable"}>
+          <TweakRow label="plugins">
+            <div className="twk-path">{widgets.configPath ?? "unavailable"}</div>
             <TweakButton label="reload widgets" secondary onClick={widgets.reload} />
           </TweakRow>
         </TweakSection>

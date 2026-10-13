@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Tweaks: a long path no longer runs off the panel. The `plugins` row under Rail shows the full path to `widgets.json` on its own line, wrapped, and the empty shell field under Terminal shows the default shell's path itself instead of a cut-off `default (…)`.
+
 ## [0.7.0] - 2026-10-13
 
 ### Added

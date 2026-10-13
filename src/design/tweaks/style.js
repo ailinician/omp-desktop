@@ -42,6 +42,8 @@ const __TWEAKS_STYLE = `
     color:var(--fg-3)}
   .twk-lbl>span:first-child{font-weight:500;color:var(--fg-2)}
   .twk-val{color:var(--fg-4);font-variant-numeric:tabular-nums}
+  .twk-path{color:var(--fg-4);font-family:var(--font-mono,ui-monospace,monospace);
+    font-size:var(--d-text-xs,10.5px);overflow-wrap:anywhere;user-select:text}
 
   .twk-sect{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
     color:var(--fg-4);padding:10px 0 0}

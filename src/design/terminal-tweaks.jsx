@@ -44,7 +44,8 @@ function TerminalTweaks({ bridge, height, autoOpen, onAutoOpen }) {
         <input className="twk-field" type="text" spellCheck={false}
           key={settings?.shell ?? ""}
           defaultValue={settings?.shell ?? ""}
-          placeholder={settings?.defaultShell ? `default (${settings.defaultShell})` : "default"}
+          placeholder={settings?.defaultShell || "default"}
+          title={settings?.defaultShell ? `default: ${settings.defaultShell}` : undefined}
           aria-invalid={error != null}
           onBlur={e => save(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }} />
