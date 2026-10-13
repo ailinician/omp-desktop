@@ -5,6 +5,7 @@ use super::kill::process_exists as process_alive;
 use super::pty::HANGUP_GRACE;
 use super::pump::{TerminalEmit, MAX_EVENT, MIN_INTERVAL};
 use super::shell::resolve_shell_with;
+use super::test_support::{open_with, stdout_of, wait_until};
 use super::{Emit, Slot, TerminalManager, TerminalState, TerminalStatus};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -209,19 +210,6 @@ impl Collector {
     }
 }
 
-fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if condition() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 /// [`wait_until`] while acknowledging the output as it arrives, for tests
 /// that produce more than the pump emits unacknowledged.
 fn wait_acking(
@@ -249,13 +237,7 @@ fn temp_dir() -> PathBuf {
 
 /// `id` registered with the temp dir as its folder, its shell opened.
 fn open(id: &str) -> (TerminalManager, Arc<Collector>) {
-    let manager = manager_with(&PLAIN_SHELL);
-    manager.register_tab(id, Some(temp_dir().as_path()));
-    let collector = Arc::new(Collector::default());
-    manager
-        .open(Arc::clone(&collector), id, 80, 24)
-        .expect("open terminal");
-    (manager, collector)
+    open_with(manager_with(&PLAIN_SHELL), id)
 }
 
 #[test]
@@ -810,11 +792,9 @@ fn an_exited_shell_is_never_signalled_again_by_close_or_respawn() {
 
 /// `ps` state of `pid` (`Z...` for a zombie), empty when it is gone.
 fn process_state(pid: i32) -> String {
-    let out = std::process::Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-        .expect("run ps");
-    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    stdout_of("ps", ["-o", "stat=", "-p", &pid.to_string()])
+        .trim()
+        .to_owned()
 }
 
 /// Releases the paused cleanup of a terminal when dropped, so a failing

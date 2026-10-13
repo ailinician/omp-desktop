@@ -33,6 +33,8 @@ mod ring;
 mod settings;
 mod shell;
 mod stream;
+#[cfg(test)]
+mod test_support;
 #[cfg(all(test, unix))]
 mod tests;
 #[cfg(all(test, windows))]

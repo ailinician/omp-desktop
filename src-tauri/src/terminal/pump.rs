@@ -139,6 +139,7 @@ pub fn pump(rx: &Receiver<Msg>, mut emit: impl TerminalEmit, stream: &Stream) {
 #[cfg(test)]
 mod tests {
     use super::super::stream::{HIGH_WATER, LOW_WATER};
+    use super::super::test_support::wait_until;
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
@@ -196,18 +197,6 @@ mod tests {
 
     fn run(rx: &Receiver<Msg>, out: &Timed) {
         pump(rx, out, &Stream::new());
-    }
-
-    /// Poll `check` until it holds or `limit` passes.
-    fn wait_until(limit: Duration, check: impl Fn() -> bool) -> bool {
-        let start = Instant::now();
-        while start.elapsed() < limit {
-            if check() {
-                return true;
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
-        check()
     }
 
     /// `check` turned nonzero and keeps holding the same value for a while.

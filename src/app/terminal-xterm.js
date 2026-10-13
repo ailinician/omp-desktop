@@ -7,6 +7,8 @@
 //   chords handed back to the global keymap — the decisions themselves are
 //   app/terminal.js's `keymapShouldBypass` / `clipboardAction`).
 // - `applyWindowsPty(term, status)`: Rust's ConPTY info onto the instance.
+// - `copySelection(term)`: the selection to the clipboard (ctrl+shift+c,
+//   the panel's right-click).
 // - `theme()`: xterm colours from the active theme's CSS variables.
 // - `exitLine(code)`, `failLine(error)`, `SKIPPED_LINE`: what the xterm shows
 //   for an exited shell, a failed start, and output Rust's ring dropped.
@@ -64,6 +66,13 @@
     }
   }
 
+  /** Copy `term`'s selection to the clipboard; true when there was one. */
+  function copySelection(term) {
+    if (!term.hasSelection()) return false;
+    window.copyText(term.getSelection());
+    return true;
+  }
+
   /**
    * A new xterm and its fit addon. `tryRestart()` is asked on an Enter
    * keydown: true when it restarted the shell (that Enter then never reaches
@@ -106,7 +115,7 @@
       if (clip) {
         e.preventDefault();
         if (clip === "paste") void paste(term);
-        else if (term.hasSelection()) window.copyText(term.getSelection());
+        else copySelection(term);
         return false;
       }
       return !T.keymapShouldBypass(e);
@@ -123,5 +132,6 @@
     theme,
     applyWindowsPty,
     createXterm,
+    copySelection,
   };
 })();

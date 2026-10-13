@@ -25,7 +25,8 @@
 //
 // Exposes `window.OMP_TERMINAL`; an IIFE (AGENTS.md "IIFE rule") that calls
 // `window.OMP_KEYMAP.detectMac()` at load, so it loads after app/keymap.js
-// (its other OMP_KEYMAP lookups happen at call time). design/terminal-panel.jsx
+// (its other OMP_KEYMAP lookups, and `shellLabel`'s
+// `OMP_PROJECT_NAV.basename`, happen at call time). design/terminal-panel.jsx
 // and app/use-terminal.jsx destructure it at top level, so it must load
 // before them.
 (function () {
@@ -197,8 +198,7 @@
   /** `/bin/zsh` -> `zsh`; `C:\\Windows\\System32\\cmd.exe` -> `cmd`. */
   function shellLabel(path) {
     if (typeof path !== "string") return "shell";
-    const base = path.replace(/[\\/]+$/, "").split(/[\\/]/).pop().replace(/\.exe$/i, "");
-    return base || "shell";
+    return window.OMP_PROJECT_NAV.basename(path).replace(/\.exe$/i, "") || "shell";
   }
 
   /**

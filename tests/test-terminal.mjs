@@ -15,9 +15,12 @@ import { dirname, join } from "node:path";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const win = {};
 // keymap.js must load first — terminal.js reads window.OMP_KEYMAP (chords,
-// the resolved bindings, platform detection)
+// the resolved bindings, platform detection) — and project-nav.js gives
+// shellLabel its basename.
 // eslint-disable-next-line no-new-func
 new Function("window", readFileSync(join(root, "src/app/keymap.js"), "utf8"))(win);
+// eslint-disable-next-line no-new-func
+new Function("window", readFileSync(join(root, "src/app/project-nav.js"), "utf8"))(win);
 // eslint-disable-next-line no-new-func
 new Function("window", readFileSync(join(root, "src/app/terminal.js"), "utf8"))(win);
 const T = win.OMP_TERMINAL;

@@ -36,7 +36,7 @@ const {
 } = window.OMP_TERMINAL;
 const {
   SKIPPED_LINE: _UT_SKIPPED, exitLine: _UT_exitLine, failLine: _UT_failLine, theme: _UT_theme,
-  applyWindowsPty: _UT_applyWindowsPty, createXterm: _UT_createXterm,
+  applyWindowsPty: _UT_applyWindowsPty, createXterm: _UT_createXterm, copySelection: _UT_copySelection,
 } = window.OMP_TERMINAL_XTERM;
 const {
   EMPTY: _UT_STREAM, beginSync: _UT_beginSync, onEvent: _UT_onEvent, replayCursor: _UT_replayCursor,
@@ -264,9 +264,7 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
   /** Right-click on a selection copies it; true when it did (no menu then). */
   const copySelection = React.useCallback((sid) => {
     const term = recs.current.get(sid)?.term;
-    if (!term?.hasSelection()) return false;
-    window.copyText(term.getSelection());
-    return true;
+    return term ? _UT_copySelection(term) : false;
   }, []);
 
   const focus = React.useCallback((sid) => recs.current.get(sid)?.term.focus(), []);

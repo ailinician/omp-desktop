@@ -4,11 +4,12 @@
 //! leg. Every wait polls with a generous timeout: no timing is asserted.
 
 use super::pump::TerminalEmit;
+use super::test_support::{open_with, stdout_of, wait_until};
 use super::{Emit, TerminalManager, TerminalState};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const SLOW: Duration = Duration::from_secs(30);
 
@@ -50,44 +51,25 @@ impl Collector {
     }
 }
 
-fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if condition() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 /// `id` registered with the temp dir as its folder, its default shell
 /// opened.
 fn open(id: &str) -> (TerminalManager, Arc<Collector>) {
-    let manager = TerminalManager::new(None);
-    manager.register_tab(id, Some(std::env::temp_dir().as_path()));
-    let out = Arc::new(Collector::default());
-    manager
-        .open(Arc::clone(&out), id, 80, 24)
-        .expect("open terminal");
-    (manager, out)
+    open_with(TerminalManager::new(None), id)
 }
 
 /// Whether a `ping` whose command line contains `marker` is running.
 fn ping_running(marker: &str) -> bool {
-    let out = std::process::Command::new("powershell")
-        .args([
+    stdout_of(
+        "powershell",
+        [
             "-NoProfile",
             "-NonInteractive",
             "-Command",
             "Get-CimInstance Win32_Process -Filter \"Name='PING.EXE'\" \
              | ForEach-Object { $_.CommandLine }",
-        ])
-        .output()
-        .expect("run powershell");
-    String::from_utf8_lossy(&out.stdout).contains(marker)
+        ],
+    )
+    .contains(marker)
 }
 
 #[test]

@@ -979,6 +979,14 @@
   // rpc_chunk frames. Each carries a base64 segment of the original UTF-8 JSON.
   const MAX_REASSEMBLED_FRAME = 64 * 1024 * 1024; // matches ready.maxReassembledFrameBytes
 
+  /** Decode base64 (rpc_chunk segments, terminal output) to its bytes. */
+  function _b64Bytes(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
   // Pure: validate a complete set of rpc_chunk frames for one chunkId and
   // return the parsed JSON object. Throws on any inconsistency.
   function reassembleRpcChunks(frames) {
@@ -995,10 +1003,7 @@
       if (f.byteLength !== byteLength) throw new Error("rpc_chunk: byteLength mismatch");
       if (!Number.isInteger(f.index) || f.index < 0 || f.index >= count) throw new Error("rpc_chunk: index out of range");
       if (parts[f.index] !== undefined) throw new Error("rpc_chunk: duplicate index");
-      const bin = atob(f.data);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      parts[f.index] = bytes;
+      parts[f.index] = _b64Bytes(f.data);
     }
     let total = 0;
     for (const p of parts) total += p.length;
@@ -1139,10 +1144,6 @@
       },
       ready,
     };
-  }
-
-  function _b64Bytes(b64) {
-    return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
   }
 
   /** Detach the active session's listeners and clear all per-session state,

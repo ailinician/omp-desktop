@@ -13,9 +13,7 @@
 //! default, but a change refuses to overwrite it — that would silently
 //! discard whatever the user had stored there.
 
-use std::fs;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
@@ -61,7 +59,7 @@ impl SettingsStore {
     /// Read `path` once (a missing or unreadable file reads as the default).
     pub fn load(path: Option<PathBuf>) -> Self {
         let shell = path.as_deref().map_or_else(String::new, |path| {
-            read_file_strict(path).map_or_else(
+            json_store::read_strict::<SettingsFile>(path).map_or_else(
                 |e| {
                     eprintln!(
                         "[omp-desktop] {} unreadable, using the default shell: {e}",
@@ -114,29 +112,19 @@ impl SettingsStore {
             shell.clone_into(&mut self.cached());
             return Ok(self.settings());
         };
-        json_store::with_lock_str(lock, || {
-            let mut file = read_file_strict(path)
-                .map_err(|e| format!("{} is unreadable: {e}", path.display()))?;
-            if file.shell != shell {
-                shell.clone_into(&mut file.shell);
-                let bytes = serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())?;
-                // `with_lock` already created the lock file's (= this file's)
-                // directory.
-                json_store::write_atomic(path, &bytes).map_err(|e| e.to_string())?;
-            }
+        json_store::update_strict(
+            path,
+            lock,
+            |file: &mut SettingsFile| {
+                let changed = file.shell != shell;
+                if changed {
+                    shell.clone_into(&mut file.shell);
+                }
+                changed
+            },
             // Under the file lock, so the cache follows the file's order.
-            *self.cached() = file.shell;
-            Ok(())
-        })?;
+            |file| *self.cached() = file.shell,
+        )?;
         Ok(self.settings())
-    }
-}
-
-/// `NotFound` ⇒ the default; any other failure (IO, malformed JSON) ⇒ `Err`.
-fn read_file_strict(path: &Path) -> Result<SettingsFile, String> {
-    match fs::read(path) {
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(SettingsFile::default()),
-        Err(e) => Err(e.to_string()),
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
     }
 }
