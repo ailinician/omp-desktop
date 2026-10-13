@@ -42,8 +42,8 @@ const NOT_JSON_PREVIEW_CHARS: usize = 120;
 
 /// Run `entry` with `ctx`. `on_spawn` receives the run's supervisor right
 /// after spawn so another thread can `kill_tree()` it; the run itself still
-/// reaps the child and returns. Exactly one of `stdout`/`error` is set;
-/// `stdout` is set only when it parses as JSON. All error text is redacted.
+/// reaps the child and returns. The result is `Ok` only for a stdout that
+/// parses as JSON. All error text is redacted.
 pub fn run_plugin(
     entry: &PluginEntry,
     ctx: &PluginContext,
@@ -52,17 +52,9 @@ pub fn run_plugin(
     let start = Instant::now();
     let result = run_inner(entry, ctx, on_spawn).and_then(require_json);
     let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-    match result {
-        Ok(stdout) => Outcome {
-            stdout: Some(stdout),
-            error: None,
-            duration_ms,
-        },
-        Err(error) => Outcome {
-            stdout: None,
-            error: Some(error),
-            duration_ms,
-        },
+    Outcome {
+        result,
+        duration_ms,
     }
 }
 
@@ -160,12 +152,8 @@ fn spawn(entry: &PluginEntry, ctx: &PluginContext) -> Result<Child, String> {
     if let Some(path) = path {
         cmd.env("PATH", absolute_path_entries(&path));
     }
+    // Also hides the console window on Windows.
     ProcessSupervisor::prepare(&mut cmd);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(crate::agent::spawn::CREATE_NO_WINDOW);
-    }
     // The OS error names the cause; `NotFound` also means a missing shebang
     // interpreter or a vanished cwd, not only a missing program.
     cmd.spawn()
@@ -277,10 +265,10 @@ mod tests {
     fn assert_timed_out(r: &Outcome, timeout_ms: u64) {
         let want = format!("timed out after {timeout_ms} ms");
         assert!(
-            r.error.as_deref().is_some_and(|e| e.contains(&want)),
+            r.result.as_ref().err().is_some_and(|e| e.contains(&want)),
             "{r:?}"
         );
-        assert!(r.stdout.is_none(), "{r:?}");
+        assert!(r.result.is_err(), "{r:?}");
     }
 
     #[cfg(unix)]
@@ -294,9 +282,9 @@ mod tests {
             ],
             5_000,
         );
-        assert_eq!(r.error, None, "{r:?}");
+        assert!(r.result.is_ok(), "{r:?}");
         assert_eq!(
-            r.stdout.as_deref().map(str::trim),
+            r.result.as_deref().ok().map(str::trim),
             Some(r#"{"trigger":"manual"}"#)
         );
     }
@@ -306,7 +294,7 @@ mod tests {
     fn stdin_carries_context_json() {
         let r = run(&["sh", "-c", "cat"], 5_000);
         let v: serde_json::Value =
-            serde_json::from_str(r.stdout.as_deref().unwrap_or("")).expect("json on stdin");
+            serde_json::from_str(r.result.as_deref().ok().unwrap_or("")).expect("json on stdin");
         assert_eq!(v["session"], "s1");
         assert_eq!(v["trigger"], "manual");
         assert_eq!(v["version"], 1);
@@ -324,7 +312,7 @@ mod tests {
             });
         });
         assert!(start.elapsed() < Duration::from_secs(5), "{r:?}");
-        assert!(r.error.is_some_and(|e| e.starts_with("signal: 9")));
+        assert!(r.result.err().is_some_and(|e| e.starts_with("signal: 9")));
     }
 
     #[cfg(unix)]
@@ -333,16 +321,16 @@ mod tests {
         let start = Instant::now();
         let r = run(&["sh", "-c", "sleep 30 & echo \"{}\""], 5_000);
         assert!(start.elapsed() < Duration::from_secs(4), "{r:?}");
-        assert_eq!(r.stdout.as_deref(), Some("{}\n"), "{r:?}");
-        assert_eq!(r.error, None);
+        assert_eq!(r.result.as_deref().ok(), Some("{}\n"), "{r:?}");
+        assert!(r.result.is_ok());
     }
 
     #[cfg(unix)]
     #[test]
     fn non_json_stdout_is_a_redacted_error() {
         let r = run(&["sh", "-c", "echo 'hello token=SYNTHLEAK'"], 5_000);
-        assert!(r.stdout.is_none());
-        let e = r.error.expect("error");
+        assert!(r.result.is_err());
+        let e = r.result.expect_err("error");
         assert!(
             e.starts_with("stdout is not JSON: hello token=[REDACTED]"),
             "{e}"
@@ -351,7 +339,7 @@ mod tests {
 
         let empty = run(&["true"], 5_000);
         assert_eq!(
-            empty.error.as_deref(),
+            empty.result.as_ref().err().map(String::as_str),
             Some("stdout is not JSON: it is empty")
         );
     }
@@ -377,7 +365,7 @@ mod tests {
             ],
             5_000,
         );
-        let e = r.error.expect("error");
+        let e = r.result.expect_err("error");
         assert!(e.contains("Bearer [REDACTED]"), "{e}");
         assert!(!e.contains("SYNTHETIC123"), "{e}");
     }
@@ -389,8 +377,8 @@ mod tests {
             &["sh", "-c", "echo '{\"version\":1}'; echo boom >&2; exit 3"],
             5_000,
         );
-        assert!(r.stdout.is_none());
-        let e = r.error.expect("error");
+        assert!(r.result.is_err());
+        let e = r.result.expect_err("error");
         assert_eq!(e, "exit 3: boom");
     }
 
@@ -414,10 +402,13 @@ mod tests {
             5_000,
         );
         assert!(
-            r.error.as_deref().is_some_and(|e| e.contains("exceeds")),
+            r.result
+                .as_ref()
+                .err()
+                .is_some_and(|e| e.contains("exceeds")),
             "{r:?}"
         );
-        assert!(r.stdout.is_none());
+        assert!(r.result.is_err());
     }
 
     #[cfg(unix)]
@@ -476,8 +467,9 @@ mod tests {
             5_000,
         );
         assert!(
-            r.error
-                .as_deref()
+            r.result
+                .as_ref()
+                .err()
                 .is_some_and(|e| e.contains("FINAL-MARKER")),
             "{r:?}"
         );
@@ -496,7 +488,8 @@ mod tests {
             &c,
             |_| {},
         );
-        let cwd: String = serde_json::from_str(r.stdout.as_deref().unwrap_or("")).expect("json");
+        let cwd: String =
+            serde_json::from_str(r.result.as_deref().ok().unwrap_or("")).expect("json");
         assert_eq!(
             std::fs::canonicalize(cwd).ok(),
             std::fs::canonicalize(home).ok(),
@@ -508,8 +501,9 @@ mod tests {
     fn missing_executable_reports_spawn_error() {
         let r = run(&["omp-widget-does-not-exist-9f3a"], 5_000);
         assert!(
-            r.error
-                .as_deref()
+            r.result
+                .as_ref()
+                .err()
                 .is_some_and(|e| e.starts_with("could not start omp-widget-does-not-exist-9f3a: ")),
             "{r:?}"
         );
@@ -535,8 +529,8 @@ mod tests {
         // `[1,2]` needs no quoting: an argument with `"` is escaped for the
         // MSVC runtime, which `cmd`'s `echo` would print literally.
         let r = run(&["cmd", "/C", "echo", "[1,2]"], 10_000);
-        assert_eq!(r.error, None, "{r:?}");
-        assert_eq!(r.stdout.as_deref().map(str::trim), Some("[1,2]"));
+        assert!(r.result.is_ok(), "{r:?}");
+        assert_eq!(r.result.as_deref().ok().map(str::trim), Some("[1,2]"));
     }
 
     #[cfg(windows)]

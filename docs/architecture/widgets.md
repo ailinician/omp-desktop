@@ -26,8 +26,8 @@ It never sends a path, a command, a trigger or a context to Rust: only plugin id
 | `src-tauri/src/widgets/run.rs` | `run_plugin(entry, ctx, on_spawn) -> Outcome`: spawn, stdin context, timeout, stdout cap, process-tree kill |
 | `src-tauri/src/widgets/context.rs` | `session_ctx(project)` (branch, password-free default remote; one repo discovery) and the bounded `PluginContext` |
 | `src-tauri/src/widgets/redact.rs` | credential masking for error text, on top of the crate-level `redaction.rs` shared with `agent/reader.rs` |
-| `src/app/widgets.js` | pure: `parseOutput`, `insertText`, `safeUrl`, `tweakKey`, `relativeTime`, `appendToDraft` (`test-widgets.mjs`) |
-| `src/app/use-widgets.jsx` | thin hook: snapshot + run map from events, sends view state, memoised parse per (key, seq) |
+| `src/app/widgets.js` | pure: `parseOutput`, `insertText`, `safeUrl`, `tweakKey`, `relativeTime`, `appendToDraft`, and the run bookkeeping `runKey`, `mergeRun`, `parsedLast`, `cardRun` (`test-widgets.mjs`) |
+| `src/app/use-widgets.jsx` | thin hook: snapshot + run map from events, sends view state, memoised parse per (key, `last.at`) |
 | `src/design/widgets/` | `WidgetCard`, `WidgetApprovalCard`, `WidgetErrorCard`, `WidgetBoundary`, block renderers |
 
 ## Data flow
@@ -57,8 +57,7 @@ Kill  → registry kill_tree      Changed/Removed → app.emit(widgets://run | w
 - **Run registry.** `Mutex<HashMap<RunKey, Arc<ProcessSupervisor>>>`. The lock is held only to insert, remove or loop over kills, never across a blocking run.
 - **Kill action.** `kill_tree()` on the registered supervisor.
 - **`kill_all()`** kills every registered supervisor synchronously and does not depend on the scheduler thread. It is called:
-  - on the updater relaunch path, next to `AgentBridge::shutdown_all` (relaunch skips `Drop`),
-  - on `RunEvent::Exit`,
+  - on the updater relaunch path (which skips `Drop`) and on `RunEvent::Exit`, both through `crate::kill_child_processes`, right after `AgentBridge::shutdown_all`,
   - from `Drop`.
 - **Config source of truth.** The config is read once at startup and again on `widgets_reload`, never per run. The config path is `Option<PathBuf>`: `None` when `app_config_dir()` fails. There is no temp-dir fallback; the snapshot's `fatal` says why, and nothing runs.
 
@@ -81,7 +80,7 @@ Pure, deterministic and fully unit-tested. The host translates the world into `E
   - `queued`: at most one coalesced follow-up;
   - `last`: `Finished { at, outcome }`;
   - `last_ok_at`.
-- **Indexes.** Runs are indexed by key in a `HashMap`. Waiting keys are a FIFO `VecDeque` with a `HashSet` guard. Dirty triggers are per session → plugin. No loop is quadratic.
+- **Indexes.** Runs are indexed by key in a `HashMap`. Waiting keys are a FIFO `VecDeque`; an entry whose run is no longer `Waiting` is skipped when popped. Dirty triggers are per session → plugin. No loop is quadratic.
 
 ### Rules
 
@@ -139,7 +138,7 @@ Events (global, via `app.emit`):
 
 | Event | Payload |
 |---|---|
-| `widgets://config` | `WidgetsSnapshot` with `runs: []` |
+| `widgets://config` | the config part of `WidgetsSnapshot` (no `active`, no `runs`) |
 | `widgets://run` | `RunView` |
 | `widgets://removed` | `{ key, pluginId }` |
 | `widgets://active` | `{ sessionId, applicable }`, emitted when the active session's applicable plugin set changes |
@@ -150,11 +149,11 @@ Shapes (camelCase):
 WidgetsSnapshot = { configPath: string|null, fatal: string|null, errors: string[],
                     plugins: PluginView[], runs: RunView[],
                     active: { sessionId: string|null, applicable: string[] } }
-PluginView = { id, title, scope: "tab"|"global", enabled: boolean, intervalMs: number|null,
-               triggers: string[], approval: "approved"|"pending"|"changed",
+PluginView = { id, title, scope: "tab"|"global", enabled: boolean,
+               approval: "approved"|"pending"|"changed",
                command: string[], fingerprint: string }
 RunView    = { key: string /* session id or "__global__" */, pluginId: string, seq: number,
-               phase: "idle"|"waiting"|"running", trigger: string|null, queued: string|null,
+               phase: "idle"|"waiting"|"running",
                last: null | { at: number, stdout: string|null, error: string|null, durationMs: number },
                lastOkAt: number|null }
 ```
@@ -168,7 +167,7 @@ Frontend handling:
 - **Approval cards** render for every enabled plugin whose approval is not `approved`, regardless of `match`, unless its `widget:plugin:<id>` tweak is off.
 - **Result cards** render per id in `active.applicable` (idle until the first run). The run shown is the one keyed by the active session id, or `__global__` for global plugins.
 - **Event ordering.** `use-widgets.jsx` fetches `widgets_state` on mount and merges events by `seq`, so a `widgets://run` that arrives before the fetch resolves is not lost.
-- **`live.js` exposes** `widgetsState`, `widgetsReload`, `widgetsApprove`, `widgetsSetView`, `widgetsRefresh` and `onWidgetsEvent`. In browser mode (no `__TAURI__`) these return an empty snapshot.
+- **`live.js` exposes** `widgetsState`, `widgetsReload`, `widgetsApprove`, `widgetsSetView`, `widgetsRefresh` and `onWidgetsEvent`. In browser mode (no `__TAURI__`) the snapshot calls return `{}`; `applySnapshot` defaults every missing field.
 
 ## Trust
 
@@ -206,6 +205,6 @@ Frontend handling:
 - **Approval before every spawn.** No code path may start a plugin without a fingerprint check against `ApprovalStore` immediately before spawning.
 - **Triggers and scheduling live in Rust.** No timers, trigger filtering, matching or run queues in React or `live.js`. The frontend only reports view state and renders.
 - **The frontend sends only ids and view state** (`pluginId`, `fingerprint`, `sessionId`, visibility, hidden ids). Never a path, a command, a trigger or a plugin context.
-- **`kill_all` sits beside `AgentBridge::shutdown_all`** on the updater relaunch path (which skips `Drop`), and runs on `RunEvent::Exit`.
+- **`kill_all` sits beside `AgentBridge::shutdown_all`** in `crate::kill_child_processes`, which both the updater relaunch path (which skips `Drop`) and `RunEvent::Exit` call.
 - **The config is read only at startup and on `widgets_reload`.** A run never re-reads `widgets.json`.
 - **Rail hidden ⇒ nothing starts.** Neither does a card whose `widget:plugin:<id>` tweak is false.

@@ -12,6 +12,7 @@
 //! session are `u64` bit masks indexed like the config's plugin list.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use super::config::{PluginEntry, Scope, Trigger, MAX_PLUGINS};
 
@@ -46,19 +47,19 @@ pub struct View {
     pub hidden: HashSet<String>,
 }
 
-/// Result of one run; exactly one of `stdout`/`error` is `Some`.
+/// Result of one run: the plugin's JSON stdout, or an error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
-    pub stdout: Option<String>,
-    pub error: Option<String>,
+    pub result: Result<String, String>,
     pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    /// The current config; `approved` holds the ids whose current fingerprint is approved.
+    /// The current config; `approved` holds the ids whose current fingerprint
+    /// is approved. The entries are shared with the host's config view.
     Config {
-        plugins: Vec<PluginEntry>,
+        plugins: Vec<Arc<PluginEntry>>,
         approved: HashSet<String>,
     },
     View(View),
@@ -112,7 +113,8 @@ pub enum Action {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Phase {
     Idle,
     /// Queued for a concurrency slot.
@@ -166,7 +168,7 @@ struct Session {
 
 #[derive(Debug, Default)]
 struct Config {
-    plugins: Vec<PluginEntry>,
+    plugins: Vec<Arc<PluginEntry>>,
     /// Plugin id → index into `plugins` (first entry wins on duplicates).
     index: HashMap<String, usize>,
     approved: HashSet<String>,
@@ -175,7 +177,7 @@ struct Config {
 impl Config {
     fn get(&self, id: &str) -> Option<(usize, &PluginEntry)> {
         let &i = self.index.get(id)?;
-        self.plugins.get(i).map(|p| (i, p))
+        self.plugins.get(i).map(|p| (i, &**p))
     }
 }
 
@@ -201,11 +203,11 @@ impl Table {
         };
         if st.phase != Phase::Idle {
             // An interval tick never replaces a pending turn-end/branch/manual refresh.
+            // Nothing the rail shows changed: no `Changed`.
             st.queued = match st.queued {
                 Some(q) if trigger == Trigger::Interval && q != Trigger::Interval => Some(q),
                 _ => Some(trigger),
             };
-            actions.push(Action::Changed { key });
             return;
         }
         self.last_seq += 1;
@@ -239,6 +241,14 @@ struct Gate<'a> {
 }
 
 impl<'a> Gate<'a> {
+    const fn new(cfg: &'a Config, view: &'a View, sessions: &'a HashMap<String, Session>) -> Self {
+        Self {
+            cfg,
+            view,
+            sessions,
+        }
+    }
+
     /// enabled ∧ approved ∧ shown ∧ rail visible ∧ session known ∧ match.
     fn runnable(&self, p: &PluginEntry, session: &str) -> bool {
         p.enabled
@@ -329,6 +339,14 @@ fn due_now(run: Option<&RunState>, interval: u64, now: u64) -> bool {
             .last
             .as_ref()
             .is_none_or(|f| now.saturating_sub(f.at) >= interval),
+    }
+}
+
+/// Re-arms plugin `i`'s interval timer one interval from `now`; a no-op for a
+/// plugin without one.
+fn rearm(timers: &mut [Option<u64>], i: usize, p: &PluginEntry, now: u64) {
+    if let (Some(due), Some(iv)) = (timers.get_mut(i), p.interval_ms) {
+        *due = Some(now.saturating_add(iv));
     }
 }
 
@@ -442,14 +460,6 @@ impl Scheduler {
         (active, ids)
     }
 
-    const fn gate(&self) -> Gate<'_> {
-        Gate {
-            cfg: &self.cfg,
-            view: &self.view,
-            sessions: &self.sessions,
-        }
-    }
-
     /// A clock that jumped back must not push a timer further away than one interval.
     fn clamp_timers(&mut self, now: u64) {
         for (due, p) in self.timers.iter_mut().zip(&self.cfg.plugins) {
@@ -472,7 +482,8 @@ impl Scheduler {
             // Once per tab switch.
             self.active = active.cloned();
         }
-        let mask = self.active.as_deref().map_or(0, |s| self.gate().mask(s));
+        let gate = Gate::new(&self.cfg, &self.view, &self.sessions);
+        let mask = self.active.as_deref().map_or(0, |s| gate.mask(s));
         let newly = if switched {
             let has_active = self.active.is_some();
             for (due, p) in self.timers.iter_mut().zip(&self.cfg.plugins) {
@@ -513,9 +524,7 @@ impl Scheduler {
             let trigger = match p.scope {
                 Scope::Tab => {
                     let dirty = sess.as_mut().and_then(|s| s.dirty.remove(&p.id));
-                    if let (Some(due), Some(iv)) = (self.timers.get_mut(i), p.interval_ms) {
-                        *due = Some(now.saturating_add(iv));
-                    }
+                    rearm(&mut self.timers, i, p, now);
                     if p.wants(Trigger::Activate) {
                         Some(Trigger::Activate)
                     } else {
@@ -533,9 +542,7 @@ impl Scheduler {
                 continue;
             };
             if p.scope == Scope::Global {
-                if let (Some(due), Some(iv)) = (self.timers.get_mut(i), p.interval_ms) {
-                    *due = Some(now.saturating_add(iv));
-                }
+                rearm(&mut self.timers, i, p, now);
             }
             self.table.start(key, trigger, session, actions);
         }
@@ -582,9 +589,7 @@ impl Scheduler {
             if !due_now(self.table.runs.get(&key), iv, now) {
                 continue;
             }
-            if let Some(due) = self.timers.get_mut(i) {
-                *due = Some(now.saturating_add(iv));
-            }
+            rearm(&mut self.timers, i, p, now);
             self.table.start(key, Trigger::Interval, session, actions);
         }
     }
@@ -667,7 +672,7 @@ impl Scheduler {
             return;
         }
         st.phase = Phase::Idle;
-        if outcome.error.is_none() {
+        if outcome.result.is_ok() {
             st.last_ok_at = Some(now);
         }
         st.last = Some(Finished { at: now, outcome });
@@ -679,11 +684,7 @@ impl Scheduler {
         let Some(trigger) = queued else {
             return;
         };
-        let gate = Gate {
-            cfg: &self.cfg,
-            view: &self.view,
-            sessions: &self.sessions,
-        };
+        let gate = Gate::new(&self.cfg, &self.view, &self.sessions);
         if let Some(session) = gate.allowed(&key, trigger, self.active.as_deref()) {
             self.table.start(key, trigger, session, actions);
         }
@@ -692,11 +693,7 @@ impl Scheduler {
     /// Fills free slots from the waiting FIFO; a waiting run that may no
     /// longer start (tab closed, hidden, unapproved, …) goes back to idle.
     fn promote(&mut self, actions: &mut Vec<Action>) {
-        let gate = Gate {
-            cfg: &self.cfg,
-            view: &self.view,
-            sessions: &self.sessions,
-        };
+        let gate = Gate::new(&self.cfg, &self.view, &self.sessions);
         let active = self.active.as_deref();
         while self.table.running < MAX_CONCURRENT_RUNS {
             let Some(key) = self.table.waiting.pop_front() else {
@@ -767,7 +764,7 @@ impl Scheduler {
 
     fn set_config(
         &mut self,
-        plugins: Vec<PluginEntry>,
+        plugins: Vec<Arc<PluginEntry>>,
         approved: HashSet<String>,
         now: u64,
         actions: &mut Vec<Action>,
@@ -879,16 +876,14 @@ mod tests {
 
     fn ok() -> Outcome {
         Outcome {
-            stdout: Some("{}".into()),
-            error: None,
+            result: Ok("{}".into()),
             duration_ms: 3,
         }
     }
 
     fn err(msg: &str) -> Outcome {
         Outcome {
-            stdout: None,
-            error: Some(msg.into()),
+            result: Err(msg.into()),
             duration_ms: 3,
         }
     }
@@ -940,6 +935,11 @@ mod tests {
         plugins.iter().map(|p| p.id.clone()).collect()
     }
 
+    /// `plugins` as the host hands them over: shared entries.
+    fn shared(plugins: Vec<PluginEntry>) -> Vec<Arc<PluginEntry>> {
+        plugins.into_iter().map(Arc::new).collect()
+    }
+
     /// A scheduler with a clock: rail and window visible, every plugin approved.
     struct H {
         s: Scheduler,
@@ -970,10 +970,14 @@ mod tests {
 
         fn config(&mut self, plugins: Vec<PluginEntry>) -> Vec<Action> {
             let approved = approved_all(&plugins);
-            self.ev(Event::Config { plugins, approved })
+            self.ev(Event::Config {
+                plugins: shared(plugins),
+                approved,
+            })
         }
 
         fn push_view(&mut self) -> Vec<Action> {
+            // `H` keeps its view for the next tweak; the event owns a copy.
             let v = self.view.clone();
             self.ev(Event::View(v))
         }
@@ -1012,9 +1016,15 @@ mod tests {
             self.s.run(k).expect("run state").phase
         }
 
+        /// Finishes the current run of `k`.
         fn finish(&mut self, k: &RunKey, outcome: Outcome) -> Vec<Action> {
             let seq = self.seq(k);
+            self.finish_seq(k, seq, outcome)
+        }
+
+        fn finish_seq(&mut self, k: &RunKey, seq: u64, outcome: Outcome) -> Vec<Action> {
             self.ev(Event::Finished {
+                // The event owns its key; callers keep theirs for asserts.
                 key: k.clone(),
                 seq,
                 outcome,
@@ -1054,6 +1064,7 @@ mod tests {
             let keys: Vec<RunKey> = a
                 .iter()
                 .filter_map(|a| match a {
+                    // Copied out: `finish` below needs `h` mutably.
                     Action::Start { key, .. } => Some(key.clone()),
                     _ => None,
                 })
@@ -1152,11 +1163,7 @@ mod tests {
         h.manual("git");
         let fresh = h.seq(&k);
         assert_ne!(old, fresh);
-        let a = h.ev(Event::Finished {
-            key: k.clone(),
-            seq: old,
-            outcome: err("old"),
-        });
+        let a = h.finish_seq(&k, old, err("old"));
         assert_eq!(a, vec![]);
         assert_eq!(h.phase(&k), Phase::Running, "old seq must not overwrite");
         let a = h.ev(Event::Finished {
@@ -1167,11 +1174,7 @@ mod tests {
         assert_eq!(a, vec![], "unknown key");
         h.finish(&k, ok());
         assert_eq!(h.phase(&k), Phase::Idle);
-        let a = h.ev(Event::Finished {
-            key: k.clone(),
-            seq: fresh,
-            outcome: err("dup"),
-        });
+        let a = h.finish_seq(&k, fresh, err("dup"));
         assert_eq!(a, vec![], "an idle run takes no result");
         assert_eq!(
             h.s.run(&k)
@@ -1434,10 +1437,9 @@ mod tests {
 
     #[test]
     fn approving_one_plugin_runs_only_that_plugin() {
-        let plugins = vec![tab("a"), tab("b")];
         let mut h = H::new(Vec::new());
         h.ev(Event::Config {
-            plugins: plugins.clone(),
+            plugins: shared(vec![tab("a"), tab("b")]),
             approved: HashSet::from(["a".to_string()]),
         });
         h.open("s1", "/p");
@@ -1447,10 +1449,7 @@ mod tests {
         );
         h.finish(&key("s1", "a"), ok());
         assert_eq!(starts(&h.manual("b")), vec![], "pending approval = no runs");
-        let a = h.ev(Event::Config {
-            approved: approved_all(&plugins),
-            plugins,
-        });
+        let a = h.config(vec![tab("a"), tab("b")]);
         assert_eq!(starts(&a), vec![("s1", "b", "s1", Activate)]);
     }
 
@@ -1727,10 +1726,14 @@ mod tests {
 
     #[test]
     fn interval_follow_ups_need_a_visible_window_and_for_tabs_the_active_tab() {
-        let tp = plugin("t", Scope::Tab, &[Activate, TurnEnd], Some(MIN));
-        let gp = plugin("g", Scope::Global, &[Activate], Some(MIN));
+        let plugins = || {
+            vec![
+                plugin("t", Scope::Tab, &[Activate, TurnEnd], Some(MIN)),
+                plugin("g", Scope::Global, &[Activate], Some(MIN)),
+            ]
+        };
         // Tab plugin, its tab no longer active.
-        let mut h = H::new(vec![tp.clone(), gp.clone()]);
+        let mut h = H::new(plugins());
         h.open("s1", "/p");
         h.open("s2", "/q");
         h.activate(Some("s1"));
@@ -1749,7 +1752,7 @@ mod tests {
             "global ignores the tab"
         );
         // Hidden window.
-        let mut h = H::new(vec![tp, gp]);
+        let mut h = H::new(plugins());
         h.open("s1", "/p");
         h.activate(Some("s1"));
         h.tick_to_deadline();
@@ -1879,7 +1882,7 @@ mod tests {
         h.finish(&key("s1", "b"), ok());
         let plugins = vec![tab("b"), global("g")];
         let a = h.ev(Event::Config {
-            plugins,
+            plugins: shared(plugins),
             approved: HashSet::from(["b".to_string()]),
         });
         let mut killed = kills(&a);
@@ -1953,15 +1956,15 @@ mod tests {
 
     #[test]
     fn approval_change_rebuilds_the_timer() {
-        let p = plugin("t", Scope::Global, &[], Some(MIN));
-        let mut h = H::settled(vec![p.clone()]);
+        let p = || plugin("t", Scope::Global, &[], Some(MIN));
+        let mut h = H::settled(vec![p()]);
         h.ev(Event::Config {
-            plugins: vec![p.clone()],
+            plugins: shared(vec![p()]),
             approved: HashSet::new(),
         });
         assert_eq!(h.s.next_deadline(), None, "unapproved: no timer");
         h.now += 5;
-        h.config(vec![p]);
+        h.config(vec![p()]);
         assert_eq!(h.s.next_deadline(), Some(h.now + MIN));
     }
 
@@ -1990,7 +1993,10 @@ mod tests {
         let mut h = H::new(Vec::new());
         let mut approved = approved_all(&plugins);
         approved.remove("pending");
-        h.ev(Event::Config { plugins, approved });
+        h.ev(Event::Config {
+            plugins: shared(plugins),
+            approved,
+        });
         assert_eq!(h.s.active_applicable(), (None, vec![]));
         h.open("s1", "/work/x");
         h.open("s2", "/home/y");

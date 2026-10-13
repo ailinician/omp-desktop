@@ -400,7 +400,7 @@ check("text block insert is preserved and clipped", () => {
 });
 
 // ── run bookkeeping: mergeRun / parsedLast / cardRun ──────────────────────
-const view = (over = {}) => ({ key: "s1", pluginId: "git", seq: 1, phase: "running", trigger: "activate", queued: null, last: null, lastOkAt: null, ...over });
+const view = (over = {}) => ({ key: "s1", pluginId: "git", seq: 1, phase: "running", last: null, lastOkAt: null, ...over });
 const okStdout = JSON.stringify({ version: 1, status: "ok", blocks: [{ type: "text", text: "hi" }] });
 const finished = (at, over = {}) => ({ at, stdout: okStdout, error: null, durationMs: 7, ...over });
 
@@ -424,11 +424,11 @@ check("mergeRun never lets an older state overwrite a newer one (snapshot after 
   assert.equal(W.mergeRun(runs, view({ seq: 2, phase: "idle", last: finished(20) })), false, "older seq");
   assert.equal(runs.get(W.runKey("s1", "git")).last.at, 30);
 });
-check("mergeRun: same seq and phase takes the later payload (queued trigger changes)", () => {
+check("mergeRun: same seq and phase takes the later payload", () => {
   const runs = new Map();
   W.mergeRun(runs, view());
-  assert.equal(W.mergeRun(runs, view({ queued: "turn_end" })), true);
-  assert.equal(runs.get(W.runKey("s1", "git")).queued, "turn_end");
+  assert.equal(W.mergeRun(runs, view({ lastOkAt: 5 })), true);
+  assert.equal(runs.get(W.runKey("s1", "git")).lastOkAt, 5);
 });
 check("mergeRun keeps tab and global keys apart and ignores malformed payloads", () => {
   const runs = new Map();

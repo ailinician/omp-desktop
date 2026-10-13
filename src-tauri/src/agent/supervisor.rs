@@ -71,17 +71,22 @@ impl ProcessSupervisor {
     /// Unix needs this pre-spawn hook to install the child as the leader
     /// of a brand new process group, so descendants that never call
     /// `setpgid` themselves stay in it. Windows attaches supervision
-    /// post-spawn instead (a job object needs a live process handle), so
-    /// this is a no-op there.
+    /// post-spawn instead (a job object needs a live process handle); its
+    /// `prepare` only hides the console window.
     #[cfg(unix)]
     pub fn prepare(cmd: &mut Command) {
         cmd.process_group(0);
     }
 
-    /// Windows counterpart of the Unix `prepare` — no pre-spawn setup is
-    /// needed, since job-object assignment happens after `.spawn()`.
+    /// Windows counterpart of the Unix `prepare`. Job-object assignment
+    /// happens after `.spawn()`; the only pre-spawn setup is
+    /// `CREATE_NO_WINDOW`, since every supervised child (omp, a widget
+    /// plugin) is a console program spawned by this GUI app.
     #[cfg(windows)]
-    pub const fn prepare(_cmd: &mut Command) {}
+    pub fn prepare(cmd: &mut Command) {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(super::spawn::CREATE_NO_WINDOW);
+    }
 
     /// Attach supervision to a just-spawned child. Must be called *after*
     /// `.spawn()`.

@@ -367,11 +367,11 @@
 
   // Rail widgets: the `WidgetsSnapshot` `cmd` returns, or an empty one that
   // carries the rejection as `fatal` (browser mode: empty, no fatal).
+  // app/use-widgets.jsx's applySnapshot defaults every missing field.
   async function _widgetsSnapshot(cmd) {
-    const empty = { configPath: null, fatal: null, errors: [], plugins: [], runs: [], active: { sessionId: null, applicable: [] } };
-    if (!window.__TAURI__) return empty;
+    if (!window.__TAURI__) return {};
     const r = await _invokeResult(cmd, {});
-    return r.ok ? r.value : { ...empty, fatal: r.error };
+    return r.ok ? r.value : { fatal: r.error };
   }
 
   // What the user typed for a `/skill:` call, from its `skill-prompt`

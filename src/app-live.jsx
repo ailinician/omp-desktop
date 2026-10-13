@@ -350,16 +350,16 @@ function App() {
   // sends it as a normal prompt, which omp executes.
   const [draftInsert, setDraftInsert] = React.useState(null);
   const handleInsertDraft = (text) => setDraftInsert({ text, nonce: Date.now() });
-  // Widget inserts append to the draft (OMP_WIDGETS.appendToDraft) — their
-  // own path, since ⌘K's draftInsert replaces a `/command` draft.
-  const [appendInsert, setAppendInsert] = React.useState(null);
-  const handleWidgetInsert = React.useCallback(text => setAppendInsert({ text, nonce: Date.now() }), []);
 
   // Prompt-history picker (Ctrl+Up modal, issue #16) — same {text, nonce}
-  // shape and rationale as draftInsert above, but always *replaces* the
-  // draft (see composer.jsx's promptInsert effect) rather than appending.
+  // shape and rationale as draftInsert above, but *replaces* the draft (see
+  // composer.jsx's promptInsert effect) rather than prepending. Rail widget
+  // inserts set `append` instead: they go after the draft
+  // (OMP_WIDGETS.appendToDraft), since ⌘K's draftInsert replaces a
+  // `/command` draft.
   const [promptInsert, setPromptInsert] = React.useState(null);
   const handlePickHistoryPrompt = (text) => setPromptInsert({ text, nonce: Date.now() });
+  const handleWidgetInsert = React.useCallback(text => setPromptInsert({ text, append: true, nonce: Date.now() }), []);
 
   // Goal mode in the composer and the goal strip above it (omp's `goal`).
   const goalUi = useGoalMode({
@@ -695,7 +695,6 @@ function App() {
                     onPick={handleCommand}
                     onFollowUp={handleFollowUp}
                     draftInsert={draftInsert}
-                    appendInsert={appendInsert}
                     promptHistory={promptHistory}
                     promptInsert={promptInsert}
                     queue={queue}

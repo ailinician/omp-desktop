@@ -36,6 +36,14 @@ pub const REDACTED_KEYS: &[&str] = &[
 
 pub const REDACTED_PLACEHOLDER: &str = "[REDACTED]";
 
+/// Whether `key` names a credential: its normalized form ends with one of
+/// [`REDACTED_KEYS`] (see [`normalized_key_ends_with`]).
+pub fn is_credential_key(key: &str) -> bool {
+    REDACTED_KEYS
+        .iter()
+        .any(|k| normalized_key_ends_with(key, k))
+}
+
 /// Whether `key`'s normalized form (ASCII-lowercased, with `_` and `-`
 /// removed) ends with `suffix`.
 ///

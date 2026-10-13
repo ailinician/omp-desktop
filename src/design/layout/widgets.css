@@ -15,8 +15,7 @@
 .wdg-status, .wdg-item { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .wdg-number { display: flex; align-items: baseline; gap: 6px; }
 .wdg-number-value { font-size: var(--d-text-lg); color: var(--fg); }
-.wdg-tube { height: 4px; border-radius: 2px; background: color-mix(in oklab, var(--fg-5) 40%, transparent); overflow: hidden; }
-.wdg-fill { height: 100%; background: var(--accent); }
+.wdg-tube { display: flex; width: auto; }
 .wdg-text { color: var(--fg-3); font-size: var(--d-text-sm); white-space: pre-wrap; word-break: break-word; }
 .wdg-kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; }
 .wdg-list { display: flex; flex-direction: column; gap: 3px; max-height: 220px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line-bright) transparent; }

@@ -862,6 +862,16 @@ async fn app_update_install(
     updater::install(&app, &state).await
 }
 
+/// Kill every child process tree the app owns — omp sessions first, then
+/// running widget plugins — on the calling thread. For the exits where
+/// managed state is never dropped (app exit, the updater relaunch); on Unix
+/// each tree sits in its own process group and would outlive us. Both steps
+/// are idempotent.
+pub(crate) fn kill_child_processes(app: &AppHandle) {
+    app.state::<AgentBridge>().shutdown_all();
+    widgets::kill_all(app);
+}
+
 /// App-level state that needs a resolved path, and the cold-start "Open
 /// with" argv — `run()`'s `setup` hook. No omp process starts here: the app
 /// opens with no tab until the user (or an OS folder open) picks a project.
@@ -1033,11 +1043,8 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|app, event| {
-        // Managed state is never dropped on exit, so `WidgetHost`'s `Drop`
-        // would not run: kill the plugin process trees explicitly (on Unix
-        // each sits in its own process group and would outlive us).
         if matches!(event, tauri::RunEvent::Exit) {
-            widgets::kill_all(app);
+            kill_child_processes(app);
         }
         // macOS' "Open with" for a folder (see `Info.plist`) arrives as a
         // run-loop event, on launch *and* while already running — the one

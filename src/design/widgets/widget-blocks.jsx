@@ -112,7 +112,7 @@ function WidgetBlock({ block, onInsert }) {
       return (
         <div className="wdg-progress">
           <div className="wdg-label mono">{block.label} <span className="wdg-value">{block.value}/{block.max}</span></div>
-          <div className="wdg-tube"><div className="wdg-fill" style={{ width: `${(block.value / block.max) * 100}%` }} /></div>
+          <div className="status-bar-tube wdg-tube"><div className="status-bar-fill" style={{ width: `${(block.value / block.max) * 100}%` }} /></div>
         </div>
       );
     case "text":
@@ -149,8 +149,11 @@ function WidgetBlock({ block, onInsert }) {
   }
 }
 
-function WidgetBlocks({ blocks, onInsert }) {
+// Memoised: the App re-renders on every streaming delta, while `blocks` is
+// the cached parse of the last output (OMP_WIDGETS.parsedLast) and
+// `onInsert` is stable, so the blocks re-render only on a new result.
+const WidgetBlocks = React.memo(function WidgetBlocks({ blocks, onInsert }) {
   return <>{blocks.map((b, i) => <WidgetBlock key={i} block={b} onInsert={onInsert} />)}</>;
-}
+});
 
 Object.assign(window, { WidgetBlocks });

@@ -92,21 +92,21 @@ function useWidgets({ bridge, activeSessionId, railVisible, tweaks }) {
   const hiddenKey = config.plugins
     .filter(p => tweaks[_UW.tweakKey(p.id)] === false)
     .map(p => p.id).join("\0");
+  const hiddenIds = React.useMemo(() => (hiddenKey ? hiddenKey.split("\0") : _UW_NO_IDS), [hiddenKey]);
   const sessionId = activeSessionId || null;
   // Sent only when a field changes: the deps are the view's own values.
   React.useEffect(() => {
     if (!bridge) return;
-    bridge.widgetsSetView({ sessionId, railVisible, windowVisible, hidden: hiddenKey ? hiddenKey.split("\0") : [] });
-  }, [bridge, sessionId, railVisible, windowVisible, hiddenKey]);
+    bridge.widgetsSetView({ sessionId, railVisible, windowVisible, hidden: hiddenIds });
+  }, [bridge, sessionId, railVisible, windowVisible, hiddenIds]);
 
   const activeIds = applicable[sessionId ?? ""] ?? _UW_NO_IDS;
   const cards = React.useMemo(() => {
     const byId = new Map(config.plugins.map(p => [p.id, p]));
-    const hidden = new Set(hiddenKey ? hiddenKey.split("\0") : []);
     const out = [];
     for (const id of activeIds) {
       const p = byId.get(id);
-      if (!p || !p.enabled || p.approval !== "approved" || hidden.has(id)) continue;
+      if (!p || !p.enabled || p.approval !== "approved" || hiddenIds.includes(id)) continue;
       const key = p.scope === "global" ? _UW_GLOBAL_KEY : sessionId;
       if (!key) continue;
       const k = _UW.runKey(key, id);
@@ -115,15 +115,13 @@ function useWidgets({ bridge, activeSessionId, railVisible, tweaks }) {
       out.push({ id, title: p.title, resetKey: `${k}:${run?.seq ?? 0}`, run: _UW.cardRun(run, parsed) });
     }
     return out;
-  }, [config.plugins, activeIds, hiddenKey, sessionId, runsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [config.plugins, activeIds, hiddenIds, sessionId, runsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Approval is per plugin, not per tab: shown whatever the active project.
-  const approvals = React.useMemo(() => {
-    const hidden = new Set(hiddenKey ? hiddenKey.split("\0") : []);
-    return config.plugins
-      .filter(p => p.enabled && p.approval !== "approved" && !hidden.has(p.id))
-      .map(p => ({ id: p.id, title: p.title, command: p.command, changed: p.approval === "changed" }));
-  }, [config.plugins, hiddenKey]);
+  const approvals = React.useMemo(() => config.plugins
+    .filter(p => p.enabled && p.approval !== "approved" && !hiddenIds.includes(p.id))
+    .map(p => ({ id: p.id, title: p.title, command: p.command, changed: p.approval === "changed" })),
+  [config.plugins, hiddenIds]);
 
   const togglePlugins = React.useMemo(() => config.plugins.filter(p => p.enabled), [config.plugins]);
 

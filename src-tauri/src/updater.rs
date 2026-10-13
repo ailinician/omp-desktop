@@ -20,7 +20,7 @@
 //! The non-Windows relaunch (`request_restart`) ends the process without
 //! dropping managed state, so `AgentBridge`'s `Drop` never runs; the omp
 //! children and the widget plugin processes are killed explicitly
-//! ([`AgentBridge::shutdown_all`], `widgets::kill_all`) first —
+//! ([`crate::kill_child_processes`]) first —
 //! on Unix each sits in its own process group and would outlive us. On
 //! Windows the plugin launches the installer and then exits; every omp
 //! tree sits in a `KILL_ON_JOB_CLOSE` job object and dies with us. Killing
@@ -33,10 +33,8 @@ use std::time::Duration;
 
 use tauri::utils::config::BundleType;
 use tauri::utils::platform::bundle_type;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::{Update, UpdaterExt};
-
-use crate::agent::AgentBridge;
 
 /// Event carrying [`Progress`] while an update downloads.
 pub const PROGRESS_EVENT: &str = "update://progress";
@@ -300,8 +298,7 @@ async fn download_and_install(
         }
         // Windows never gets here: the plugin exited the process after
         // launching the installer.
-        handle.state::<AgentBridge>().shutdown_all();
-        crate::widgets::kill_all(&handle);
+        crate::kill_child_processes(&handle);
         handle.request_restart();
         (None, Ok(()))
     })

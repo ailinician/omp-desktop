@@ -19,14 +19,18 @@
 //! It is a linear scanner, not a parser: unknown shapes pass through. The
 //! input is returned borrowed when nothing matches; the output is built once,
 //! only when something is masked.
+//!
+//! [`REDACTED_KEYS`]: crate::redaction::REDACTED_KEYS
 
 use std::borrow::Cow;
 
-use crate::redaction::{normalized_key_ends_with, REDACTED_KEYS, REDACTED_PLACEHOLDER};
+use crate::redaction::{is_credential_key, normalized_key_ends_with, REDACTED_PLACEHOLDER};
 
 /// Free-text key spellings on top of [`REDACTED_KEYS`]. Only in the tight
 /// forms (`token=x`, `token: x`): a bare `token = …` is usually source code
 /// in a traceback, not a secret.
+///
+/// [`REDACTED_KEYS`]: crate::redaction::REDACTED_KEYS
 const FREE_TEXT_KEYS: &[&str] = &["token", "passwd", "cookie"];
 
 /// Token prefixes that identify a credential on their own.
@@ -146,7 +150,7 @@ impl<'a> Scanner<'a> {
                         self.expect = Expect::SchemeValue;
                         return;
                     }
-                    if !word.contains(['=', ':']) && is_strong_key(trim_quotes(word)) {
+                    if !word.contains(['=', ':']) && is_credential_key(trim_quotes(word)) {
                         self.expect = Expect::Separator;
                         return;
                     }
@@ -292,15 +296,8 @@ fn is_one_of(word: &str, names: &[&str]) -> bool {
     names.iter().any(|n| word.eq_ignore_ascii_case(n))
 }
 
-/// A key of the shared JSON list.
-fn is_strong_key(key: &str) -> bool {
-    REDACTED_KEYS
-        .iter()
-        .any(|k| normalized_key_ends_with(key, k))
-}
-
 fn is_key(key: &str) -> bool {
-    is_strong_key(key)
+    is_credential_key(key)
         || FREE_TEXT_KEYS
             .iter()
             .any(|k| normalized_key_ends_with(key, k))

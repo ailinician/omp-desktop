@@ -22,8 +22,7 @@ const SUPPORTED_VERSION: u64 = 1;
 const CONFIG_TRIGGERS: [Trigger; 3] = [Trigger::Activate, Trigger::TurnEnd, Trigger::Branch];
 
 /// Why a plugin run was started; passed to the plugin as `OMP_WIDGET_TRIGGER`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Trigger {
     Activate,
     TurnEnd,
@@ -243,24 +242,18 @@ fn parse_triggers(list: Option<Vec<String>>, id: &str, warnings: &mut Vec<String
     };
     let mut out = Vec::with_capacity(list.len().min(CONFIG_TRIGGERS.len()));
     for name in list {
-        let trigger = match name.as_str() {
-            "activate" => Trigger::Activate,
-            "turn_end" => Trigger::TurnEnd,
-            "branch" => Trigger::Branch,
-            // Always allowed; listing it is harmless.
-            "manual" => continue,
-            "interval" => {
-                warnings.push(format!(
+        let Some(trigger) = CONFIG_TRIGGERS.into_iter().find(|t| t.as_str() == name) else {
+            match name.as_str() {
+                // Always allowed; listing it is harmless.
+                "manual" => {}
+                "interval" => warnings.push(format!(
                     "plugin \"{id}\": \"interval\" is not a valid trigger; set \"intervalMs\" instead"
-                ));
-                continue;
-            }
-            _ => {
-                warnings.push(format!(
+                )),
+                _ => warnings.push(format!(
                     "plugin \"{id}\": unknown trigger \"{name}\" (expected activate, turn_end, branch or manual)"
-                ));
-                continue;
+                )),
             }
+            continue;
         };
         if !out.contains(&trigger) {
             out.push(trigger);
@@ -717,19 +710,18 @@ mod tests {
     }
 
     #[test]
-    fn trigger_names_round_trip_with_serde() {
-        for t in [
-            Trigger::Activate,
-            Trigger::TurnEnd,
-            Trigger::Branch,
-            Trigger::Manual,
-            Trigger::Interval,
-        ] {
-            assert_eq!(
-                serde_json::to_value(t).expect("serialize"),
-                serde_json::Value::from(t.as_str())
-            );
-        }
+    fn config_trigger_names_parse() {
+        let names = ["activate", "turn_end", "branch"].map(String::from);
+        let mut warnings = Vec::new();
+        assert_eq!(
+            parse_triggers(Some(Vec::from(names)), "p", &mut warnings),
+            CONFIG_TRIGGERS
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn scope_serialises_snake_case() {
         assert_eq!(
             serde_json::to_value(Scope::Global).expect("serialize"),
             serde_json::Value::from("global")

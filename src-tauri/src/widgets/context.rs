@@ -53,8 +53,7 @@ pub fn session_ctx(project: Option<&Path>) -> SessionCtx {
         .head_name()
         .ok()
         .flatten()
-        .map(|name| name.shorten().to_string())
-        .unwrap_or_default();
+        .map_or_default(|name| name.shorten().to_string());
     // Bound to a local: in edition 2021 the temporaries of a tail expression
     // would outlive `repo`.
     let remote = repo
@@ -97,11 +96,7 @@ pub fn plugin_context(ctx: &SessionCtx, session: &str, trigger: Trigger) -> Plug
 /// `field` cut to at most [`CONTEXT_FIELD_MAX_BYTES`] on a char boundary,
 /// copied once.
 fn bounded(field: &str) -> String {
-    let mut end = field.len().min(CONTEXT_FIELD_MAX_BYTES);
-    while !field.is_char_boundary(end) {
-        end -= 1;
-    }
-    field[..end].to_owned()
+    field[..field.floor_char_boundary(CONTEXT_FIELD_MAX_BYTES)].to_owned()
 }
 
 #[cfg(test)]

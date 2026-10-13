@@ -28,7 +28,7 @@ function hintKeyFor(actionId, fallback) {
 }
 
 // ── The composer (input + plan/steer modes + send) ────────────────────
-function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, appendInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow }) {
+function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow }) {
   // Drafts are per tab (issue #28). The composer stays mounted across tab
   // switches and keeps one draft per session id (app/session-ui.js
   // DRAFT_IDLE): text, pending image attachments (sent alongside the next
@@ -236,30 +236,22 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
     replaceDraft(next);
   }, [draftInsert?.nonce]);
 
-  // Rail widget inserts (app-live.jsx handleWidgetInsert) go *after* the
-  // current draft — never in front of it and never replacing it, a
-  // `/command` draft included (OMP_WIDGETS.appendToDraft). Same `nonce`
-  // keying and no-replay-after-remount rule as promptInsert below.
-  const seenAppendRef = React.useRef(appendInsert?.nonce);
-  React.useEffect(() => {
-    if (!appendInsert || appendInsert.nonce === seenAppendRef.current) return;
-    seenAppendRef.current = appendInsert.nonce;
-    replaceDraft(window.OMP_WIDGETS.appendToDraft(text, appendInsert.text));
-  }, [appendInsert?.nonce]);
-
   // Prompt-history picker (Ctrl+Up modal) hands a pick here the same way
   // ⌘K's draftInsert does — keyed on `nonce` so picking the same prompt
-  // twice in a row still re-fires. Unlike draftInsert, this always
+  // twice in a row still re-fires. Unlike draftInsert, this
   // *replaces* the draft (the modal's contract is "put this message
   // directly in the prompt box"), never appends an existing one. `images`
-  // (a goal start omp refused) go back in as attachments. An insert from
-  // before this composer mounted (it unmounts while no tab is open) is not
-  // replayed into the next tab's draft.
+  // (a goal start omp refused) go back in as attachments. An `append`
+  // insert (a rail widget click) goes *after* the current draft instead —
+  // never in front of it and never replacing it, a `/command` draft
+  // included (OMP_WIDGETS.appendToDraft). An insert from before this
+  // composer mounted (it unmounts while no tab is open) is not replayed
+  // into the next tab's draft.
   const seenInsertRef = React.useRef(promptInsert?.nonce);
   React.useEffect(() => {
     if (!promptInsert || promptInsert.nonce === seenInsertRef.current) return;
     seenInsertRef.current = promptInsert.nonce;
-    replaceDraft(promptInsert.text);
+    replaceDraft(promptInsert.append ? window.OMP_WIDGETS.appendToDraft(text, promptInsert.text) : promptInsert.text);
     const images = promptInsert.images ?? [];
     if (images.length === 0) return;
     const back = images.map(image => ({ id: `att-${++attachCounterRef.current}`, name: "", image, src: toDataUrl(image) }));

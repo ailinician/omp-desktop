@@ -105,8 +105,8 @@ impl PluginRunner for ProcessRunner {
 
 // ── IPC shapes ──────────────────────────────────────────────────────────────
 
-/// Everything `widgets_state` returns; `widgets://config` carries the same
-/// shape with `runs: []`.
+/// Everything `widgets_state` returns; `widgets://config` carries only the
+/// flattened [`ConfigView`].
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WidgetsSnapshot {
@@ -139,13 +139,11 @@ pub struct PluginView {
 impl Serialize for PluginView {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let e = &*self.entry;
-        let mut s = serializer.serialize_struct("PluginView", 9)?;
+        let mut s = serializer.serialize_struct("PluginView", 7)?;
         s.serialize_field("id", &e.id)?;
         s.serialize_field("title", &e.title)?;
         s.serialize_field("scope", &e.scope)?;
         s.serialize_field("enabled", &e.enabled)?;
-        s.serialize_field("intervalMs", &e.interval_ms)?;
-        s.serialize_field("triggers", &e.triggers)?;
         s.serialize_field("approval", &self.approval)?;
         s.serialize_field("command", &e.command)?;
         s.serialize_field("fingerprint", &self.fingerprint)?;
@@ -170,9 +168,7 @@ pub struct RunView {
     pub key: String,
     pub plugin_id: String,
     pub seq: u64,
-    pub phase: &'static str,
-    pub trigger: Option<&'static str>,
-    pub queued: Option<&'static str>,
+    pub phase: Phase,
     pub last: Option<LastView>,
     pub last_ok_at: Option<u64>,
 }
@@ -185,15 +181,6 @@ pub struct LastView {
     pub stdout: Option<String>,
     pub error: Option<String>,
     pub duration_ms: u64,
-}
-
-/// `widgets://config` payload, borrowed from the scheduler thread's copy.
-#[derive(Clone, Serialize)]
-struct ConfigEvent<'a> {
-    #[serde(flatten)]
-    config: &'a ConfigView,
-    active: &'a ActiveView,
-    runs: &'a [RunView],
 }
 
 #[derive(Clone, Serialize)]
@@ -547,17 +534,8 @@ struct Job {
 
 fn error_outcome(error: impl Into<String>) -> Outcome {
     Outcome {
-        stdout: None,
-        error: Some(error.into()),
+        result: Err(error.into()),
         duration_ms: 0,
-    }
-}
-
-const fn phase_str(phase: Phase) -> &'static str {
-    match phase {
-        Phase::Idle => "idle",
-        Phase::Waiting => "waiting",
-        Phase::Running => "running",
     }
 }
 
@@ -567,13 +545,11 @@ fn run_view(key: &RunKey, state: &RunState) -> RunView {
         key: key.scope_key.clone(),
         plugin_id: key.plugin_id.clone(),
         seq: state.seq,
-        phase: phase_str(state.phase),
-        trigger: state.trigger.map(Trigger::as_str),
-        queued: state.queued.map(Trigger::as_str),
+        phase: state.phase,
         last: state.last.as_ref().map(|f| LastView {
             at: f.at,
-            stdout: f.outcome.stdout.clone(),
-            error: f.outcome.error.clone(),
+            stdout: f.outcome.result.as_ref().ok().cloned(),
+            error: f.outcome.result.as_ref().err().cloned(),
             duration_ms: f.outcome.duration_ms,
         }),
         last_ok_at: state.last_ok_at,
@@ -803,21 +779,13 @@ impl<E: HostEmitter, R: PluginRunner> Core<E, R> {
     /// Emit and store the config view, then hand the scheduler the plugins
     /// and the approved set.
     fn push_config(&mut self) {
-        self.shared.emitter.emit(
-            CONFIG_EVENT,
-            ConfigEvent {
-                config: &self.config,
-                active: &self.active,
-                runs: &[],
-            },
-        );
+        self.shared.emitter.emit(CONFIG_EVENT, &self.config);
         lock(&self.shared.snapshot).config.clone_from(&self.config);
-        // The scheduler owns its entries; workers share the host's `Arc`s.
         let plugins = self
             .config
             .plugins
             .iter()
-            .map(|p| PluginEntry::clone(&p.entry))
+            .map(|p| Arc::clone(&p.entry))
             .collect();
         let approved: HashSet<String> = self
             .config
@@ -1183,7 +1151,7 @@ mod tests {
         assert!(snap.config.plugins.is_empty() && snap.config.config_path.is_none());
         let config = capture.wait_for(CONFIG_EVENT, |_| true);
         assert_eq!(config["fatal"], NO_CONFIG_DIR);
-        assert_eq!(config["runs"], json!([]));
+        assert!(config.get("runs").is_none(), "config events carry no runs");
         assert!(host.approve("probe", &"0".repeat(64)).is_err());
     }
 
@@ -1225,7 +1193,6 @@ mod tests {
         assert_eq!(plugin(&snap, "probe").approval, Approval::Approved);
         let run = ran_ok(&capture, "probe");
         assert_eq!(run["key"], "s1");
-        assert_eq!(run["trigger"], "activate");
         assert_eq!(run["last"]["stdout"], "{\"ok\":true}\n");
         assert!(run["last"]["error"].is_null());
         assert!(fx.path("ran").exists());
@@ -1336,7 +1303,10 @@ mod tests {
     #[test]
     fn turn_end_runs_plugins_of_the_active_session_only_when_it_ends() {
         let fx = Fixture::new("turn-end");
-        let body = format!("echo x >> {}\necho '{{}}'\n", fx.quoted("log"));
+        let body = format!(
+            "echo \"$OMP_WIDGET_TRIGGER\" >> {}\necho '{{}}'\n",
+            fx.quoted("log")
+        );
         fx.config(vec![(
             "probe",
             body.as_str(),
@@ -1349,9 +1319,11 @@ mod tests {
         assert!(!fx.path("log").exists(), "no activate trigger configured");
 
         host.turn_ended("s1");
-        let run = ran_ok(&capture, "probe");
-        assert_eq!(run["trigger"], "turn_end");
-        assert_eq!(std::fs::read_to_string(fx.path("log")).unwrap(), "x\n");
+        ran_ok(&capture, "probe");
+        assert_eq!(
+            std::fs::read_to_string(fx.path("log")).unwrap(),
+            "turn_end\n"
+        );
     }
 
     #[cfg(unix)]

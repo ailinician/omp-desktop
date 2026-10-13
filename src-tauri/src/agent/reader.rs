@@ -8,7 +8,7 @@ use std::thread;
 use tauri::{AppHandle, Emitter};
 
 use crate::approval::{self, RuleBook};
-use crate::redaction::{normalized_key_ends_with, REDACTED_KEYS, REDACTED_PLACEHOLDER};
+use crate::redaction::{is_credential_key, REDACTED_PLACEHOLDER};
 
 use super::inner::BridgeInner;
 use super::journal::EventJournal;
@@ -40,16 +40,14 @@ struct LineEvent<'a> {
 /// Returns `true` when at least one value was actually redacted, so the
 /// caller can skip re-serializing an untouched frame — the overwhelmingly
 /// common case.
+///
+/// [`REDACTED_KEYS`]: crate::redaction::REDACTED_KEYS
 fn sanitize_frame(value: &mut serde_json::Value) -> bool {
     let mut redacted = false;
     match value {
         serde_json::Value::Object(map) => {
             for (key, val) in map.iter_mut() {
-                if REDACTED_KEYS
-                    .iter()
-                    .copied()
-                    .any(|k| normalized_key_ends_with(key, k))
-                {
+                if is_credential_key(key) {
                     *val = serde_json::Value::String(REDACTED_PLACEHOLDER.to_string());
                     redacted = true;
                 } else {

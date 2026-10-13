@@ -189,7 +189,7 @@
   }
 
   window.OMP_WIDGETS = {
-    VERSION, LIMITS, parseOutput, insertText, safeUrl, appendToDraft, tweakKey, relativeTime,
+    parseOutput, insertText, safeUrl, appendToDraft, tweakKey, relativeTime,
     runKey, mergeRun, parsedLast, cardRun,
   };
 })();
