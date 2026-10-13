@@ -28,14 +28,17 @@ class FakeTerminal {
   onResize(fn) { this.resize = fn; }
   hasSelection() { return this.selection !== ""; }
   getSelection() { return this.selection; }
+  paste(text) { (this.pasted ||= []).push(text); }
 }
 class FakeFit {}
 
 const copied = [];
+let clipboardText = "";
 const win = {
   Terminal: FakeTerminal,
   FitAddon: { FitAddon: FakeFit },
   copyText: (t) => copied.push(t),
+  navigator: { clipboard: { readText: async () => clipboardText } },
   OMP_TERMINAL: {
     clipboardAction: (e) => (e.key === "C" ? "copy" : e.key === "V" ? "paste" : null),
     keymapShouldBypass: (e) => e.key === "bypass",
@@ -138,6 +141,20 @@ check("paste chord: consumed, keeps the WebView's paste out", () => {
   assert.equal(term.key(e), false);
   assert.equal(e.prevented, true);
 });
+
+// The paste lands after the clipboard read resolves.
+{
+  const { term } = make();
+  clipboardText = "echo pasted";
+  term.key(key("keydown", "V"));
+  await new Promise((r) => setTimeout(r, 0));
+  clipboardText = "";
+  term.key(key("keydown", "V"));
+  await new Promise((r) => setTimeout(r, 0));
+  check("paste chord: the clipboard's text goes to the shell, an empty one does not", () => {
+    assert.deepEqual(term.pasted, ["echo pasted"]);
+  });
+}
 
 check("a bypassed chord goes back to the page; others and non-keydowns stay xterm's", () => {
   const { term } = make();

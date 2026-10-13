@@ -57,9 +57,12 @@
 
   /** ctrl+shift+v (Linux, Windows): the clipboard's text into the shell. */
   async function paste(term) {
-    if (!navigator.clipboard?.readText) return;
+    // `window.navigator`, not the bare global: the module only touches what
+    // it is handed (Node 20 has no global `navigator` for the tests).
+    const clipboard = window.navigator?.clipboard;
+    if (!clipboard?.readText) return;
     try {
-      const text = await navigator.clipboard.readText();
+      const text = await clipboard.readText();
       if (text) term.paste(text);
     } catch (err) {
       console.warn("[terminal] clipboard read failed:", err);
