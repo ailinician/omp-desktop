@@ -748,6 +748,7 @@ function App() {
                   hoveredMsgIdx={hoveredMsgIdx}
                   onMinimapHover={setHoveredMsgIdx}
                   onMinimapClick={handleMinimapClick}
+                  show={{ gauge: t.railGauge ?? true, radar: t.railRadar ?? true, subagents: t.railSubagents ?? true, minimap: t.railMinimap ?? true }}
                 />
               )}
             </div>
@@ -878,6 +879,12 @@ function App() {
               min={window.OMP_COLLAPSE.MIN_AFTER} max={window.OMP_COLLAPSE.MAX_AFTER} step={1} unit=" newer"
               onChange={v => setTweak("collapseAfter", v)} />
           )}
+        </TweakSection>
+        <TweakSection label="Rail">
+          <TweakToggle label="context gauge" value={t.railGauge ?? true} onChange={v => setTweak("railGauge", v)} />
+          <TweakToggle label="agent radar" value={t.railRadar ?? true} onChange={v => setTweak("railRadar", v)} />
+          <TweakToggle label="subagents" value={t.railSubagents ?? true} onChange={v => setTweak("railSubagents", v)} />
+          <TweakToggle label="minimap" value={t.railMinimap ?? true} onChange={v => setTweak("railMinimap", v)} />
         </TweakSection>
         <TweakSection label="Session">
           <TweakSlider label="prompt history" value={t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT}
