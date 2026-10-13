@@ -44,8 +44,10 @@ pub fn redact_secrets(text: &str) -> Cow<'_, str> {
     let mut out = String::new();
     let mut changed = false;
     // State carried between words: the previous word was an auth scheme
-    // (`Bearer`) or a credential key (`token:`), so this word is the value.
+    // (`Bearer`) or a credential key (`token:`), so this word is the value;
+    // `in_quote` continues a quoted value (`password="a b"`) until it closes.
     let mut value_next = false;
+    let mut in_quote = false;
     let mut rest = text;
     while !rest.is_empty() {
         let (sep, after_sep) = split_leading_whitespace(rest);
@@ -56,7 +58,14 @@ pub fn redact_secrets(text: &str) -> Cow<'_, str> {
         }
         // `Authorization: Bearer x` — the scheme after a key is not the
         // value; the word after the scheme is.
-        let masked = if value_next && !is_scheme(word) {
+        let masked = if in_quote {
+            let closing = if word.trim_end_matches([',', ';']).ends_with('"') {
+                &word[word.trim_end_matches([',', ';']).len() - 1..]
+            } else {
+                ""
+            };
+            Some(format!("{PLACEHOLDER}{closing}"))
+        } else if value_next && !is_scheme(word) {
             Some(mask_value(word))
         } else {
             mask_word(word)
@@ -68,7 +77,12 @@ pub fn redact_secrets(text: &str) -> Cow<'_, str> {
             }
             None => out.push_str(word),
         }
-        value_next = is_scheme(word) || is_credential_key(word);
+        in_quote = if in_quote {
+            !word.trim_end_matches([',', ';']).ends_with('"')
+        } else {
+            masked_is_value(value_next, word) && opens_quote(word)
+        };
+        value_next = is_scheme(word) || is_credential_key(word) || inline_scheme(word);
         rest = after_word;
     }
     if changed {
@@ -76,6 +90,15 @@ pub fn redact_secrets(text: &str) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(text)
     }
+}
+
+/// Whether `word` was masked as a value (positional, or a `key=value` /
+/// `key:value` with a credential key) — the only cases a quote can open.
+fn masked_is_value(value_next: bool, word: &str) -> bool {
+    value_next
+        || word
+            .split_once(['=', ':'])
+            .is_some_and(|(key, _)| key_is_credential(key.trim_matches('"')))
 }
 
 fn split_leading_whitespace(s: &str) -> (&str, &str) {
@@ -114,10 +137,23 @@ fn key_is_credential(key: &str) -> bool {
 /// A word that is a value by position (after a scheme or key): mask it
 /// wholesale, keeping a trailing delimiter so `Bearer abc,` stays readable.
 fn mask_value(word: &str) -> String {
-    let body_end = word
-        .rfind(|c: char| !matches!(c, ',' | ';' | '"' | '\'' | ')' | ']'))
-        .map_or(0, |i| i + 1);
-    format!("{PLACEHOLDER}{}", &word[body_end..])
+    let body = word.trim_end_matches([',', ';', '"', '\'', ')', ']']);
+    format!("{PLACEHOLDER}{}", &word[body.len()..])
+}
+
+/// `Authorization:Bearer x` — the value part of a credential key is itself
+/// a scheme, so the credential is the next word.
+fn inline_scheme(word: &str) -> bool {
+    word.split_once([':', '='])
+        .is_some_and(|(key, value)| key_is_credential(key.trim_matches('"')) && is_scheme(value))
+}
+
+/// A quoted value that opens on this word and has not closed yet:
+/// `password="a b c"` keeps masking until the closing quote.
+fn opens_quote(word: &str) -> bool {
+    let value = word.split_once(['=', ':']).map_or(word, |(_, v)| v);
+    value.starts_with('"')
+        && !(value.len() > 1 && value.trim_end_matches([',', ';']).ends_with('"'))
 }
 
 /// A word that is a credential on its own: `key=value`, `"key":"value"`,
@@ -204,6 +240,28 @@ mod tests {
         assert!(!r.contains("ghp_SYNTHETIC"), "{r}");
         assert!(r.contains("([REDACTED])"), "{r}");
         assert!(r.contains("sk-short"), "{r}");
+    }
+
+    #[test]
+    fn multibyte_values_do_not_panic() {
+        let r = redact_secrets("Bearer é, token: SYNTHé\u{FFFD}) Basic ö");
+        assert!(!r.contains('é') && !r.contains('ö'), "{r}");
+        assert!(r.contains("[REDACTED],"), "{r}");
+    }
+
+    #[test]
+    fn inline_scheme_after_key() {
+        let r = redact_secrets("Authorization:Bearer SYNTH1 next");
+        assert!(!r.contains("SYNTH1"), "{r}");
+        assert!(r.ends_with(" next"), "{r}");
+    }
+
+    #[test]
+    fn quoted_values_span_whitespace() {
+        let r = redact_secrets("password=\"SYNTH a b\", \"client_secret\":\"SYNTH c d\" ok=1");
+        assert!(!r.contains("SYNTH"), "{r}");
+        assert!(r.ends_with(" ok=1"), "{r}");
+        assert!(r.contains("password=[REDACTED]"), "{r}");
     }
 
     #[test]
