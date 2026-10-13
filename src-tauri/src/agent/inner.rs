@@ -2,6 +2,7 @@ use std::process::{Child, ChildStdin};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+use super::ext_ui::ExtUiState;
 use super::journal::EventJournal;
 use super::supervisor::ProcessSupervisor;
 
@@ -28,6 +29,10 @@ pub(super) struct BridgeInner {
     /// monotonic `seq`. Survives regardless of whether a frontend listener
     /// is currently attached — see [`crate::agent::journal`].
     pub(super) journal: Arc<Mutex<EventJournal>>,
+    /// Latest extension status lines and widgets, written by the stdout
+    /// reader and read by `extension_ui_state`. Dropped with the entry, so
+    /// it never outlives this process — see [`crate::agent::ext_ui`].
+    pub(super) ext_ui: Arc<Mutex<ExtUiState>>,
     /// Cleared (`store(false, ...)`) the instant this incarnation is
     /// superseded (a fresher `start_session` displaced it in the map) or
     /// reaped (`stop_session` removed it) — both callers clear it

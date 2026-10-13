@@ -23,6 +23,7 @@ Feature internals (RPC frames, state machines, measured omp behaviour) live in `
 |`frontend-load-order.md`|full `src/index.html` script-order rationale|`src/index.html`|
 |`release-frontend.md`|`dist/` build, CSP check, `?v=` asset stamping|`scripts/build-frontend.mjs`|
 |`widgets.md`|rail widget plugins: Rust scheduler state machine, approval/fingerprint, `widgets_*` commands and `widgets://` events, runner|`src-tauri/src/widgets/`, `app/widgets.js`, `app/use-widgets.jsx`, `design/widgets/`|
+|`extension-widgets.md`|omp extension `setStatus`/`setWidget` as rail cards: wire frames, per-tab state, the Rust copy for dropped replays, lifecycle|`agent/ext_ui.rs`, `app/extension-widgets.js`, `live.js` `state.extWidgets`|
 
 User-facing rail widget contract (`widgets.json`, approval, output schema v1, limits, trust model): `docs/widgets.md`. Keep it in sync with any change to those.
 
@@ -53,7 +54,7 @@ Regression files are mostly named after the `src/app/<name>.js` module they cove
 |Path|What|
 |---|---|
 |`src-tauri/src/lib.rs`|Tauri setup, plugin registration, `generate_handler!` list, session commands|
-|`src-tauri/src/agent/`|`AgentBridge` (`mod.rs`, also `ALLOWED_COMMAND_TYPES`), per-session `inner.rs`, `spawn.rs` (omp resolution, version floor, `CREATE_NO_WINDOW`), `reader.rs` (stdout/stderr threads, 16 MiB `read_until_capped`, credential redaction), `journal.rs` (in-memory event ring for `replay_events` after a tab switch), `supervisor.rs` (process-tree kill: process group / Job Object)|
+|`src-tauri/src/agent/`|`AgentBridge` (`mod.rs`, also `ALLOWED_COMMAND_TYPES`), per-session `inner.rs`, `spawn.rs` (omp resolution, version floor, `CREATE_NO_WINDOW`), `reader.rs` (stdout/stderr threads, 16 MiB `read_until_capped`, credential redaction), `journal.rs` (in-memory event ring for `replay_events` after a tab switch), `ext_ui.rs` (latest extension status lines/widgets per session, `extension_ui_state`), `supervisor.rs` (process-tree kill: process group / Job Object)|
 |`src-tauri/src/conversation_tree/`|`conversation_tree` command: session-file family + parsing|
 |`src-tauri/src/saved_sessions/`|omp's persisted session history (history panel, resume)|
 |`src-tauri/src/keybindings/`|omp's keybindings per profile (read-only) merged with the desktop overlay|
@@ -63,6 +64,7 @@ Regression files are mostly named after the `src/app/<name>.js` module they cove
 |`src-tauri/src/{approval,model_usage,updater,external_open,child_path,navigation_guard}.rs`|tool-approval rules, model MRU, updater, OS folder opens, child PATH, webview navigation guard|
 |`src-tauri/src/widgets/`|rail widget plugins: `config.rs` (`widgets.json` load/validate, matching), `schedule.rs` (pure trigger/run scheduler), `trust.rs` (fingerprint, `widget-approvals.json`), `host.rs` (`WidgetHost`: scheduler thread, run registry, emits), `run.rs` (spawn, timeout, stdout cap, process-tree kill), `context.rs` (git context), `redact.rs`|
 |`src-tauri/src/redaction.rs`|credential key list + placeholder shared by `agent/reader.rs` and `widgets/redact.rs`|
+|`src-tauri/src/text.rs`|`prefix_within`: byte-bounded, char-safe prefix — the one helper for capping text (`agent/reader.rs` stderr tail, `agent/ext_ui.rs`, `widgets/context.rs`)|
 |`src/app/widgets.js`, `src/app/use-widgets.jsx`, `src/design/widgets/`|widget output parser + limits (`widgets.js`), thin hook (snapshot + `widgets://` events → cards, view state → Rust), card/approval/error/block renderers|
 |`examples/widgets/`|bundled widget plugins + `widgets.example.json` (`docs/widgets.md`)|
 |`src-tauri/packaging/`|Info.plist, Linux `.desktop`, Windows folder verb (`.nsh` + `.wxs`)|

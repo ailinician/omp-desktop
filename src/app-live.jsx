@@ -35,6 +35,7 @@ const {
 } = window.OMP_SESSION_UI;
 const { NO_OVERRIDES: NO_COLLAPSE_OVERRIDES, foldModes: _foldModes, overridesForAll: _collapseOverridesForAll } = window.OMP_COLLAPSE;
 const { tweakKey: _widgetTweakKey } = window.OMP_WIDGETS;
+const { EMPTY: _EXT_EMPTY, cards: _extCards, toggles: _extToggles } = window.OMP_EXT_WIDGETS;
 
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
@@ -96,6 +97,9 @@ function App() {
   const [queueSending, setQueueSending] = React.useState([]);
   // omp's goal mode for this tab (app/goal.js `{known, goal}`).
   const [goal,         setGoal]         = React.useState(() => window.OMP_GOAL.UNKNOWN);
+  // Status lines and text widgets the active tab's omp extensions published
+  // (app/extension-widgets.js, #52), drawn as rail cards.
+  const [extWidgets,   setExtWidgets]   = React.useState(_EXT_EMPTY);
 
   // ── Tab list — driven by bridge session registry ──────────────────────────
   // Each entry: { id, name, path, color, branch }
@@ -124,7 +128,7 @@ function App() {
     setModelState, setThinkingLevel,
     setSessions, setActiveSessionId, setProfiles, setStartupProfileId, setRecentProjects,
     setNoTabProfileId, setWorkspaceNotes,
-    setPromptHistory, setSubagents, setSubagentTranscripts, setQueue, setQueueSending, setGoal,
+    setPromptHistory, setSubagents, setSubagentTranscripts, setQueue, setQueueSending, setGoal, setExtWidgets,
   });
   useThemeEffect(t);
   React.useEffect(() => {
@@ -233,6 +237,10 @@ function App() {
   const widgets = useWidgets({
     bridge, activeSessionId: activeProject.id, railVisible: t.layout !== "focus" && !treeOpen, tweaks: t,
   });
+  // Pushed by omp, not run by the desktop: nothing to schedule, only a
+  // Tweaks toggle per card (`widget:ext-status`, `widget:ext:<key>`).
+  const extCards = React.useMemo(() => _extCards(extWidgets), [extWidgets]);
+  const extToggles = React.useMemo(() => _extToggles(extWidgets), [extWidgets]);
 
   // Handler map read through a ref so the dispatch effect never re-subscribes.
   const handlersRef = React.useRef({});
@@ -777,6 +785,11 @@ function App() {
                         onRefresh={() => widgets.refresh(c.id)} onInsert={handleWidgetInsert} />
                     </WidgetBoundary>
                   ))}
+                  {extCards.filter(c => t[c.tweak] !== false).map(c => (
+                    <WidgetBoundary key={c.id} title={c.title} resetKey={c.run}>
+                      <WidgetCard title={c.title} run={c.run} source="extension" onInsert={handleWidgetInsert} />
+                    </WidgetBoundary>
+                  ))}
                 </AmbientRail>
               )}
             </div>
@@ -916,6 +929,10 @@ function App() {
           {widgets.togglePlugins.map(p => (
             <TweakToggle key={p.id} label={`widget: ${p.title}`} value={t[_widgetTweakKey(p.id)] ?? true}
               onChange={v => setTweak(_widgetTweakKey(p.id), v)} />
+          ))}
+          {extToggles.map(r => (
+            <TweakToggle key={r.tweak} label={r.label} value={t[r.tweak] ?? true}
+              onChange={v => setTweak(r.tweak, v)} />
           ))}
           <TweakRow label="plugins" value={widgets.configPath ?? "unavailable"}>
             <TweakButton label="reload widgets" secondary onClick={widgets.reload} />

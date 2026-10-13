@@ -26,14 +26,17 @@ function WidgetErrorCard({ title, error }) {
   );
 }
 
-function WidgetCard({ title, run, onRefresh, onInsert }) {
+/** `source`: set for content another program pushes (omp extensions, #52)
+ *  rather than a plugin run — shown as the card's chip in place of the run
+ *  timing, with the accent border. */
+function WidgetCard({ title, run, onRefresh, onInsert, source }) {
   const state = run?.state ?? "idle";
   const widget = run?.widget ?? null;
   const toneClass = state === "error" ? "tone-error" : state === "ok" && widget ? `tone-${widget.status}` : "tone-neutral";
   const stale = state === "running" && widget != null;
-  const meta = state === "running" ? "running…" : run?.durationMs != null ? `${run.durationMs} ms · ${_wcTime(run.at)}` : "";
+  const meta = source ?? (state === "running" ? "running…" : run?.durationMs != null ? `${run.durationMs} ms · ${_wcTime(run.at)}` : "");
   return (
-    <div className={`rail-card glass wdg-card ${toneClass}${stale ? " wdg-stale" : ""}`}>
+    <div className={`rail-card glass wdg-card ${toneClass}${stale ? " wdg-stale" : ""}${source ? " wdg-pushed" : ""}`}>
       <div className="rail-card-head">
         <span className={`wdg-dot${state === "running" ? " pulse-dot" : ""}`} />
         <span className="mono wdg-title">{title}</span>

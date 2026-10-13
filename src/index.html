@@ -166,6 +166,12 @@
        reads it late-bound. -->
   <script src="app/widgets.js"></script>
 
+  <!-- omp extension status lines and text widgets (#52): pure keyed state,
+       escape stripping, card models. Dependency-free IIFE; live.js reads
+       window.OMP_EXT_WIDGETS at its top-level init and app-live.jsx at top
+       level, so it must load before both. -->
+  <script src="app/extension-widgets.js"></script>
+
   <!-- Design components (unchanged — from src/design/ copy) -->
   <script src="design/tweaks/style.js"></script>
   <script src="design/tweaks/use-tweaks.js"></script>

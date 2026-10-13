@@ -12,9 +12,11 @@
 //! - [`reader`]     — stdout/stderr reader threads, bounded
 //!   `read_until_capped`, and credential redaction.
 //! - [`journal`]    — bounded per-session event ring + replay.
+//! - [`ext_ui`]     — latest omp extension status lines / widgets (#52).
 //! - [`supervisor`] — process-tree kill (Job Object / process group) so a
 //!   stopped session can't leak subagent/tool-call descendants.
 
+pub mod ext_ui;
 mod inner;
 pub mod journal;
 mod reader;
@@ -28,6 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::AppHandle;
 
+use ext_ui::ExtUiState;
 use inner::BridgeInner;
 use journal::{EventJournal, Replay};
 use reader::{spawn_stderr_reader, spawn_stdout_reader};
@@ -180,6 +183,7 @@ impl AgentBridge {
             EVENT_JOURNAL_CAPACITY,
             EVENT_JOURNAL_MAX_BYTES,
         )));
+        let ext_ui = Arc::new(Mutex::new(ExtUiState::default()));
         let project_root = cwd.filter(|c| !c.is_empty()).map(std::path::PathBuf::from);
         let gen = self.next_gen.fetch_add(1, Ordering::SeqCst);
         // Liveness flag for this incarnation. Cloned into the map entry
@@ -209,6 +213,7 @@ impl AgentBridge {
                     child: Some(child),
                     supervisor: Some(supervisor),
                     journal: Arc::clone(&journal),
+                    ext_ui: Arc::clone(&ext_ui),
                     // Kept alive (pun intended) on the map entry; the reader
                     // thread below gets its own clone via `alive` moved into
                     // `StdoutReaderConfig`.
@@ -244,6 +249,7 @@ impl AgentBridge {
             sid: session_id.clone(),
             gen,
             journal,
+            ext_ui,
             stdin: stdin_for_reader,
             rule_book,
             project_root,
@@ -307,19 +313,12 @@ impl AgentBridge {
         let trimmed = line.trim_end_matches(['\r', '\n']);
         validate_command_type(trimmed)?;
 
-        let stdin_arc = {
-            let s = self
-                .sessions
-                .lock()
-                .map_err(|_| "lock poisoned".to_string())?;
-            if let Some(inner) = s.get(session_id) {
-                inner.stdin.as_ref().map(Arc::clone)
-            } else {
-                if let Some(err) = self.last_error(session_id) {
-                    return Err(err);
-                }
-                return Err(format!("session '{session_id}' not found"));
-            }
+        let Some(stdin_arc) =
+            self.with_entry(session_id, |inner| inner.stdin.as_ref().map(Arc::clone))?
+        else {
+            return Err(self
+                .last_error(session_id)
+                .unwrap_or_else(|| format!("session '{session_id}' not found")));
         };
         let stdin_arc = stdin_arc.ok_or_else(|| "agent not running".to_string())?;
 
@@ -347,23 +346,44 @@ impl AgentBridge {
     /// bubbles, streaming progress) that arrived while no listener was
     /// attached — `get_messages` alone only recovers persisted text.
     pub fn replay_events(&self, session_id: &str, after_seq: u64) -> Result<Replay, String> {
-        let journal_arc = {
-            let s = self
-                .sessions
-                .lock()
-                .map_err(|_| "lock poisoned".to_string())?;
-            let inner = s
-                .get(session_id)
-                .ok_or_else(|| format!("session '{session_id}' not found"))?;
-            let journal = Arc::clone(&inner.journal);
-            drop(s);
-            journal
-        };
+        let journal_arc = self
+            .with_entry(session_id, |inner| Arc::clone(&inner.journal))?
+            .ok_or_else(|| format!("session '{session_id}' not found"))?;
         let replay = journal_arc
             .lock()
             .map_err(|_| "journal lock poisoned".to_string())?
             .since(after_seq);
         Ok(replay)
+    }
+
+    /// The latest extension status lines and widgets of a session (see
+    /// [`ext_ui`]). Empty for an unknown or ended session: the state lives on
+    /// the map entry, which a process exit removes.
+    pub fn extension_ui_state(&self, session_id: &str) -> ExtUiState {
+        let Ok(Some(ext_ui)) = self.with_entry(session_id, |inner| Arc::clone(&inner.ext_ui))
+        else {
+            return ExtUiState::default();
+        };
+        // Copied out so the reader thread's lock is held only for the copy;
+        // the command serialises the copy after the lock is released.
+        ext_ui.lock().map_or_default(|s| s.clone())
+    }
+
+    /// `pick` applied to `session_id`'s map entry, holding the `sessions`
+    /// lock only while `pick` runs: callers take an `Arc` handle out and lock
+    /// or write through it after the map lock is released, so a slow pipe or
+    /// a busy reader never blocks management calls. `Ok(None)` for an unknown
+    /// session.
+    fn with_entry<T>(
+        &self,
+        session_id: &str,
+        pick: impl FnOnce(&BridgeInner) -> T,
+    ) -> Result<Option<T>, String> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "lock poisoned".to_string())?;
+        Ok(sessions.get(session_id).map(pick))
     }
 
     fn cache_error(&self, session_id: &str, err: String) {
@@ -592,6 +612,7 @@ mod tests {
                     EVENT_JOURNAL_CAPACITY,
                     EVENT_JOURNAL_MAX_BYTES,
                 ))),
+                ext_ui: Arc::default(),
                 // Kept so the flag is observable after the entry is drained.
                 alive: Arc::clone(&alive),
             },
@@ -613,6 +634,39 @@ mod tests {
         let bridge = AgentBridge::new();
         let err = bridge.replay_events("nope", 0).unwrap_err();
         assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn extension_ui_state_follows_the_session_entry() {
+        let bridge = AgentBridge::new();
+        let mut state = ExtUiState::default();
+        state.apply(&serde_json::json!({
+            "type": "extension_ui_request", "id": "1", "method": "setStatus",
+            "statusKey": "plan-mode", "statusText": "⏸ plan",
+        }));
+        bridge.sessions.lock().unwrap().insert(
+            "sess-x".into(),
+            BridgeInner {
+                gen: 1,
+                stdin: None,
+                child: None,
+                supervisor: None,
+                journal: Arc::new(Mutex::new(EventJournal::new(
+                    EVENT_JOURNAL_CAPACITY,
+                    EVENT_JOURNAL_MAX_BYTES,
+                ))),
+                ext_ui: Arc::new(Mutex::new(state)),
+                alive: Arc::new(AtomicBool::new(true)),
+            },
+        );
+        assert_eq!(
+            bridge.extension_ui_state("sess-x").statuses[0].text,
+            "⏸ plan"
+        );
+        assert_eq!(bridge.extension_ui_state("other"), ExtUiState::default());
+        // An ended or stopped session's entry is gone, and its state with it.
+        bridge.sessions.lock().unwrap().remove("sess-x");
+        assert_eq!(bridge.extension_ui_state("sess-x"), ExtUiState::default());
     }
 
     #[test]
@@ -643,6 +697,7 @@ mod tests {
                 EVENT_JOURNAL_CAPACITY,
                 EVENT_JOURNAL_MAX_BYTES,
             ))),
+            ext_ui: Arc::default(),
             alive: Arc::new(AtomicBool::new(true)),
         };
         reap_and_clear_grants("sess-x", prev, &rule_book);
@@ -674,6 +729,7 @@ mod tests {
                 EVENT_JOURNAL_CAPACITY,
                 EVENT_JOURNAL_MAX_BYTES,
             ))),
+            ext_ui: Arc::default(),
             // Kept so the flag is observable after `prev` moves into
             // `reap_and_clear_grants` below.
             alive: Arc::clone(&alive),

@@ -96,7 +96,7 @@ pub fn plugin_context(ctx: &SessionCtx, session: &str, trigger: Trigger) -> Plug
 /// `field` cut to at most [`CONTEXT_FIELD_MAX_BYTES`] on a char boundary,
 /// copied once.
 fn bounded(field: &str) -> String {
-    field[..field.floor_char_boundary(CONTEXT_FIELD_MAX_BYTES)].to_owned()
+    crate::text::prefix_within(field, CONTEXT_FIELD_MAX_BYTES).to_owned()
 }
 
 #[cfg(test)]
@@ -126,24 +126,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
-    }
-
-    #[test]
-    fn bounded_cuts_on_char_boundaries() {
-        let long = "x".repeat(100 * 1024);
-        assert_eq!(bounded(&long).len(), CONTEXT_FIELD_MAX_BYTES);
-
-        // 2-byte chars, 3000 bytes: the cut must keep only whole chars.
-        let umlauts = bounded(&"ä".repeat(1500));
-        assert!(umlauts.len() <= CONTEXT_FIELD_MAX_BYTES);
-        assert_eq!(umlauts.chars().last(), Some('ä'), "last char is complete");
-
-        // 3-byte chars: the cap falls inside a char, so the cut must back off.
-        let euros = bounded(&"€".repeat(CONTEXT_FIELD_MAX_BYTES));
-        assert!(euros.len() <= CONTEXT_FIELD_MAX_BYTES);
-        assert!(euros.chars().all(|c| c == '€'));
-
-        assert_eq!(bounded("abc"), "abc");
     }
 
     #[test]

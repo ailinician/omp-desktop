@@ -20,6 +20,7 @@
   const APPROVAL = window.OMP_APPROVAL;
   const TURN = window.OMP_TURN_STATUS;
   const GOAL = window.OMP_GOAL;
+  const EXT = window.OMP_EXT_WIDGETS;
   const { tsOf, mergeTranscript } = window.OMP_TRANSCRIPT;
 
   // ── Safe defaults so design components never crash on missing fields ──────
@@ -85,6 +86,10 @@
     // omp's goal mode (app/goal.js): `{ known, goal }` from `get_state.goal`,
     // `goal_updated` frames and `goal` command responses.
     goal:           GOAL.UNKNOWN,
+    // omp extension status lines and text widgets (app/extension-widgets.js,
+    // #52). Not reset by `/new`, branch or fork (omp's TUI keeps them too);
+    // gone with the process (`_endDeadProcessState`).
+    extWidgets:     EXT.EMPTY,
   };
 
   let streamingBubble = null;
@@ -317,6 +322,7 @@
       queue:           state.queue,
       queueSending:    state.queueSending,
       goal:            state.goal,
+      extWidgets:      state.extWidgets,
       // Tab list — derived from session registry, not per-session state.
       // runState: active tab reads live state; background tabs read their
       // cached snapshot (never activated yet = "idle" defaults).
@@ -659,6 +665,8 @@
     state.queueSending = [];
     state.asyncPending = false;
     state.messages = TURN.retryCleared(state.messages);
+    // Its extensions died with it; the backend's copy ended with the entry.
+    state.extWidgets = EXT.EMPTY;
   }
 
   // Reset all per-session volatile state (called before loading a new session)
@@ -687,6 +695,7 @@
       queue:         QUEUE.EMPTY_QUEUE,
       queueSending:  [],
       goal:          GOAL.UNKNOWN,
+      extWidgets:    EXT.EMPTY,
     });
     streamingBubble = null;
     lastTurnOk  = true;
@@ -734,6 +743,7 @@
       queue:         state.queue,
       queueSending:  state.queueSending,
       goal:          state.goal,
+      extWidgets:    state.extWidgets,
       // volatile vars
       streamingBubble,
       activeToolCards: new Map(activeToolCards),
@@ -773,6 +783,7 @@
       queue:         snap.queue ?? QUEUE.EMPTY_QUEUE,
       queueSending:  snap.queueSending ?? [],
       goal:          snap.goal ?? GOAL.UNKNOWN,
+      extWidgets:    snap.extWidgets ?? EXT.EMPTY,
     });
     streamingBubble = snap.streamingBubble;
     activeToolCards = snap.activeToolCards;
@@ -889,6 +900,15 @@
       }
       // Same for an abort: its response may be among the evicted events.
       if (replay.dropped) userAbortInFlight = false;
+      // And for extension status lines / widgets: the evicted lines may have
+      // set or cleared some. The backend applied every frame, so its copy
+      // replaces ours; the buffered live frames drained below are applied on
+      // top in order, and a set or clear per key is idempotent.
+      if (replay.dropped) {
+        const ext = await window.__TAURI__.core.invoke("extension_ui_state", { sessionId: id });
+        if (_switchGen !== myGen) return; // superseded by a newer switch
+        state.extWidgets = EXT.fromSnapshot(ext);
+      }
     } catch (e) {
       console.warn(`[live] replay_events failed for '${id}':`, e);
     }
@@ -1886,6 +1906,19 @@
         _settleAsk(ev.targetId, { cancelled: true, closedByOmp: true });
         return;
       }
+      // An extension's status line or text widget (#52): kept per tab, shown
+      // in the rail. Fire-and-forget like `notify`, `setTitle` and
+      // `set_editor_text`, which the desktop does not show: omp waits for no
+      // reply to any of them, so none is sent.
+      if (ev.method === "setStatus" || ev.method === "setWidget") {
+        const next = EXT.apply(state.extWidgets, ev);
+        if (next !== state.extWidgets) {
+          state.extWidgets = next;
+          notify();
+        }
+        return;
+      }
+      if (EXT.isFireAndForget(ev.method)) return;
       // Any other/future method we have no UI for — cancel so the server
       // never hangs waiting on a response we can't produce.
       _send({ type: "extension_ui_response", id: ev.id, cancelled: true });
@@ -2680,7 +2713,11 @@
       sessionRegistry.set(id, { ...entry, ...fieldsOf(entry) });
     }
     const turnOk = lastTurnOk;
+    // The process keeps running its extensions, and omp sends no clear on a
+    // session change: keep their status lines and widgets, as omp's TUI does.
+    const extWidgets = state.extWidgets;
     _resetSessionVars();
+    state.extWidgets = extWidgets;
     if (keepTurnOutcome) lastTurnOk = turnOk;
     _initFetch();
     notify();
