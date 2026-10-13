@@ -32,10 +32,24 @@ Built on Tauri 2 (Rust + the system webview). It doesn't bundle Electron, doesn'
 
 - **Tool cards** for every call: `read`, `grep`, `bash`, `eval` (JS/Python kernel cells), `edit`, `task` and more. Output streams live, code is syntax-highlighted, and edit diffs have a scrubber.
 - **Approvals.** Sessions start in `--approval-mode write`, so exec-tier tools ask first. Answer *Approve*, *Allow for this session* or *Always allow in this project*, and review or revoke the saved rules in the approval-rules panel.
-- **Ambient rail.** Shows the context-window gauge, cost, a tokens/sec sparkline, an agent radar of recent tool activity, and a minimap of the session. Click a minimap cell to jump to that message. Show or hide each card under Tweaks → Rail. Add your own cards: any program that prints JSON, run by the desktop after you approve it once — see [`docs/widgets.md`](docs/widgets.md).
+- **Ambient rail.** Shows the context-window gauge, cost, a tokens/sec sparkline, an agent radar of recent tool activity, and a minimap of the session. Click a minimap cell to jump to that message. Show or hide each card under Tweaks → Rail.
 - **Subagent manager.** Agents started by a `task` call appear in the rail as they run. Open the manager to get totals, a swimlane timeline, agents grouped by the task call that spawned them, and an inspector for each agent's assignment, tools, output and transcript.
 
 ![Subagent manager: four parallel scouts, their timeline and per-agent cost](screenshots/subagents.webp)
+
+### Rail widgets
+
+Put your own cards in the rail, next to the built-in ones:
+
+- **Widget plugins.** Any program, in any language, that prints JSON: status, numbers, progress, key/value rows, text, lists and links. List it in `widgets.json` and the desktop runs it for every project it matches, when you switch to the tab, when a turn ends, when the branch changes, on a timer or from its refresh button. A list item can add its text to your prompt or open a link. Nothing runs until you approve the plugin's exact command and script in the rail, and a change to either asks again. Examples in [`examples/widgets/`](examples/widgets/): a git card, an MCP tool call, and `hello` scripts in Python and Node.
+- **omp extension widgets.** What an omp extension shows with `ctx.ui.setStatus` and `ctx.ui.setWidget` appears as rail cards marked `extension`, per tab, including updates from a tab in the background.
+
+Setup, the output format and the trust model: [`docs/widgets.md`](docs/widgets.md).
+
+| | |
+|---|---|
+| **Results**: git status, CI runs and open issues; the `+` on an issue added it to the prompt | **Approval**: a plugin's command, one argument per line, before it ever runs; below, two cards from an omp extension |
+| ![Rail widgets: git status, CI runs and open issues](screenshots/rail-widgets.webp) | ![Approval cards for three plugins and two omp extension cards](screenshots/widget-approval.webp) |
 
 ### Plan mode
 
