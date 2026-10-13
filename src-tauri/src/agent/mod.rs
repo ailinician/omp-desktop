@@ -587,6 +587,23 @@ mod tests {
         assert!(err.contains("missing string 'type'"));
     }
 
+    /// A map entry with no process behind it (generation 1, empty journal and
+    /// extension state); a test overrides the fields it exercises.
+    fn idle_inner(alive: Arc<AtomicBool>) -> BridgeInner {
+        BridgeInner {
+            gen: 1,
+            stdin: None,
+            child: None,
+            supervisor: None,
+            journal: Arc::new(Mutex::new(EventJournal::new(
+                EVENT_JOURNAL_CAPACITY,
+                EVENT_JOURNAL_MAX_BYTES,
+            ))),
+            ext_ui: Arc::default(),
+            alive,
+        }
+    }
+
     /// The updater's relaunch ends in `std::process::exit`, so `Drop` never
     /// runs — `shutdown_all` is the only thing standing between a session's
     /// omp child and an orphan. Proves it kills *and* reaps (a zombie would
@@ -604,17 +621,9 @@ mod tests {
         bridge.sessions.lock().unwrap().insert(
             "sess-x".into(),
             BridgeInner {
-                gen: 1,
-                stdin: None,
                 child: Some(child),
-                supervisor: None,
-                journal: Arc::new(Mutex::new(EventJournal::new(
-                    EVENT_JOURNAL_CAPACITY,
-                    EVENT_JOURNAL_MAX_BYTES,
-                ))),
-                ext_ui: Arc::default(),
                 // Kept so the flag is observable after the entry is drained.
-                alive: Arc::clone(&alive),
+                ..idle_inner(Arc::clone(&alive))
             },
         );
         assert!(proc_dir.exists(), "precondition: child is running");
@@ -647,16 +656,8 @@ mod tests {
         bridge.sessions.lock().unwrap().insert(
             "sess-x".into(),
             BridgeInner {
-                gen: 1,
-                stdin: None,
-                child: None,
-                supervisor: None,
-                journal: Arc::new(Mutex::new(EventJournal::new(
-                    EVENT_JOURNAL_CAPACITY,
-                    EVENT_JOURNAL_MAX_BYTES,
-                ))),
                 ext_ui: Arc::new(Mutex::new(state)),
-                alive: Arc::new(AtomicBool::new(true)),
+                ..idle_inner(Arc::new(AtomicBool::new(true)))
             },
         );
         assert_eq!(
@@ -688,18 +689,7 @@ mod tests {
         // Same shape `start_session` inserts on a fresh spawn — a session
         // with id "sess-x" being replaced without an intervening
         // `stop_session`.
-        let prev = BridgeInner {
-            gen: 1,
-            stdin: None,
-            child: None,
-            supervisor: None,
-            journal: Arc::new(Mutex::new(EventJournal::new(
-                EVENT_JOURNAL_CAPACITY,
-                EVENT_JOURNAL_MAX_BYTES,
-            ))),
-            ext_ui: Arc::default(),
-            alive: Arc::new(AtomicBool::new(true)),
-        };
+        let prev = idle_inner(Arc::new(AtomicBool::new(true)));
         reap_and_clear_grants("sess-x", prev, &rule_book);
 
         assert!(
@@ -720,20 +710,9 @@ mod tests {
         ));
         let rule_book = crate::approval::RuleBook::new(dir);
         let alive = Arc::new(AtomicBool::new(true));
-        let prev = BridgeInner {
-            gen: 1,
-            stdin: None,
-            child: None,
-            supervisor: None,
-            journal: Arc::new(Mutex::new(EventJournal::new(
-                EVENT_JOURNAL_CAPACITY,
-                EVENT_JOURNAL_MAX_BYTES,
-            ))),
-            ext_ui: Arc::default(),
-            // Kept so the flag is observable after `prev` moves into
-            // `reap_and_clear_grants` below.
-            alive: Arc::clone(&alive),
-        };
+        // Kept so the flag is observable after `prev` moves into
+        // `reap_and_clear_grants` below.
+        let prev = idle_inner(Arc::clone(&alive));
 
         reap_and_clear_grants("sess-x", prev, &rule_book);
 

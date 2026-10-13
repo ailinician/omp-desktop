@@ -48,40 +48,49 @@
   const validKey = (k) => typeof k === "string" && k.length > 0 && utf8Length(k) <= LIMITS.keyBytes;
 
   // Replace `key`'s entry in place, append it while under the key bound, or
-  // return `list` itself when it cannot be kept.
-  function upsert(list, entry) {
+  // return `list` itself when it cannot be kept or is unchanged: extensions
+  // resend the same status and widget often, and an unchanged state is no
+  // `notify()` and no rail re-render.
+  function upsert(list, entry, same) {
     const i = list.findIndex(e => e.key === entry.key);
-    if (i !== -1) return list.map((e, j) => (j === i ? entry : e));
+    if (i !== -1) return same(list[i], entry) ? list : list.map((e, j) => (j === i ? entry : e));
     return list.length < LIMITS.keys ? [...list, entry] : list;
   }
+  const sameStatus = (a, b) => a.text === b.text;
+  const sameWidget = (a, b) => a.more === b.more && a.lines.length === b.lines.length && a.lines.every((l, i) => l === b.lines[i]);
   function remove(list, key) {
     return list.some(e => e.key === key) ? list.filter(e => e.key !== key) : list;
   }
 
-  function widgetEntry(key, rawLines) {
+  // `carried`: lines the backend already cut from a snapshot widget.
+  function widgetEntry(key, rawLines, carried = 0) {
     // omp sends strings only; anything else is skipped, as in the backend.
     const strings = rawLines.filter(l => typeof l === "string");
-    return { key, lines: strings.slice(0, LIMITS.lines).map(clean), more: Math.max(0, strings.length - LIMITS.lines) };
+    return { key, lines: strings.slice(0, LIMITS.lines).map(clean), more: Math.max(0, strings.length - LIMITS.lines) + carried };
+  }
+
+  function setStatus(ext, key, text) {
+    if (!validKey(key)) return ext;
+    // omp drops an `undefined` statusText from the JSON: absent = remove.
+    const statuses = typeof text === "string"
+      ? upsert(ext.statuses, { key, text: clean(text) }, sameStatus)
+      : remove(ext.statuses, key);
+    return statuses === ext.statuses ? ext : { ...ext, statuses };
+  }
+
+  function setWidget(ext, key, lines, carried) {
+    if (!validKey(key)) return ext;
+    const widgets = Array.isArray(lines)
+      ? upsert(ext.widgets, widgetEntry(key, lines, carried), sameWidget)
+      : remove(ext.widgets, key);
+    return widgets === ext.widgets ? ext : { ...ext, widgets };
   }
 
   /** The state after one stdout frame; `ext` itself when nothing changed. */
   function apply(ext, frame) {
     if (!frame || frame.type !== "extension_ui_request") return ext;
-    if (frame.method === "setStatus") {
-      if (!validKey(frame.statusKey)) return ext;
-      // omp drops an `undefined` statusText from the JSON: absent = remove.
-      const statuses = typeof frame.statusText === "string"
-        ? upsert(ext.statuses, { key: frame.statusKey, text: clean(frame.statusText) })
-        : remove(ext.statuses, frame.statusKey);
-      return statuses === ext.statuses ? ext : { ...ext, statuses };
-    }
-    if (frame.method === "setWidget") {
-      if (!validKey(frame.widgetKey)) return ext;
-      const widgets = Array.isArray(frame.widgetLines)
-        ? upsert(ext.widgets, widgetEntry(frame.widgetKey, frame.widgetLines))
-        : remove(ext.widgets, frame.widgetKey);
-      return widgets === ext.widgets ? ext : { ...ext, widgets };
-    }
+    if (frame.method === "setStatus") return setStatus(ext, frame.statusKey, frame.statusText);
+    if (frame.method === "setWidget") return setWidget(ext, frame.widgetKey, frame.widgetLines);
     return ext;
   }
 
@@ -89,18 +98,11 @@
    *  lines, more}]}`), normalised like live frames. Malformed input = empty. */
   function fromSnapshot(snap) {
     let ext = EMPTY;
-    for (const s of Array.isArray(snap?.statuses) ? snap.statuses : []) {
-      ext = apply(ext, { type: "extension_ui_request", method: "setStatus", statusKey: s?.key, statusText: s?.text });
-    }
+    for (const s of Array.isArray(snap?.statuses) ? snap.statuses : []) ext = setStatus(ext, s?.key, s?.text);
     for (const w of Array.isArray(snap?.widgets) ? snap.widgets : []) {
       if (!Array.isArray(w?.lines)) continue;
-      const before = ext;
-      ext = apply(ext, { type: "extension_ui_request", method: "setWidget", widgetKey: w.key, widgetLines: w.lines });
       // The backend already cut the lines it did not keep; carry its count.
-      const more = Number.isInteger(w.more) && w.more > 0 ? w.more : 0;
-      if (ext !== before && more) {
-        ext = { ...ext, widgets: ext.widgets.map(e => (e.key === w.key ? { ...e, more: e.more + more } : e)) };
-      }
+      ext = setWidget(ext, w.key, w.lines, Number.isInteger(w.more) && w.more > 0 ? w.more : 0);
     }
     return ext;
   }

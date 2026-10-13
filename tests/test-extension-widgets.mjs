@@ -45,9 +45,12 @@ check("unrelated, unchanged and malformed frames return the same state object", 
     { type: "extension_ui_request", method: "notify", message: "hi" },
     status("", "empty key"), status("k".repeat(201), "long key"), { ...status("x", "y"), statusKey: 5 },
     status("missing"), widget("missing"),
+    status("keep", "v"), status("keep", "\u001b[1mv\u001b[22m"), widget("w", ["l"]),
   ]) {
     assert.equal(X.apply(ext, frame), ext, JSON.stringify(frame));
   }
+  assert.notEqual(X.apply(ext, widget("w", ["l", "m"])), ext, "a changed widget is a new state");
+  assert.notEqual(X.apply(ext, status("keep", "w")), ext, "a changed status is a new state");
   assert.deepEqual(X.apply(ext, widget("w", "not an array")).widgets, [], "a non-array widget is a removal, as in the backend");
 });
 check("a key's UTF-8 length is bounded like the backend's", () => {
