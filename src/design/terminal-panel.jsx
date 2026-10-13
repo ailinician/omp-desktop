@@ -4,13 +4,18 @@
    handle on the top edge. Hidden tabs and collapsed panels stay mounted
    (`hidden`), so the xterm keeps its output; app/use-terminal.jsx owns
    the xterm and hands over `mountRef`; `onContextMenu` is the body's
-   right-click (copy the selection). A drag resizes the panel from local
-   state and reports the final height once (`onHeight`), so the saved
-   tweak is written per drag, not per pointer move.
+   right-click (copy the selection). A drag (left button) starts from the
+   height the panel is rendered at — CSS caps it at 70 % of the column,
+   which may be less than the saved tweak after the window shrank —
+   resizes the panel from local state and reports the final height once
+   (`onHeight`), so the saved tweak is written per drag, not per pointer
+   move. `TerminalPanels` renders the panels of every tab for app-live.jsx.
    ═════════════════════════════════════════════════════════════════════ */
 
 const { Icon: _TP_Icon } = window;
-const { clampHeight: _TP_clamp, isExited: _TP_isExited } = window.OMP_TERMINAL;
+const {
+  clampHeight: _TP_clamp, isExited: _TP_isExited, entryOf: _TP_entryOf, shellLabel: _TP_shellLabel,
+} = window.OMP_TERMINAL;
 
 function TerminalPanel({ entry, height, hidden, onHeight, onClose, mountRef, onContextMenu, shellLabel, cwd }) {
   // `{ pointerId, startY, startHeight, columnHeight, height }` while
@@ -21,15 +26,16 @@ function TerminalPanel({ entry, height, hidden, onHeight, onClose, mountRef, onC
   const dragStart = (e) => {
     if (e.button !== 0 || drag.current) return;
     const column = e.currentTarget.closest(".session");
+    const shown = Math.round(e.currentTarget.parentElement.getBoundingClientRect().height);
     drag.current = {
       pointerId: e.pointerId,
       startY: e.clientY,
-      startHeight: height,
-      height,
+      startHeight: shown,
+      height: shown,
       columnHeight: column ? column.getBoundingClientRect().height : window.innerHeight,
     };
     e.currentTarget.setPointerCapture(e.pointerId);
-    setDragHeight(height);
+    setDragHeight(shown);
     e.preventDefault();
   };
   const dragMove = (e) => {
@@ -72,4 +78,35 @@ function TerminalPanel({ entry, height, hidden, onHeight, onClose, mountRef, onC
   );
 }
 
-Object.assign(window, { TerminalPanel });
+/**
+ * One panel per tab that has ever opened its terminal (`created`; a pending
+ * or failed first spawn included). Only the active tab's open panel shows;
+ * the others stay mounted but hidden, so a shell's output keeps arriving
+ * off-screen and its xterm survives a hide. `terminal` is useTerminal's
+ * return value, `activeId` the active tab's id.
+ */
+function TerminalPanels({ sessions, activeId, terminal }) {
+  return (
+    <>
+      {sessions.map((s) => {
+        const entry = _TP_entryOf(terminal.state, s.id);
+        if (!entry.created) return null;
+        return (
+          <TerminalPanel key={s.id}
+            entry={entry}
+            height={terminal.height}
+            hidden={s.id !== activeId || !entry.open}
+            onHeight={terminal.setHeight}
+            onClose={() => terminal.close(s.id)}
+            mountRef={terminal.mountFor(s.id)}
+            onContextMenu={(e) => { if (terminal.copySelection(s.id)) e.preventDefault(); }}
+            shellLabel={_TP_shellLabel(entry.status?.shell)}
+            cwd={s.path}
+          />
+        );
+      })}
+    </>
+  );
+}
+
+Object.assign(window, { TerminalPanel, TerminalPanels });

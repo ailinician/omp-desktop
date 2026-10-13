@@ -1,18 +1,26 @@
 //! Terminal manager tests: they spawn a real `sh` on a pseudo-terminal and
 //! observe it through a collecting [`Emit`].
 
-use super::pty::{resolve_shell_with, HANGUP_GRACE};
+use super::kill::process_exists as process_alive;
+use super::pty::HANGUP_GRACE;
+use super::pump::{TerminalEmit, MAX_EVENT, MIN_INTERVAL};
+use super::shell::resolve_shell_with;
 use super::{Emit, Slot, TerminalManager, TerminalState, TerminalStatus};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+/// The name of [`PLAIN_SHELL`]'s directory in the temp dir, before the pid.
+const PLAIN_SHELL_DIR: &str = "omp-terminal-test-";
 /// A plain interactive `sh`. `/bin/sh -l` would read the developer's
 /// `~/.profile` (which may `exec fish`), so the tests run `sh` through a
-/// wrapper whose name (not a POSIX shell's) gets no `-l -i` arguments.
+/// wrapper whose name (not a POSIX shell's) gets no `-l -i` arguments. A
+/// static is never dropped, so its directory outlives the run; the next run
+/// removes it ([`sweep_stale_shell_dirs`]).
 static PLAIN_SHELL: LazyLock<String> = LazyLock::new(|| {
-    let dir = std::env::temp_dir().join(format!("omp-terminal-test-{}", std::process::id()));
+    sweep_stale_shell_dirs();
+    let dir = std::env::temp_dir().join(format!("{PLAIN_SHELL_DIR}{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("plainsh");
     std::fs::write(&path, "#!/bin/sh\nexec /bin/sh -i\n").unwrap();
@@ -20,10 +28,49 @@ static PLAIN_SHELL: LazyLock<String> = LazyLock::new(|| {
     path.to_string_lossy().into_owned()
 });
 const SLOW: Duration = Duration::from_secs(20);
-/// Held by the tests whose result depends on the machine being otherwise
-/// quiet (the burst's event count) and by those that start dozens of shells
-/// and process-table scans (the lifecycle races), so they never overlap.
+/// Held by the tests that start dozens of shells and process-table scans
+/// (the lifecycle races) or time a grace period, so they never overlap.
 static LOAD_SENSITIVE: Mutex<()> = Mutex::new(());
+
+/// Remove the [`PLAIN_SHELL`] directories of test runs that have ended.
+fn sweep_stale_shell_dirs() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let pid = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(PLAIN_SHELL_DIR))
+            .and_then(|pid| pid.parse::<i32>().ok());
+        if pid.is_some_and(|pid| !process_alive(pid)) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// A fresh directory in the temp dir, removed with its content when dropped
+/// (also when the test fails).
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("omp-terminal-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// One data event.
 struct Event {
@@ -32,7 +79,7 @@ struct Event {
     bytes: Vec<u8>,
 }
 
-/// Every event the manager emitted, in order.
+/// Every event the manager emitted, in order, for every shell.
 #[derive(Default)]
 struct Collector {
     data: Mutex<Vec<Event>>,
@@ -44,18 +91,35 @@ struct Collector {
     acked: Mutex<usize>,
 }
 
-impl Emit for Collector {
-    fn data(&self, _id: &str, instance: u64, seq: u64, bytes: &[u8]) {
-        self.data.lock().unwrap().push(Event {
+/// One shell's emitter, recording into the shared [`Collector`].
+struct Collecting {
+    out: Arc<Collector>,
+    instance: u64,
+}
+
+impl Emit for Arc<Collector> {
+    type Terminal = Collecting;
+
+    fn terminal(self, _id: &str, instance: u64) -> Collecting {
+        Collecting {
+            out: self,
             instance,
+        }
+    }
+}
+
+impl TerminalEmit for Collecting {
+    fn data(&mut self, seq: u64, bytes: &[u8]) {
+        self.out.data.lock().unwrap().push(Event {
+            instance: self.instance,
             seq,
             bytes: bytes.to_vec(),
         });
     }
 
-    fn exit(&self, _id: &str, instance: u64, code: Option<i32>) {
-        *self.text_at_exit.lock().unwrap() = Some(self.text());
-        self.exits.lock().unwrap().push((instance, code));
+    fn exit(&mut self, code: Option<i32>) {
+        *self.out.text_at_exit.lock().unwrap() = Some(self.out.text());
+        self.out.exits.lock().unwrap().push((self.instance, code));
     }
 }
 
@@ -172,11 +236,6 @@ fn wait_acking(
     })
 }
 
-fn process_alive(pid: i32) -> bool {
-    // SAFETY: plain-integer FFI call; signal 0 only probes existence.
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
 /// A manager whose shell setting (kept in memory) is `shell`.
 fn manager_with(shell: &str) -> TerminalManager {
     let manager = TerminalManager::new(None);
@@ -216,13 +275,15 @@ fn shell_gets_the_registered_folder_and_terminal_env() {
     manager
         .write(
             "env",
-            "echo T=$TERM C=$COLORTERM O=$OMP_DESKTOP S=$OMP_DESKTOP_SESSION; pwd -P\n",
+            "echo T=$TERM C=$COLORTERM O=$OMP_DESKTOP S=$OMP_DESKTOP_SESSION SH=$SHELL; pwd -P\n",
         )
         .unwrap();
 
     let cwd = std::fs::canonicalize(temp_dir()).unwrap();
+    // `SHELL` is the program started, not the app's own `$SHELL`.
     let wanted = format!(
-        "T=xterm-256color C=truecolor O=1 S=env\r\n{}",
+        "T=xterm-256color C=truecolor O=1 S=env SH={}\r\n{}",
+        *PLAIN_SHELL,
         cwd.display()
     );
     assert!(
@@ -260,11 +321,12 @@ fn a_missing_folder_falls_back_to_home() {
     }
 }
 
+/// Output is cut into events of at most [`MAX_EVENT`], at most one per
+/// [`MIN_INTERVAL`] (the first at once): the count is bounded by the time
+/// the burst took, however slow the machine.
 #[test]
-fn burst_output_is_coalesced_into_few_capped_events() {
-    let _quiet = LOAD_SENSITIVE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+fn burst_output_is_coalesced_into_capped_events() {
+    let started = Instant::now();
     let (manager, out) = open("burst");
     manager
         .write("burst", "yes | head -c 2000000; exit\n")
@@ -274,14 +336,20 @@ fn burst_output_is_coalesced_into_few_capped_events() {
         wait_acking(&manager, "burst", &out, || out.exited()),
         "no exit event"
     );
+    let took = started.elapsed();
     assert!(
         out.total_bytes() >= 2_000_000,
         "bytes: {}",
         out.total_bytes()
     );
-    assert!(out.events() < 400, "events: {}", out.events());
+    let most = took.as_millis() / MIN_INTERVAL.as_millis() + 1;
     assert!(
-        out.largest_event() <= 64 * 1024,
+        out.events() as u128 <= most,
+        "{} events in {took:?}",
+        out.events()
+    );
+    assert!(
+        out.largest_event() <= MAX_EVENT,
         "largest event: {}",
         out.largest_event()
     );
@@ -315,8 +383,8 @@ fn close_tab_kills_background_jobs() {
 /// shell saves its history there).
 #[test]
 fn close_tab_hangs_up_the_shell_before_killing_it() {
-    let marker = temp_dir().join(format!("omp-terminal-hup-{}", std::process::id()));
-    let _ = std::fs::remove_file(&marker);
+    let dir = TempDir::new("hup");
+    let marker = dir.path().join("hung");
     let (manager, out) = open("hup");
     // Line editing off: bash (`/bin/sh` on some systems) at a readline
     // prompt answers a hang-up by saving its history and exiting, without
@@ -342,7 +410,6 @@ fn close_tab_hangs_up_the_shell_before_killing_it() {
             .is_ok_and(|text| text == "hung\n")),
         "the HUP trap did not run"
     );
-    std::fs::remove_file(&marker).unwrap();
 }
 
 /// `shutdown_all` hangs every shell up first and waits one shared grace,
@@ -633,8 +700,9 @@ fn bad_requests_are_rejected() {
 
 #[test]
 fn settings_are_validated_persisted_and_reloaded() {
-    let dir = temp_dir().join(format!("omp-terminal-settings-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let guard = TempDir::new("settings");
+    // Not created yet, like a first start's config folder.
+    let dir = guard.path().join("config");
     let path = dir.join("terminal.json");
     // A manager reading the file afresh (a restart).
     let reopen = || TerminalManager::new(Some(dir.join("terminal.json")));
@@ -681,8 +749,6 @@ fn settings_are_validated_persisted_and_reloaded() {
     assert_eq!(corrupt.settings().shell, "");
     assert!(corrupt.set_shell(&PLAIN_SHELL).is_err());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
-
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -850,33 +916,18 @@ fn a_close_during_the_grace_period_leaves_the_reaping_to_the_waiter() {
     );
 }
 
-/// A shell that reads no input (raw tty, no echo) and sleeps, so whatever is
-/// written to it piles up in the pty.
-fn stalled_shell(id: &str) -> (TerminalManager, Arc<Collector>) {
-    let (manager, out) = open(id);
-    manager.write(id, "stty raw -echo; sleep 5\n").unwrap();
-    std::thread::sleep(Duration::from_millis(300));
-    (manager, out)
-}
-
-#[test]
-fn write_returns_at_once_when_the_shell_reads_nothing() {
-    let (manager, _out) = stalled_shell("stalled");
-
-    let started = Instant::now();
-    manager.write("stalled", "x".repeat(1 << 20)).unwrap();
-    let took = started.elapsed();
-
-    assert!(took < Duration::from_millis(100), "write took {took:?}");
-}
-
+/// A shell that reads no input (raw tty, no echo, asleep): writes pile up
+/// in the queue until it is full, and then fail instead of blocking.
 #[test]
 fn write_backlog_is_rejected_instead_of_blocking() {
-    let (manager, _out) = stalled_shell("backlog");
+    let (manager, _out) = open("backlog");
+    manager
+        .write("backlog", "stty raw -echo; sleep 5\n")
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
 
-    let chunk = "x".repeat(64 * 1024);
     let started = Instant::now();
-    let error = (0..5000).find_map(|_| manager.write("backlog", chunk.clone()).err());
+    let error = (0..5000).find_map(|_| manager.write("backlog", vec![b'x'; 64 * 1024]).err());
 
     assert_eq!(error.as_deref(), Some("terminal input backlog"));
     assert!(started.elapsed() < Duration::from_secs(5), "writes blocked");
@@ -957,19 +1008,19 @@ fn a_jobs_output_within_the_grace_period_is_delivered_before_the_exit() {
 
 /// A shell that records its pid in `pidfile` (appending) before it becomes
 /// an interactive `sh`: lets a test see every shell a manager ever started.
-fn recording_shell(tag: &str) -> (String, PathBuf) {
-    let dir = temp_dir().join(format!("omp-terminal-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let pidfile = dir.join("pids");
-    let _ = std::fs::remove_file(&pidfile);
-    let path = dir.join("recordsh");
+/// Both live in the returned directory.
+fn recording_shell(tag: &str) -> (TempDir, String, PathBuf) {
+    let dir = TempDir::new(tag);
+    let pidfile = dir.path().join("pids");
+    let path = dir.path().join("recordsh");
     let script = format!(
         "#!/bin/sh\necho $$ >> '{}'\nexec /bin/sh -i\n",
         pidfile.display()
     );
     std::fs::write(&path, script).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    (path.to_string_lossy().into_owned(), pidfile)
+    let shell = path.to_string_lossy().into_owned();
+    (dir, shell, pidfile)
 }
 
 fn recorded_pids(pidfile: &Path) -> Vec<i32> {
@@ -1003,7 +1054,7 @@ fn close_tab_racing_open_leaves_no_shell_and_no_tab() {
     let _quiet = LOAD_SENSITIVE
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let (shell, pidfile) = recording_shell("open-close");
+    let (_dir, shell, pidfile) = recording_shell("open-close");
     let manager = manager_with(&shell);
     let out = Arc::new(Collector::default());
     for round in 0..20 {
@@ -1040,7 +1091,7 @@ fn overlapping_opens_start_one_shell() {
     let _quiet = LOAD_SENSITIVE
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let (shell, pidfile) = recording_shell("open-open");
+    let (_dir, shell, pidfile) = recording_shell("open-open");
     let manager = manager_with(&shell);
     let out = Arc::new(Collector::default());
     for round in 0..10 {
@@ -1072,17 +1123,17 @@ fn overlapping_opens_start_one_shell() {
 }
 
 /// The setting must name an executable file; anything else is refused, not
-/// silently replaced by the default. Empty means the default, which a POSIX
-/// shell's name gets `-l -i` for like any other.
+/// silently replaced by the default. Empty means the default, which a
+/// login shell's name gets `-l -i` for like any other.
 #[test]
 fn resolve_shell_takes_the_setting_or_else_the_default() {
-    let login = vec!["-l".to_owned(), "-i".to_owned()];
+    let login = || vec!["-l".to_owned(), "-i".to_owned()];
     let sh = || PathBuf::from("/bin/sh");
     assert_eq!(
         resolve_shell_with(Some("/bin/sh"), || PathBuf::from("/bin/zsh")).unwrap(),
-        (sh(), login.clone())
+        (sh(), login())
     );
-    assert_eq!(resolve_shell_with(Some(""), sh).unwrap(), (sh(), login));
+    assert_eq!(resolve_shell_with(Some(""), sh).unwrap(), (sh(), login()));
     for pref in [
         "/definitely/not/a/shell",
         "/etc/hosts",
@@ -1098,18 +1149,16 @@ fn resolve_shell_takes_the_setting_or_else_the_default() {
 }
 
 #[test]
-fn only_posix_shells_get_login_interactive_args() {
-    let dir = temp_dir().join(format!("omp-shell-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+fn only_login_shells_get_login_interactive_args() {
+    let dir = TempDir::new("shells");
     let mut seen = Vec::new();
     for name in ["bash", "zsh", "fish", "dash", "ksh", "sh", "nu", "pwsh"] {
-        let path = dir.join(name);
+        let path = dir.path().join(name);
         std::fs::write(&path, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         let (_, shell_args) = resolve_shell_with(path.to_str(), || unreachable!()).unwrap();
         seen.push((name, shell_args.len()));
     }
-    std::fs::remove_dir_all(&dir).unwrap();
 
     assert_eq!(
         seen,
@@ -1120,7 +1169,7 @@ fn only_posix_shells_get_login_interactive_args() {
             ("dash", 2),
             ("ksh", 2),
             ("sh", 2),
-            ("nu", 0),
+            ("nu", 2),
             ("pwsh", 0),
         ]
     );

@@ -14,7 +14,7 @@
 // shell, state: "starting"|"running"|"exited", exitCode }`) or null while
 // the tab has no shell; `error` is why the last `terminal_open` failed.
 // Neither an exit nor a failed start respawns by itself: the user presses
-// Enter (`isExited`), and only a tab with no shell at all spawns on show
+// Enter (`canRestart`), and only a tab with no shell at all spawns on show
 // (`needsSpawn`).
 //
 // Ordering: each spawn has a global, increasing `instance`. A status or
@@ -23,14 +23,16 @@
 // exited), so a late `terminal_open` reply never hides an exit that
 // already arrived.
 //
-// Exposes `window.OMP_TERMINAL`; dependency-free IIFE (AGENTS.md "IIFE
-// rule"). design/terminal-panel.jsx and app/use-terminal.jsx destructure it
-// at top level, so it must load before them.
+// Exposes `window.OMP_TERMINAL`; an IIFE (AGENTS.md "IIFE rule") that calls
+// `window.OMP_KEYMAP.detectMac()` at load, so it loads after app/keymap.js
+// (its other OMP_KEYMAP lookups happen at call time). design/terminal-panel.jsx
+// and app/use-terminal.jsx destructure it at top level, so it must load
+// before them.
 (function () {
   const EMPTY = Object.freeze({});
   const CLOSED = Object.freeze({ open: false, created: false, status: null, error: null });
 
-  const DEFAULT_HEIGHT = 240;
+  // The default height is `TWEAK_DEFAULTS.terminalHeight` (app/constants.js).
   const MIN_HEIGHT = 120;
   const MAX_HEIGHT_RATIO = 0.7;
 
@@ -101,6 +103,27 @@
   /** The shell is gone (exited, or never started): Enter starts a new one. */
   function isExited(entry) {
     return entry.error !== null || entry.status?.state === "exited";
+  }
+
+  /**
+   * The tab has a shell that is starting or running. `opened` is the
+   * instance the hook's last successful `terminal_open` returned (0 if
+   * none): newer than the status shown means a reply the panel state has
+   * not rendered yet, and that shell counts as live already. Resizes are
+   * sent only while this holds (no pty to resize otherwise).
+   */
+  function shellLive(entry, opened = 0) {
+    if (opened > (entry.status?.instance ?? 0)) return true;
+    return entry.error === null && entry.status !== null && entry.status.state !== "exited";
+  }
+
+  /**
+   * Enter starts a new shell: the panel shows an exited shell (or a failed
+   * start) and no newer one is live already (see `shellLive`), so a second
+   * Enter while a respawn is in flight or not rendered yet does nothing.
+   */
+  function canRestart(entry, opened = 0) {
+    return isExited(entry) && !shellLive(entry, opened);
   }
 
   /** Drop entries of sessions that no longer exist. */
@@ -179,20 +202,19 @@
   }
 
   /**
-   * Panel height in px: whole pixels clamped to [0, 70% of column].
-   * Non-finite px falls back to DEFAULT_HEIGHT before clamping.
-   * When 0.7×column < 120 the column share wins (max-wins) so the panel
-   * never exceeds its column, but the floor is always 0.
+   * A dragged panel height (finite px) for a session column `columnHeight`
+   * px tall: rounded to whole pixels, at least MIN_HEIGHT (120) and at most
+   * 70 % of the column (`floor`, never below 0). When 70 % of the column is
+   * under 120 px the column share wins, so the panel never outgrows the
+   * column's cap.
    */
   function clampHeight(px, columnHeight) {
-    if (!Number.isFinite(px)) px = DEFAULT_HEIGHT;
     const max = Math.max(0, Math.floor(columnHeight * MAX_HEIGHT_RATIO) || 0);
     return Math.min(max, Math.max(MIN_HEIGHT, Math.round(px)));
   }
 
   window.OMP_TERMINAL = {
     EMPTY,
-    DEFAULT_HEIGHT,
     openPanel,
     closePanel,
     togglePanel,
@@ -201,6 +223,8 @@
     spawnFailed,
     needsSpawn,
     isExited,
+    shellLive,
+    canRestart,
     prune,
     entryOf,
     keymapShouldBypass,

@@ -1,0 +1,175 @@
+#!/usr/bin/env node
+// Regression script for src/app/terminal-xterm.js — building a tab's xterm
+// (options, OSC 8 swallowed, fit addon, data / resize wiring), its key
+// routing (restart on Enter without leaking "\r", copy / paste chords,
+// chords handed back to the keymap), the ConPTY option and the lines it
+// writes. xterm itself is replaced by a recording fake; the routing
+// decisions are app/terminal.js's (test-terminal.mjs), stubbed here.
+// Run: node tests/test-terminal-xterm.mjs
+
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+class FakeTerminal {
+  constructor(options) {
+    this.options = options;
+    this.osc = new Map();
+    this.addons = [];
+    this.selection = "";
+    this.parser = { registerOscHandler: (id, fn) => this.osc.set(id, fn) };
+  }
+  loadAddon(a) { this.addons.push(a); }
+  attachCustomKeyEventHandler(fn) { this.key = fn; }
+  onData(fn) { this.data = fn; }
+  onResize(fn) { this.resize = fn; }
+  hasSelection() { return this.selection !== ""; }
+  getSelection() { return this.selection; }
+}
+class FakeFit {}
+
+const copied = [];
+const win = {
+  Terminal: FakeTerminal,
+  FitAddon: { FitAddon: FakeFit },
+  copyText: (t) => copied.push(t),
+  OMP_TERMINAL: {
+    clipboardAction: (e) => (e.key === "C" ? "copy" : e.key === "V" ? "paste" : null),
+    keymapShouldBypass: (e) => e.key === "bypass",
+  },
+};
+// eslint-disable-next-line no-new-func
+new Function("window", readFileSync(join(root, "src/app/terminal-xterm.js"), "utf8"))(win);
+const X = win.OMP_TERMINAL_XTERM;
+
+let passed = 0;
+function check(label, fn) {
+  try {
+    fn();
+  } catch (err) {
+    console.error(`FAILED: ${label}`);
+    throw err;
+  }
+  passed++;
+}
+
+/** A key event; `prevented` records preventDefault. */
+const key = (type, k) => {
+  const e = { type, key: k, prevented: false };
+  e.preventDefault = () => { e.prevented = true; };
+  return e;
+};
+
+function make({ restart = () => false } = {}) {
+  const seen = { data: [], resize: [], restarts: 0 };
+  const made = X.createXterm({
+    fontSize: 14,
+    theme: { background: "#000" },
+    tryRestart: () => { const ok = restart(); if (ok) seen.restarts++; return ok; },
+    onData: (d) => seen.data.push(d),
+    onResize: (s) => seen.resize.push(s),
+  });
+  return { ...made, seen };
+}
+
+check("createXterm: options, OSC 8 swallowed, fit addon, wiring", () => {
+  const { term, fit, seen } = make();
+  assert.equal(term.options.fontSize, 14);
+  assert.deepEqual(term.options.theme, { background: "#000" });
+  assert.equal(term.options.allowProposedApi, false);
+  assert.equal(term.options.scrollback, 5000);
+  assert.equal(term.osc.get(8)("id=1;https://x"), true, "OSC 8 handled (dropped)");
+  assert.ok(fit instanceof FakeFit && term.addons.includes(fit));
+  term.data("ls\r");
+  term.resize({ cols: 90, rows: 20 });
+  assert.deepEqual(seen.data, ["ls\r"]);
+  assert.deepEqual(seen.resize, [{ cols: 90, rows: 20 }]);
+});
+
+check("a restarting Enter never reaches the shell, not even as keypress", () => {
+  const { term, seen } = make({ restart: () => true });
+  const down = key("keydown", "Enter");
+  assert.equal(term.key(down), false);
+  assert.equal(down.prevented, true, "no keypress gets fired");
+  assert.equal(seen.restarts, 1);
+  assert.equal(term.key(key("keypress", "Enter")), false, "a keypress anyway is swallowed");
+  assert.equal(term.key(key("keyup", "Enter")), false);
+  assert.equal(term.key(key("keypress", "Enter")), true, "after keyup Enter is the shell's again");
+});
+
+check("Enter in a live shell (no restart) goes to the shell", () => {
+  const { term, seen } = make({ restart: () => false });
+  const down = key("keydown", "Enter");
+  assert.equal(term.key(down), true);
+  assert.equal(down.prevented, false);
+  assert.equal(term.key(key("keypress", "Enter")), true);
+  assert.equal(seen.restarts, 0);
+});
+
+check("tryRestart is asked only for an Enter keydown", () => {
+  let asked = 0;
+  const { term } = make({ restart: () => { asked++; return false; } });
+  term.key(key("keypress", "Enter"));
+  term.key(key("keyup", "Enter"));
+  term.key(key("keydown", "a"));
+  assert.equal(asked, 0);
+  term.key(key("keydown", "Enter"));
+  assert.equal(asked, 1);
+});
+
+check("copy chord: copies a selection, consumed either way", () => {
+  const { term } = make();
+  copied.length = 0;
+  const none = key("keydown", "C");
+  assert.equal(term.key(none), false);
+  assert.equal(none.prevented, true);
+  assert.deepEqual(copied, [], "nothing selected: nothing copied");
+  term.selection = "abc";
+  term.key(key("keydown", "C"));
+  assert.deepEqual(copied, ["abc"]);
+});
+
+check("paste chord: consumed, keeps the WebView's paste out", () => {
+  const { term } = make();
+  const e = key("keydown", "V");
+  assert.equal(term.key(e), false);
+  assert.equal(e.prevented, true);
+});
+
+check("a bypassed chord goes back to the page; others and non-keydowns stay xterm's", () => {
+  const { term } = make();
+  const by = key("keydown", "bypass");
+  assert.equal(term.key(by), false);
+  assert.equal(by.prevented, false, "the keymap must still see it");
+  assert.equal(term.key(key("keydown", "x")), true);
+  assert.equal(term.key(key("keyup", "bypass")), true);
+});
+
+check("applyWindowsPty sets the option only when Rust reports a different one", () => {
+  const term = { options: {} };
+  X.applyWindowsPty(term, null);
+  X.applyWindowsPty(term, { windowsPty: null });
+  assert.equal("windowsPty" in term.options, false, "off Windows: left unset");
+  X.applyWindowsPty(term, { windowsPty: { backend: "conpty", buildNumber: 19045 } });
+  const first = term.options.windowsPty;
+  assert.deepEqual(first, { backend: "conpty", buildNumber: 19045 });
+  X.applyWindowsPty(term, { windowsPty: { backend: "conpty", buildNumber: 19045 } });
+  assert.equal(term.options.windowsPty, first, "same value: not rewritten");
+  X.applyWindowsPty(term, { windowsPty: { backend: "conpty", buildNumber: 22631 } });
+  assert.equal(term.options.windowsPty.buildNumber, 22631);
+});
+
+check("exit / failure / skipped lines", () => {
+  assert.match(X.exitLine(3), /shell exited \(code 3\) — press Enter to restart/);
+  assert.match(X.exitLine(null), /shell exited — press Enter/);
+  assert.match(X.failLine("no such file"), /could not start the shell: no such file\x1b\[0m — press Enter to retry/);
+  assert.match(X.SKIPPED_LINE, /\[output skipped\]/);
+  for (const line of [X.exitLine(0), X.failLine("x"), X.SKIPPED_LINE]) {
+    assert.ok(line.startsWith("\r\n") && line.endsWith("\r\n"), "on a line of its own");
+  }
+});
+
+console.log(`terminal-xterm: ${passed} checks passed`);

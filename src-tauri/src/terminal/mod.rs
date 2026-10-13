@@ -31,10 +31,14 @@ mod pty;
 mod pump;
 mod ring;
 mod settings;
+mod shell;
+mod stream;
 #[cfg(all(test, unix))]
 mod tests;
 #[cfg(all(test, windows))]
 mod tests_windows;
+mod threads;
+mod wire;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -44,127 +48,15 @@ use std::time::Instant;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use serde::Serialize;
-use tauri::{AppHandle, Emitter};
 
 pub use pump::Emit;
 pub use settings::TerminalSettings;
+pub use wire::{ReplayWire, TauriEmit, TerminalState, TerminalStatus};
 
 use pty::Pty;
 use settings::SettingsStore;
-
-/// [`Emit`] over Tauri events.
-pub struct TauriEmit(pub AppHandle);
-
-#[derive(Serialize, Clone)]
-struct DataPayload<'a> {
-    instance: u64,
-    seq: u64,
-    b64: &'a str,
-}
-
-#[derive(Serialize, Clone)]
-struct ExitPayload {
-    instance: u64,
-    code: Option<i32>,
-}
-
-impl Emit for TauriEmit {
-    fn data(&self, id: &str, instance: u64, seq: u64, bytes: &[u8]) {
-        let b64 = STANDARD.encode(bytes);
-        let _ = self.0.emit(
-            &format!("terminal://data/{id}"),
-            DataPayload {
-                instance,
-                seq,
-                b64: &b64,
-            },
-        );
-    }
-
-    fn exit(&self, id: &str, instance: u64, code: Option<i32>) {
-        let _ = self.0.emit(
-            &format!("terminal://exit/{id}"),
-            ExitPayload { instance, code },
-        );
-    }
-}
-
-/// A tab's shell as the webview sees it.
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalStatus {
-    pub instance: u64,
-    /// The program, for display.
-    pub shell: String,
-    pub state: TerminalState,
-    /// Set once exited; `None` there = killed by a signal.
-    pub exit_code: Option<i32>,
-    /// The pseudo console xterm.js has to adapt to (Windows only, `null`
-    /// elsewhere): see [`WindowsPty`].
-    pub windows_pty: Option<WindowsPty>,
-}
-
-/// What xterm.js's `windowsPty` option wants to know: the pseudo console
-/// rewrites the screen itself and its behaviour (reflow, wrapped-line
-/// handling) changed across Windows builds, so the renderer adjusts by build
-/// number.
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct WindowsPty {
-    /// Always `"conpty"` (`portable-pty` has no winpty backend).
-    pub backend: &'static str,
-    /// The OS build (`CurrentBuildNumber`), e.g. 22631.
-    pub build_number: u32,
-}
-
-/// The pseudo console of this system: read once from the registry
-/// (`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\CurrentBuildNumber`)
-/// and cached. `None` when the build number cannot be read.
-#[cfg(windows)]
-static WINDOWS_PTY: std::sync::LazyLock<Option<WindowsPty>> = std::sync::LazyLock::new(|| {
-    let build = windows_registry::LOCAL_MACHINE
-        .open(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
-        .ok()?
-        .get_string("CurrentBuildNumber")
-        .ok()?;
-    Some(WindowsPty {
-        backend: "conpty",
-        build_number: build.trim().parse().ok()?,
-    })
-});
-
-#[cfg(windows)]
-fn windows_pty() -> Option<WindowsPty> {
-    *WINDOWS_PTY
-}
-
-/// No pseudo console to describe off Windows.
-#[cfg(not(windows))]
-const fn windows_pty() -> Option<WindowsPty> {
-    None
-}
-
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum TerminalState {
-    Starting,
-    Running,
-    Exited,
-}
-
-/// The output a shell still holds, for a webview that missed events.
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ReplayWire {
-    /// The shell the bytes are from (the current one).
-    pub instance: u64,
-    pub b64: String,
-    /// `seq` of the last event included (0 when none is held).
-    pub head_seq: u64,
-    /// Some requested output was already evicted.
-    pub dropped: bool,
-}
+use stream::ShellState;
+use wire::windows_pty;
 
 struct Tab {
     /// The project folder `start_session` registered.
@@ -209,11 +101,10 @@ impl Slot {
 }
 
 fn live_status(pty: &Pty) -> TerminalStatus {
-    let (state, exit_code) = pty
-        .exit_code()
-        .map_or((TerminalState::Running, None), |code| {
-            (TerminalState::Exited, code)
-        });
+    let (state, exit_code) = match pty.state() {
+        ShellState::Running => (TerminalState::Running, None),
+        ShellState::Exited(code) => (TerminalState::Exited, code),
+    };
     TerminalStatus {
         instance: pty.instance(),
         shell: pty.shell().display().to_string(),
@@ -275,16 +166,19 @@ impl TerminalManager {
 
     /// Start the tab's shell and return its status. While one is starting or
     /// running, returns that one's status instead (no second spawn); an
-    /// exited one is replaced, and its leftovers are killed. Blocks while
-    /// spawning and killing: call off the IPC thread.
+    /// exited one is replaced, and its leftovers are killed. `emit` becomes
+    /// the new shell's emitter. Blocks while spawning and killing: call off
+    /// the IPC thread.
     pub fn open<E: Emit>(
         &self,
-        emit: Arc<E>,
+        emit: E,
         id: &str,
         cols: u16,
         rows: u16,
     ) -> Result<TerminalStatus, String> {
         check_size(cols, rows)?;
+        #[cfg(windows)]
+        wire::require_conpty(windows_pty())?;
         let folder = {
             let tabs = self.tabs();
             let tab = tabs.get(id).ok_or_else(|| no_tab(id))?;
@@ -298,7 +192,7 @@ impl TerminalManager {
         // Both may touch the disk (and the default shell may query the user
         // database): before taking the map again.
         let preference = self.settings.shell();
-        let (program, shell_args) = pty::resolve_shell(Some(preference.as_str()))?;
+        let (program, shell_args) = shell::resolve_shell(Some(preference.as_str()))?;
         let cwd = tab_cwd(folder.as_deref())?;
 
         let (instance, replaced) = {
@@ -324,10 +218,10 @@ impl TerminalManager {
         }
 
         let spawned = pty::spawn(
-            emit,
+            emit.terminal(id, instance),
+            instance,
             &pty::SpawnSpec {
                 session_id: id,
-                instance,
                 cwd: &cwd,
                 program: &program,
                 shell_args: &shell_args,
@@ -436,8 +330,9 @@ impl TerminalManager {
     /// End every tab, synchronously — for the paths where the process ends
     /// without running destructors (app exit, an update's relaunch). Every
     /// shell is hung up first and they share one [`pty::HANGUP_GRACE`]
-    /// before the kills, so exiting takes one grace, not one per tab. The
-    /// manager stays usable.
+    /// before the kills, so exiting takes one grace, not one per tab; the
+    /// kills share each pass over the process table. The manager stays
+    /// usable.
     pub fn shutdown_all(&self) {
         let shells: Vec<Arc<Pty>> = self
             .tabs()
@@ -452,9 +347,7 @@ impl TerminalManager {
         for pty in hung_up {
             pty.wait_exit_until(deadline);
         }
-        for pty in shells {
-            pty.kill();
-        }
+        Pty::kill_all(&shells);
     }
 
     /// The shell setting and its default. The default may query the user

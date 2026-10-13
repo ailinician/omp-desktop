@@ -3,6 +3,7 @@
 //! The `sh` tests in `tests.rs` are unix-only; these run on the Windows CI
 //! leg. Every wait polls with a generous timeout: no timing is asserted.
 
+use super::pump::TerminalEmit;
 use super::{Emit, TerminalManager, TerminalState};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -11,20 +12,31 @@ use std::time::{Duration, Instant};
 
 const SLOW: Duration = Duration::from_secs(30);
 
-/// Everything the manager emitted.
+/// Everything the manager emitted, for every shell.
 #[derive(Default)]
 struct Collector {
     data: Mutex<Vec<u8>>,
     exits: Mutex<Vec<Option<i32>>>,
 }
 
-impl Emit for Collector {
-    fn data(&self, _id: &str, _instance: u64, _seq: u64, bytes: &[u8]) {
-        self.data.lock().unwrap().extend_from_slice(bytes);
+/// One shell's emitter, recording into the shared [`Collector`].
+struct Collecting(Arc<Collector>);
+
+impl Emit for Arc<Collector> {
+    type Terminal = Collecting;
+
+    fn terminal(self, _id: &str, _instance: u64) -> Collecting {
+        Collecting(self)
+    }
+}
+
+impl TerminalEmit for Collecting {
+    fn data(&mut self, _seq: u64, bytes: &[u8]) {
+        self.0.data.lock().unwrap().extend_from_slice(bytes);
     }
 
-    fn exit(&self, _id: &str, _instance: u64, code: Option<i32>) {
-        self.exits.lock().unwrap().push(code);
+    fn exit(&mut self, code: Option<i32>) {
+        self.0.exits.lock().unwrap().push(code);
     }
 }
 
@@ -33,8 +45,8 @@ impl Collector {
         String::from_utf8_lossy(&self.data.lock().unwrap()).into_owned()
     }
 
-    fn exit_codes(&self) -> Vec<Option<i32>> {
-        self.exits.lock().unwrap().clone()
+    fn exited(&self) -> bool {
+        !self.exits.lock().unwrap().is_empty()
     }
 }
 
@@ -84,11 +96,11 @@ fn the_shells_exit_code_is_reported() {
     manager.write("win-exit", "exit 3\r\n").unwrap();
 
     assert!(
-        wait_until(SLOW, || !out.exit_codes().is_empty()),
+        wait_until(SLOW, || out.exited()),
         "no exit event; output: {:?}",
         out.text()
     );
-    assert_eq!(out.exit_codes(), [Some(3)]);
+    assert_eq!(*out.exits.lock().unwrap(), [Some(3)]);
     let status = manager.status("win-exit").unwrap();
     assert_eq!(
         (status.state, status.exit_code),

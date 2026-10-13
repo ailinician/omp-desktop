@@ -5,7 +5,7 @@
 //! ```
 //!
 //! `shell` is the user's shell (an absolute path to an executable file), or
-//! empty for the default ([`pty::default_shell`]). The value is cached in
+//! empty for the default ([`shell::default_shell`]). The value is cached in
 //! memory: `open` reads the cache, never the disk.
 //!
 //! Same failure policy as the keybinding overlay
@@ -20,7 +20,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-use super::pty;
+use super::shell;
 use crate::json_store;
 
 /// The on-disk shape. Unknown keys are dropped on the next write; add a
@@ -98,7 +98,7 @@ impl SettingsStore {
     pub fn settings(&self) -> TerminalSettings {
         TerminalSettings {
             shell: self.shell(),
-            default_shell: pty::default_shell().display().to_string(),
+            default_shell: shell::default_shell().display().to_string(),
         }
     }
 
@@ -108,7 +108,7 @@ impl SettingsStore {
     pub fn set_shell(&self, shell: &str) -> Result<TerminalSettings, String> {
         let shell = shell.trim();
         if !shell.is_empty() {
-            pty::validate_shell(shell)?;
+            shell::validate_shell(shell)?;
         }
         let Some(StoreFile { path, lock }) = &self.file else {
             shell.clone_into(&mut self.cached());

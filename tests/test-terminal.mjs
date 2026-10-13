@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Regression script for src/app/terminal.js — the terminal panel's pure
 // parts: per-tab view state (open / created / Rust's status / start error),
-// which chords the global keymap still gets while xterm has focus (decided
-// from the resolved keymap), the copy / paste chords, the shell label and
-// the panel height clamp.
+// when the shell is live (resizes) and Enter may restart it, which chords
+// the global keymap still gets while xterm has focus (decided from the
+// resolved keymap), the copy / paste chords, the shell label and the panel
+// height clamp.
 // Run: node tests/test-terminal.mjs
 
 import assert from "node:assert/strict";
@@ -191,6 +192,42 @@ check("closing then reopening an exited panel keeps the exit state", () => {
   assert.equal(T.needsSpawn(T.entryOf(s, "a")), false);
 });
 
+// ---- shellLive / canRestart ------------------------------------------------
+
+check("shellLive: a starting or running shell; not none, exited or failed", () => {
+  const s = opened();
+  const at = (st) => T.entryOf(st, "a");
+  assert.equal(T.shellLive(at(s)), false, "no shell yet: the first fit sends no resize");
+  assert.equal(T.shellLive(at(T.applyStatus(s, "a", St(1, "starting")))), true);
+  assert.equal(T.shellLive(at(T.applyStatus(s, "a", St(1)))), true);
+  assert.equal(T.shellLive(at(T.applyStatus(s, "a", St(1, "exited", 0)))), false);
+  assert.equal(T.shellLive(at(T.spawnFailed(s, "a", "boom"))), false);
+});
+
+check("shellLive: an open reply newer than the rendered status counts as live", () => {
+  const exited = T.entryOf(T.applyExit(T.applyStatus(opened(), "a", St(1)), "a", 1, 0), "a");
+  assert.equal(T.shellLive(exited, 1), false, "the open that started the exited shell");
+  assert.equal(T.shellLive(exited, 2), true, "respawn replied, not rendered yet");
+  const failed = T.entryOf(T.spawnFailed(opened(), "a", "boom"), "a");
+  assert.equal(T.shellLive(failed, 0), false);
+  assert.equal(T.shellLive(failed, 1), true, "a retry replied, not rendered yet");
+});
+
+check("canRestart: Enter replaces an exited or failed shell exactly once", () => {
+  const s = T.applyStatus(opened(), "a", St(1));
+  assert.equal(T.canRestart(T.entryOf(s, "a"), 1), false, "running");
+  assert.equal(T.canRestart(T.entryOf(opened(), "a"), 0), false, "no shell yet: the view spawns it");
+  const exited = T.applyExit(s, "a", 1, 0);
+  assert.equal(T.canRestart(T.entryOf(exited, "a"), 1), true, "exited");
+  assert.equal(T.canRestart(T.entryOf(exited, "a"), 2), false, "second Enter before the respawn rendered");
+  const respawned = T.applyStatus(exited, "a", St(2));
+  assert.equal(T.canRestart(T.entryOf(respawned, "a"), 2), false, "rendered: running");
+  assert.equal(T.canRestart(T.entryOf(T.applyExit(respawned, "a", 2, 1), "a"), 2), true, "the new shell exited");
+  const failed = T.spawnFailed(opened(), "a", "boom");
+  assert.equal(T.canRestart(T.entryOf(failed, "a"), 0), true, "failed start: retry");
+  assert.equal(T.canRestart(T.entryOf(failed, "a"), 1), false, "retry replied, not rendered yet");
+});
+
 check("no-op transitions return the same object", () => {
   const s = T.applyStatus(opened(), "a", St(1));
   assert.equal(T.openPanel(s, "a"), s);
@@ -351,16 +388,17 @@ check("clampHeight stays within [120, 70% of column]", () => {
   assert.equal(T.clampHeight(50, 1000), 120, "raised to MIN_HEIGHT");
   assert.equal(T.clampHeight(900, 1000), 700);
   assert.equal(T.clampHeight(240.6, 1000), 241);
-  assert.equal(T.clampHeight(500, 100), 70, "max-wins: 0.7×100=70, column share wins over old 120 min");
-  assert.equal(T.clampHeight(NaN, 1000), T.DEFAULT_HEIGHT);
-  assert.equal(T.clampHeight(undefined, 1000), T.DEFAULT_HEIGHT);
-  assert.equal(T.DEFAULT_HEIGHT, 240);
+  assert.equal(T.clampHeight(500, 100), 70, "a column under 120/0.7 px: its 70 % share wins over MIN_HEIGHT");
+  assert.equal(T.clampHeight(500, 0), 0, "no column: never below 0");
 });
 
-check("clampHeight with non-finite px substitutes DEFAULT_HEIGHT then clamps", () => {
-  const h = T.clampHeight(undefined, 300);
-  assert.ok(h <= 210 && h >= 120, `undefined→DEFAULT_HEIGHT=240 clamped to [0,210]: got ${h}`);
-  assert.equal(T.clampHeight(NaN, 1000), 240);
+check("the height default lives only in TWEAK_DEFAULTS", () => {
+  assert.equal("DEFAULT_HEIGHT" in T, false);
+  const cw = {};
+  // eslint-disable-next-line no-new-func
+  new Function("window", readFileSync(join(root, "src/app/constants.js"), "utf8"))(cw);
+  assert.equal(cw.TWEAK_DEFAULTS.terminalHeight, 240);
+  assert.equal(T.clampHeight(cw.TWEAK_DEFAULTS.terminalHeight, 1000), 240, "the default is a valid height");
 });
 
 console.log(`terminal: ${passed} checks passed`);

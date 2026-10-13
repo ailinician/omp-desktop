@@ -1,43 +1,42 @@
-//! The pump: turns what the reader and waiter threads send into events, and
-//! the [`Stream`] state it shares with the terminal's owner (output ring,
-//! flow control, exit code).
-//!
-//! **Flow control.** The pump counts the bytes emitted but not yet acked by
-//! the webview. At [`HIGH_WATER`] it stops emitting *and* stops draining its
-//! channel, so the reader blocks on the full queue and the pty throttles the
-//! shell; it resumes once acks bring the debt below [`LOW_WATER`], or a
-//! replay resets it. A stalled pump waits on a condvar that `ack`, `replay`
-//! and `close` notify.
+//! The pump: turns what the reader and waiter threads send into events,
+//! paced, capped and under the flow control of [`Stream`] (see
+//! [`super::stream`]).
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::ring::{OutputRing, Replay};
+use super::stream::{Credit, Stream};
 
-/// Where terminal output goes. The app emits Tauri events; tests collect.
-pub trait Emit: Send + Sync + 'static {
-    /// One chunk of output of shell `instance`, the `seq`-th (from 1).
-    fn data(&self, id: &str, instance: u64, seq: u64, bytes: &[u8]);
-    /// Shell `instance` exited; `None` = killed by a signal.
-    fn exit(&self, id: &str, instance: u64, code: Option<i32>);
+/// Where terminal output goes: the app emits Tauri events, tests collect.
+/// Handed to `TerminalManager::open`, which turns it into the emitter of the
+/// shell it spawns (and drops it when it spawns nothing).
+pub trait Emit {
+    /// The emitter one shell's pump owns.
+    type Terminal: TerminalEmit + Send + 'static;
+    /// The emitter of shell `instance` of tab `id`, built once per shell so
+    /// the pump's per-event work allocates nothing it could reuse.
+    fn terminal(self, id: &str, instance: u64) -> Self::Terminal;
+}
+
+/// One shell's events, owned by its pump.
+pub trait TerminalEmit {
+    /// The `seq`-th chunk of output (from 1).
+    fn data(&mut self, seq: u64, bytes: &[u8]);
+    /// The shell exited; `None` = killed by a signal.
+    fn exit(&mut self, code: Option<i32>);
 }
 
 /// Largest payload of one event.
 pub const MAX_EVENT: usize = 64 * 1024;
 /// Minimum spacing between two events of one terminal.
 pub const MIN_INTERVAL: Duration = Duration::from_millis(4);
-/// How long after the shell exited the reader may take to reach EOF. On Unix
-/// the pty hangs up when its session leader exits, so EOF follows at once; a
-/// platform where a background job holding the slave open could keep the
-/// reader from ever getting there is covered by abandoning the reader after
-/// this, dropping its late output.
+/// How long after the shell exited the reader may take to reach EOF. macOS
+/// hangs the pty up when its session leader exits, so EOF follows at once.
+/// Linux does not: a background job holding the slave open keeps the reader
+/// from EOF for as long as it lives. The pump abandons the reader after
+/// this, dropping its late output, so the exit event is never held up.
 pub const READER_GRACE: Duration = Duration::from_millis(250);
-/// Unacked bytes at which the pump stalls.
-pub const HIGH_WATER: u64 = 512 * 1024;
-/// A stalled pump resumes once the unacked bytes are below this.
-pub const LOW_WATER: u64 = 128 * 1024;
 
 /// What the terminal's threads tell the pump.
 pub enum Msg {
@@ -45,151 +44,20 @@ pub enum Msg {
     Data(Vec<u8>),
     /// The reader reached EOF or failed: no more data follows.
     ReaderDone,
-    /// The shell exited and was reaped; `None` = killed by a signal.
+    /// The shell exited (unix: observed with `waitid(WNOWAIT)`, the leader
+    /// is not reaped yet; Windows: reaped); `None` = killed by a signal.
     Exit(Option<i32>),
-}
-
-/// One terminal's output state, shared by its pump, its waiter and its
-/// [`super::pty::Pty`].
-pub struct Stream {
-    flow: Mutex<Flow>,
-    /// Notified by `ack`, `replay` and `close`; a stalled pump waits on it.
-    wake: Condvar,
-    /// Set once by the waiter, before it tells the pump: `None` = signal.
-    exit: OnceLock<Option<i32>>,
-}
-
-/// Guarded by one lock so that a replay copies exactly the chunks whose
-/// debt it forgives.
-struct Flow {
-    /// Owner gone (closed, replaced, shut down): emit nothing any more.
-    closed: bool,
-    /// Bytes emitted minus bytes acked (saturating).
-    unacked: u64,
-    ring: OutputRing,
-}
-
-/// May the pump go on?
-enum Credit {
-    /// Yes, it was not stalled.
-    Ready,
-    /// Yes, after a stall.
-    Resumed,
-    /// No: the terminal is closed.
-    Closed,
-}
-
-impl Stream {
-    pub const fn new() -> Self {
-        Self {
-            flow: Mutex::new(Flow {
-                closed: false,
-                unacked: 0,
-                ring: OutputRing::new(),
-            }),
-            wake: Condvar::new(),
-            exit: OnceLock::new(),
-        }
-    }
-
-    fn flow(&self) -> MutexGuard<'_, Flow> {
-        self.flow.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// `None` while the shell runs; `Some(code)` once it exited (`code`
-    /// `None` = killed by a signal).
-    // The terminal contract's shape (`Pty::exit_code`): "running" and
-    // "killed by a signal" are both states the manager reports.
-    #[allow(clippy::option_option)]
-    pub fn exit_code(&self) -> Option<Option<i32>> {
-        self.exit.get().copied()
-    }
-
-    /// Record the shell's exit code (the first one set wins).
-    pub fn set_exit(&self, code: Option<i32>) {
-        let _ = self.exit.set(code);
-    }
-
-    /// The webview has rendered `bytes` more of the emitted output.
-    pub fn ack(&self, bytes: u64) {
-        let mut flow = self.flow();
-        flow.unacked = flow.unacked.saturating_sub(bytes);
-        drop(flow);
-        self.wake.notify_all();
-    }
-
-    /// The held output after `after_seq`; forgives the whole debt, since the
-    /// caller renders the replay instead of acking the events it covers.
-    pub fn replay(&self, after_seq: u64) -> Replay {
-        let mut flow = self.flow();
-        let replay = flow.ring.replay(after_seq);
-        flow.unacked = 0;
-        drop(flow);
-        self.wake.notify_all();
-        replay
-    }
-
-    /// Silence the terminal for good: no event is emitted after this.
-    pub fn close(&self) {
-        self.flow().closed = true;
-        self.wake.notify_all();
-    }
-
-    fn is_closed(&self) -> bool {
-        self.flow().closed
-    }
-
-    /// Block while the debt is at [`HIGH_WATER`] until it drops below
-    /// [`LOW_WATER`] (or is forgiven), or the terminal is closed.
-    fn credit(&self) -> Credit {
-        let flow = self.flow();
-        let (closed, stalled) = (flow.closed, flow.unacked >= HIGH_WATER);
-        if closed || !stalled {
-            drop(flow);
-            return if closed {
-                Credit::Closed
-            } else {
-                Credit::Ready
-            };
-        }
-        let closed = self
-            .wake
-            .wait_while(flow, |f| !f.closed && f.unacked >= LOW_WATER)
-            .unwrap_or_else(PoisonError::into_inner)
-            .closed;
-        if closed {
-            Credit::Closed
-        } else {
-            Credit::Resumed
-        }
-    }
-
-    /// Append `chunk` to the ring and charge it to the debt; its seq, or
-    /// `None` when the terminal is closed. Into the ring before the event
-    /// goes out, so a replay racing the event covers it (the webview drops
-    /// the event by its seq) rather than missing it.
-    fn record(&self, chunk: Vec<u8>) -> Option<(u64, Arc<Vec<u8>>)> {
-        let chunk = Arc::new(chunk);
-        let mut flow = self.flow();
-        if flow.closed {
-            return None;
-        }
-        flow.unacked += chunk.len() as u64;
-        let seq = flow.ring.push(Arc::clone(&chunk));
-        drop(flow);
-        Some((seq, chunk))
-    }
 }
 
 /// Emit the output as events: one per [`MIN_INTERVAL`] at the most (the
 /// first after a quiet spell goes out at once), each of at most
 /// [`MAX_EVENT`] bytes — a larger backlog is emitted piecewise, one piece
 /// per interval, and holds the reader back meanwhile — and none while the
-/// webview owes [`HIGH_WATER`] acks (see the module docs). Then the exit
-/// event, once the shell is reaped, the reader is done (or abandoned after
-/// [`READER_GRACE`] of unstalled time) and everything is out. A closed
+/// webview owes [`super::stream::HIGH_WATER`] acks. Then the exit event,
+/// once the shell's exit was observed, the reader is done (or abandoned
+/// after [`READER_GRACE`] of unstalled time) and everything is out. A closed
 /// terminal emits nothing and returns promptly, also while stalled.
-pub fn pump<E: Emit>(rx: &Receiver<Msg>, emit: &E, id: &str, instance: u64, stream: &Stream) {
+pub fn pump(rx: &Receiver<Msg>, mut emit: impl TerminalEmit, stream: &Stream) {
     let mut pending: Vec<u8> = Vec::new();
     let mut last_emit: Option<Instant> = None;
     let mut reader_done = false;
@@ -229,7 +97,7 @@ pub fn pump<E: Emit>(rx: &Receiver<Msg>, emit: &E, id: &str, instance: u64, stre
             let Some((seq, chunk)) = stream.record(chunk) else {
                 return;
             };
-            emit.data(id, instance, seq, &chunk);
+            emit.data(seq, &chunk);
             last_emit = Some(Instant::now());
             continue;
         }
@@ -264,21 +132,23 @@ pub fn pump<E: Emit>(rx: &Receiver<Msg>, emit: &E, id: &str, instance: u64, stre
         }
     }
     if !stream.is_closed() {
-        emit.exit(id, instance, shell_exit.and_then(|(_, code)| code));
+        emit.exit(shell_exit.and_then(|(_, code)| code));
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::stream::{HIGH_WATER, LOW_WATER};
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Arc, Mutex};
 
-    /// One data event as the emitter saw it: when, instance, seq, bytes.
-    type Event = (Instant, u64, u64, Vec<u8>);
+    /// One data event as the emitter saw it: when, seq, bytes.
+    type Event = (Instant, u64, Vec<u8>);
 
-    /// Timestamps every emit (each takes `delay`); remembers how many bytes
-    /// were out at the exit. With `auto_ack`, acks each event at once.
+    /// Timestamps every emit (each takes `delay`); remembers when the exit
+    /// came and how many bytes were out by then. With `auto_ack`, acks each
+    /// event at once.
     #[derive(Default)]
     struct Timed {
         delay: Duration,
@@ -287,19 +157,19 @@ mod tests {
         exit: Mutex<Option<(Instant, Option<i32>, usize)>>,
     }
 
-    impl Emit for Timed {
-        fn data(&self, _id: &str, instance: u64, seq: u64, bytes: &[u8]) {
+    impl TerminalEmit for &Timed {
+        fn data(&mut self, seq: u64, bytes: &[u8]) {
             self.events
                 .lock()
                 .unwrap()
-                .push((Instant::now(), instance, seq, bytes.to_vec()));
+                .push((Instant::now(), seq, bytes.to_vec()));
             if let Some(stream) = &self.auto_ack {
                 stream.ack(bytes.len() as u64);
             }
             thread::sleep(self.delay);
         }
 
-        fn exit(&self, _id: &str, _instance: u64, code: Option<i32>) {
+        fn exit(&mut self, code: Option<i32>) {
             let bytes = self.emitted();
             *self.exit.lock().unwrap() = Some((Instant::now(), code, bytes));
         }
@@ -311,7 +181,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|e| e.3.len())
+                .map(|e| e.2.len())
                 .collect()
         }
 
@@ -325,7 +195,7 @@ mod tests {
     }
 
     fn run(rx: &Receiver<Msg>, out: &Timed) {
-        pump(rx, out, "t", 1, &Stream::new());
+        pump(rx, out, &Stream::new());
     }
 
     /// Poll `check` until it holds or `limit` passes.
@@ -357,6 +227,9 @@ mod tests {
         }
     }
 
+    /// The pacing contract, whatever the scheduling: every event at most
+    /// [`MAX_EVENT`], events at least [`MIN_INTERVAL`] apart, the bytes
+    /// complete and in order, the exit last.
     #[test]
     fn a_burst_goes_out_in_spaced_events_of_at_most_64_kib() {
         const CHUNK: usize = 8 * 1024;
@@ -374,19 +247,21 @@ mod tests {
         let out = Timed::default();
         run(&rx, &out);
 
-        // The first chunk after silence goes out at once; the rest is cut
-        // into exact 64 KiB pieces, one per interval.
-        assert_eq!(out.sizes(), [CHUNK, MAX_EVENT, MAX_EVENT, MAX_EVENT]);
         let events = out.events.lock().unwrap();
+        for (_, _, bytes) in events.iter() {
+            assert!((1..=MAX_EVENT).contains(&bytes.len()), "{}", bytes.len());
+        }
         for pair in events.windows(2) {
             let gap = pair[1].0 - pair[0].0;
             assert!(gap >= MIN_INTERVAL, "events only {gap:?} apart");
         }
-        let received: Vec<u8> = events.iter().flat_map(|e| e.3.iter().copied()).collect();
+        let received: Vec<u8> = events.iter().flat_map(|e| e.2.iter().copied()).collect();
         assert_eq!(received, sent, "bytes lost or reordered");
+        let last = events.last().map(|e| e.0);
         drop(events);
-        let exit = out.exit.lock().unwrap().unwrap();
-        assert_eq!((exit.1, exit.2), (Some(0), sent.len()));
+        let (at, code, bytes) = out.exit.lock().unwrap().unwrap();
+        assert_eq!((code, bytes), (Some(0), sent.len()), "exit before the data");
+        assert!(last.is_some_and(|last| at >= last));
     }
 
     #[test]
@@ -441,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn events_carry_the_instance_and_seqs_from_one_and_land_in_the_ring() {
+    fn events_carry_seqs_from_one_and_land_in_the_ring() {
         let (tx, rx) = mpsc::sync_channel(8);
         let stream = Stream::new();
         let out = Timed::default();
@@ -454,12 +329,12 @@ mod tests {
             tx.send(Msg::ReaderDone).unwrap();
             tx.send(Msg::Exit(Some(0))).unwrap();
         });
-        pump(&rx, &out, "t", 7, &stream);
+        pump(&rx, &out, &stream);
         feeder.join().unwrap();
 
         let events = out.events.lock().unwrap();
-        let tags: Vec<(u64, u64)> = events.iter().map(|e| (e.1, e.2)).collect();
-        assert_eq!(tags, [(7, 1), (7, 2), (7, 3)]);
+        let seqs: Vec<u64> = events.iter().map(|e| e.1).collect();
+        assert_eq!(seqs, [1, 2, 3]);
         drop(events);
         let replay = stream.replay(1);
         assert_eq!(
@@ -467,15 +342,15 @@ mod tests {
             (&b"twothree"[..], 3, false)
         );
 
-        // A new instance has its own stream: seqs start over.
+        // A new shell has its own stream: seqs start over.
         let (tx, rx) = mpsc::sync_channel(8);
         tx.send(Msg::Data(b"again".to_vec())).unwrap();
         tx.send(Msg::ReaderDone).unwrap();
         tx.send(Msg::Exit(Some(0))).unwrap();
         let out = Timed::default();
-        pump(&rx, &out, "t", 8, &Stream::new());
-        let tag = out.events.lock().unwrap().first().map(|e| (e.1, e.2));
-        assert_eq!(tag, Some((8, 1)));
+        pump(&rx, &out, &Stream::new());
+        let seq = out.events.lock().unwrap().first().map(|e| e.1);
+        assert_eq!(seq, Some(1));
     }
 
     #[test]
@@ -495,7 +370,7 @@ mod tests {
             tx.send(Msg::ReaderDone).unwrap();
             tx.send(Msg::Exit(Some(3))).unwrap();
         });
-        pump(&rx, &out, "t", 1, &stream);
+        pump(&rx, &out, &stream);
         feeder.join().unwrap();
         let exit = out.exit.lock().unwrap().unwrap();
         assert_eq!((exit.1, exit.2), (Some(3), TOTAL * CHUNK));
@@ -524,7 +399,7 @@ mod tests {
         });
         let pump_stream = Arc::clone(&stream);
         let pump_out = Arc::clone(&out);
-        let handle = thread::spawn(move || pump(&rx, pump_out.as_ref(), "t", 1, &pump_stream));
+        let handle = thread::spawn(move || pump(&rx, pump_out.as_ref(), &pump_stream));
         (stream, out, fed, handle)
     }
 

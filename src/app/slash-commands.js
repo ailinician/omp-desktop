@@ -43,7 +43,7 @@
     { name: "collapse-all", hint: "collapse every tool card and thinking block in this tab", icon: "▴", group: "View" },
     { name: "expand-all",   hint: "expand every tool card and thinking block in this tab",   icon: "▾", group: "View" },
     { name: "check-updates", hint: "check for OMP Desktop updates",            icon: "↑", group: "View"    },
-    { name: "terminal", hint: "show or hide this tab's shell panel",         icon: "▸", group: "View"    },
+    { name: "terminal",  hint: "show or hide this tab's shell panel",          icon: "▸", group: "View"    },
   ].map((c) => Object.freeze({ ...c, source: DESKTOP, aliases: [] })));
 
   const SOURCE_STYLE = {

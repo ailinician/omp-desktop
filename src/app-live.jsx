@@ -24,7 +24,7 @@ const {
   useWidgets, WidgetCard, WidgetErrorCard, WidgetApprovalCard, WidgetBoundary,
   TWEAK_DEFAULTS, NULL_MODEL, EMPTY_PROJECT, DEFAULT_PROFILE_ID,
   INTENT_FRAMING, APPROVAL_PROMPT,
-  useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, useTerminal, TerminalPanel, timeNow,
+  useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, useTerminal, TerminalPanels, TerminalTweaks, timeNow,
   useKeymap, useKeymapDispatch, ShortcutsModal,
 } = window;
 const { isCommandInvocation } = window.OMP_SLASH;
@@ -36,7 +36,7 @@ const {
 const { NO_OVERRIDES: NO_COLLAPSE_OVERRIDES, foldModes: _foldModes, overridesForAll: _collapseOverridesForAll } = window.OMP_COLLAPSE;
 const { tweakKey: _widgetTweakKey } = window.OMP_WIDGETS;
 const { EMPTY: _EXT_EMPTY, cards: _extCards, toggles: _extToggles } = window.OMP_EXT_WIDGETS;
-const { DEFAULT_HEIGHT: _TERM_DEFAULT_HEIGHT, entryOf: _TERM_entryOf, shellLabel: _TERM_shellLabel } = window.OMP_TERMINAL;
+const { entryOf: _TERM_entryOf } = window.OMP_TERMINAL;
 
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
@@ -229,8 +229,6 @@ function App() {
   const terminal = useTerminal({
     bridge, activeSessionId: planKey, sessionIds, tweaks: t, setTweak,
   });
-  const termHeight = t.terminalHeight ?? _TERM_DEFAULT_HEIGHT;
-  const shellSettings = terminal.shellSettings;
 
   const subagentUi = useSubagentManager({
     bridge, layout: t.layout, setTweak, activeSessionId, subagents, messages, setHoveredMsgIdx,
@@ -686,26 +684,7 @@ function App() {
                     collapseOverrides={tabCollapseOverrides}
                     onToggleCollapse={handleToggleCollapse}
                   />
-                  {/* One panel per tab that has ever opened its terminal, pending or
-                      failed spawn included; the others stay mounted but hidden, so a
-                      shell's output is kept off-screen and its xterm survives a hide. */}
-                  {sessions.map(s => {
-                    const entry = _TERM_entryOf(terminal.state, s.id);
-                    if (!entry.created) return null;
-                    return (
-                      <TerminalPanel key={s.id}
-                        entry={entry}
-                        height={termHeight}
-                        hidden={s.id !== planKey || !entry.open}
-                        onHeight={terminal.setHeight}
-                        onClose={() => terminal.close(s.id)}
-                        mountRef={terminal.mountFor(s.id)}
-                        onContextMenu={(e) => { if (terminal.copySelection(s.id)) e.preventDefault(); }}
-                        shellLabel={_TERM_shellLabel(entry.status?.shell)}
-                        cwd={s.path}
-                      />
-                    );
-                  })}
+                  <TerminalPanels sessions={sessions} activeId={planKey} terminal={terminal} />
                   <Composer
                     sessionId={planKey}
                     sessionIds={sessionIds}
@@ -970,24 +949,8 @@ function App() {
             <TweakButton label="reload widgets" secondary onClick={widgets.reload} />
           </TweakRow>
         </TweakSection>
-        <TweakSection label="Terminal">
-          {/* Saved on blur (and Enter), not per keystroke: a half-typed path is
-              not a shell. Rust validates and stores it; the next shell started
-              uses it (running ones keep theirs). */}
-          <TweakRow label="shell">
-            <input className="twk-field" type="text" spellCheck={false}
-              key={shellSettings?.shell ?? ""}
-              defaultValue={shellSettings?.shell ?? ""}
-              placeholder={shellSettings?.defaultShell ? `default (${shellSettings.defaultShell})` : "default"}
-              aria-invalid={terminal.shellError != null}
-              onBlur={e => terminal.saveShell(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }} />
-            {terminal.shellError != null && <div className="term-shell-error">{terminal.shellError}</div>}
-          </TweakRow>
-          <TweakToggle label="open with new tab" value={t.terminalAutoOpen ?? false}
-            onChange={v => setTweak("terminalAutoOpen", v)} />
-          <TweakRow label="height" value={`${termHeight} px`} />
-        </TweakSection>
+        <TerminalTweaks bridge={bridge} height={terminal.height} autoOpen={t.terminalAutoOpen ?? false}
+          onAutoOpen={v => setTweak("terminalAutoOpen", v)} />
         <TweakSection label="Session">
           <TweakSlider label="prompt history" value={t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT}
             min={window.OMP_PROMPT_HISTORY.MIN_LIMIT} max={window.OMP_PROMPT_HISTORY.MAX_LIMIT} step={10} unit=" prompts"

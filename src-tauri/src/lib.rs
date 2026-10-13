@@ -359,7 +359,7 @@ async fn terminal_open(
     terminal: State<'_, Arc<terminal::TerminalManager>>,
 ) -> Result<terminal::TerminalStatus, String> {
     with_blocking(&terminal, move |t| {
-        t.open(Arc::new(terminal::TauriEmit(app)), &session_id, cols, rows)
+        t.open(terminal::TauriEmit(app), &session_id, cols, rows)
     })
     .await
 }
