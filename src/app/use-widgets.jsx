@@ -15,6 +15,8 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
   schedRef.current = sched;
   const sessionIdsRef = React.useRef(sessionIds);
   sessionIdsRef.current = sessionIds;
+  const activeSessionIdRef = React.useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
 
   const reload = React.useCallback(async () => {
     if (!bridge) return;
@@ -58,7 +60,11 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
       const done = _UWS.finish(schedRef.current, sid, plugin.id, started.seq, { ...parsed, durationMs: res.durationMs });
       setSched(done.state); schedRef.current = done.state;
       // A tab closed while its run was in flight must not spawn the follow-up.
-      if (done.next && sessionIdsRef.current.includes(sid)) launch(sid, plugin, done.next);
+      // An interval follow-up must also check the tab is still active and visible.
+      if (done.next && sessionIdsRef.current.includes(sid)) {
+        if (done.next === "interval" && (sid !== activeSessionIdRef.current || document.visibilityState !== "visible")) return;
+        launch(sid, plugin, done.next);
+      }
     });
   }, [bridge]);
 
@@ -70,7 +76,7 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
   // activate: tab/project changed, or the applicable plugin set changed for it.
   // Plugins are empty until this tab's context has arrived, so the effect
   // re-runs (pluginKey changes) exactly once with the right plugin set.
-  const pluginKey = plugins.map(p => p.id).join("\0");
+  const pluginKey = plugins.map(p => p.id + ":" + (p.intervalMs ?? 0)).join("\0");
   React.useEffect(() => {
     if (ctxCurrent) fire("activate");
   }, [activeSessionId, activeProjectPath, pluginKey]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -103,6 +109,7 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
   // Reset when activeSessionId or plugin set changes. Pause when hidden;
   // fire one interval run per plugin on return to visible if due.
   const intervalPluginsRef = React.useRef([]);
+  const intervalTimersRef = React.useRef([]);
   React.useEffect(() => {
     const timers = [];
     const intervalPlugins = plugins.filter(p => p.intervalMs);
@@ -122,11 +129,22 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
       const now = Date.now();
       for (const p of intervalPluginsRef.current) {
         const run = _UWS.runOf(schedRef.current, activeSessionId, p.id);
-        if (_UWS.dueNow(run, p.intervalMs, now)) launch(activeSessionId, p, "interval");
+        if (_UWS.dueNow(run, p.intervalMs, now)) {
+          // Fire the catch-up, then restart the timer so the next tick
+          // does not queue a double run right after this one lands.
+          launch(activeSessionId, p, "interval");
+          // Restart this plugin's timer: clear the old one and set a new one.
+          const idx = intervalPluginsRef.current.findIndex(x => x.id === p.id);
+          if (idx >= 0 && intervalTimersRef.current[idx]) {
+            clearInterval(intervalTimersRef.current[idx]);
+            intervalTimersRef.current[idx] = setInterval(() => fireIfVisible(p), p.intervalMs);
+          }
+        }
       }
     };
     document.addEventListener("visibilitychange", onVisible);
 
+    intervalTimersRef.current = timers;
     return () => {
       for (const t of timers) clearInterval(t);
       document.removeEventListener("visibilitychange", onVisible);

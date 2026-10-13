@@ -41,7 +41,8 @@
   const turnEnded = (prev, next) => prev.sessionId === next.sessionId && prev.streaming && !next.streaming;
 
   // dueNow: true when a plugin has never run or its last run is older than its interval.
-  const dueNow = (run, intervalMs, now) => !run?.at || now - run.at >= intervalMs;
+  // A run in flight is still "fresh" — its result is pending.
+  const dueNow = (run, intervalMs, now) => !run?.at || (run.state !== "running" && now - run.at >= intervalMs);
 
   window.OMP_WIDGET_SCHEDULE = { EMPTY, start, finish, prune, runOf, turnEnded, dueNow };
 })();

@@ -239,5 +239,9 @@ check("dueNow is true when run is absent or last run is older than interval", ()
   assert.equal(S.dueNow({ at: 40000 }, 60000, 100000), true, "100000 - 40000 = 60000 >= 60000");
   assert.equal(S.dueNow({ at: 41000 }, 60000, 100000), false);
 });
+check("dueNow is false while a run is in flight", () => {
+  assert.equal(S.dueNow({ state: "running", at: 1000 }, 60000, 100000), false, "in-flight counts as fresh");
+  assert.equal(S.dueNow({ state: "ok", at: 1000 }, 60000, 100000), true, "ok with old at is due");
+});
 
 console.log(`test-widgets: ${passed} checks passed`);
