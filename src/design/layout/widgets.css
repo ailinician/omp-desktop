@@ -1,10 +1,13 @@
-/* layout/widgets.css — rail widget plugin cards (design/widgets/; user
-   guide: docs/widgets.md). */
+/* layout/widgets.css — rail widget cards: plugin runs and pushed omp
+   extension content (design/widgets/; user guide: docs/widgets.md). */
 .wdg-card { display: flex; flex-direction: column; gap: 6px; }
 .wdg-card .rail-card-head { gap: 6px; min-width: 0; }
 .wdg-title { color: var(--fg-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wdg-meta { margin-left: auto; flex: none; }
 .wdg-stale > :not(.rail-card-head) { opacity: 0.5; }
+/* Content omp extensions push (#52): accent border, accent dot. */
+.rail-card.wdg-pushed { border-color: color-mix(in oklab, var(--accent) 30%, var(--line)); }
+.wdg-pushed > .rail-card-head .wdg-dot { background: var(--accent); }
 .wdg-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-5); flex: none; }
 .tone-ok    > .rail-card-head .wdg-dot, .wdg-item.tone-ok .wdg-dot, .wdg-status.tone-ok .wdg-dot    { background: var(--accent); }
 .tone-warn  > .rail-card-head .wdg-dot, .wdg-item.tone-warn .wdg-dot, .wdg-status.tone-warn .wdg-dot  { background: var(--amber); }

@@ -116,9 +116,11 @@ function WidgetBlock({ block, onInsert }) {
         </div>
       );
     case "text":
+      // `mono` never comes from a plugin (parseOutput drops it): extension
+      // widget lines (#52) are terminal lines, aligned for a fixed width.
       return (
         <div className="wdg-text-row">
-          <div className="wdg-text selectable">{block.text}</div>
+          <div className={`wdg-text selectable${block.mono ? " mono" : ""}`}>{block.text}</div>
           {block.insert && (
             <button className="btn icon ghost" title="insert into prompt" aria-label="insert into prompt" onClick={() => onInsert?.(block.insert)}>
               <_WB_Icon name="plus" size={9} />

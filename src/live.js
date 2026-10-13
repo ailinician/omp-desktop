@@ -20,6 +20,7 @@
   const APPROVAL = window.OMP_APPROVAL;
   const TURN = window.OMP_TURN_STATUS;
   const GOAL = window.OMP_GOAL;
+  const EXT = window.OMP_EXT_WIDGETS;
   const { tsOf, mergeTranscript } = window.OMP_TRANSCRIPT;
 
   // ── Safe defaults so design components never crash on missing fields ──────
@@ -85,6 +86,10 @@
     // omp's goal mode (app/goal.js): `{ known, goal }` from `get_state.goal`,
     // `goal_updated` frames and `goal` command responses.
     goal:           GOAL.UNKNOWN,
+    // omp extension status lines and text widgets (app/extension-widgets.js,
+    // #52). Not reset by `/new`, branch or fork (omp's TUI keeps them too);
+    // gone with the process (`_endDeadProcessState`).
+    extWidgets:     EXT.EMPTY,
   };
 
   let streamingBubble = null;
@@ -100,6 +105,10 @@
   let lastSeq         = 0;   // highest journal seq processed for the active session — see _dispatchEnvelope
   let lastTurnOk      = true; // last assistant message_end was not error/aborted — a failed first exchange must not spend the one-shot
   let _replayBuffer   = null; // null = live dispatch; [] = buffering during a replay (see _switchToSession)
+  // Journal seq the active tab's extension snapshot reflects (`extension_ui_state`
+  // after a dropped replay): replayed and buffered setStatus / setWidget
+  // frames at or below it are already in `state.extWidgets`. 0 = none.
+  let extSnapshotSeq  = 0;
   // The user's `abort` is in flight — set by `abort()`, cleared by its
   // id-less response. omp pauses an active goal on abort, and that pause is
   // labelled as the user's stop (app/goal.js `fromFrame`).
@@ -317,6 +326,7 @@
       queue:           state.queue,
       queueSending:    state.queueSending,
       goal:            state.goal,
+      extWidgets:      state.extWidgets,
       // Tab list — derived from session registry, not per-session state.
       // runState: active tab reads live state; background tabs read their
       // cached snapshot (never activated yet = "idle" defaults).
@@ -659,6 +669,8 @@
     state.queueSending = [];
     state.asyncPending = false;
     state.messages = TURN.retryCleared(state.messages);
+    // Its extensions died with it; the backend's copy ended with the entry.
+    state.extWidgets = EXT.EMPTY;
   }
 
   // Reset all per-session volatile state (called before loading a new session)
@@ -687,6 +699,7 @@
       queue:         QUEUE.EMPTY_QUEUE,
       queueSending:  [],
       goal:          GOAL.UNKNOWN,
+      extWidgets:    EXT.EMPTY,
     });
     streamingBubble = null;
     lastTurnOk  = true;
@@ -697,6 +710,7 @@
     turnStartTime   = null;
     activityLog     = [];
     lastSeq         = 0;
+    extSnapshotSeq  = 0;
     userAbortInFlight = false;
   }
 
@@ -734,6 +748,7 @@
       queue:         state.queue,
       queueSending:  state.queueSending,
       goal:          state.goal,
+      extWidgets:    state.extWidgets,
       // volatile vars
       streamingBubble,
       activeToolCards: new Map(activeToolCards),
@@ -773,6 +788,7 @@
       queue:         snap.queue ?? QUEUE.EMPTY_QUEUE,
       queueSending:  snap.queueSending ?? [],
       goal:          snap.goal ?? GOAL.UNKNOWN,
+      extWidgets:    snap.extWidgets ?? EXT.EMPTY,
     });
     streamingBubble = snap.streamingBubble;
     activeToolCards = snap.activeToolCards;
@@ -832,6 +848,7 @@
     // arrives between listener-attach and the replay fetch below is queued
     // (never lost, never double-processed) — drained once replay is applied.
     _replayBuffer = [];
+    extSnapshotSeq = 0;
 
     const { listen } = window.__TAURI__.event;
     const ulLine = await listen(`agent://line/${id}`, ev => handleLine(ev.payload));
@@ -877,6 +894,21 @@
       if (replay.dropped) {
         console.warn(`[live] session '${id}' replay desynced — recovered ${replay.events.length} event(s); earlier ones fell outside the journal window`);
       }
+      // Extension status lines / widgets: the evicted lines may have set or
+      // cleared some. The backend applied every frame and names the last one
+      // (`seq`); its copy replaces ours before the replay runs, and the
+      // setStatus / setWidget handler skips frames at or below that seq, so
+      // only newer ones apply on top — the backend's own result. Fetched
+      // before dispatching, so a newer tab switch during the await saves
+      // this tab with its old `lastSeq` and the next visit fetches again.
+      if (replay.dropped) {
+        const ext = await _invokeSafe("extension_ui_state", { sessionId: id }, null);
+        if (_switchGen !== myGen) return; // superseded by a newer switch
+        if (ext) {
+          state.extWidgets = EXT.fromSnapshot(ext);
+          extSnapshotSeq = Number.isInteger(ext.seq) ? ext.seq : 0;
+        }
+      }
       for (const ev of replay.events) _dispatchEnvelope(ev);
       // A pending auto-`/rename` whose outcome note fell out of the ring
       // will never be swallowed, and nothing else would release the flag:
@@ -891,6 +923,10 @@
       if (replay.dropped) userAbortInFlight = false;
     } catch (e) {
       console.warn(`[live] replay_events failed for '${id}':`, e);
+      // The backend no longer has the session: its process ended while the
+      // tab was in the background, with no exit listener attached and no
+      // reason worth caching (a clean exit, a crash after startup).
+      if (/not found/.test(String(e))) _endDeadProcessState();
     }
     if (_switchGen !== myGen) return; // superseded by a newer switch
 
@@ -1886,6 +1922,22 @@
         _settleAsk(ev.targetId, { cancelled: true, closedByOmp: true });
         return;
       }
+      // An extension's status line or text widget (#52): kept per tab, shown
+      // in the rail. Fire-and-forget like `notify`, `setTitle` and
+      // `set_editor_text`, which the desktop does not show: omp waits for no
+      // reply to any of them, so none is sent.
+      if (ev.method === "setStatus" || ev.method === "setWidget") {
+        // Already in the snapshot a dropped replay loaded (see
+        // `extSnapshotSeq`); `lastSeq` is this frame's journal seq here.
+        if (lastSeq <= extSnapshotSeq) return;
+        const next = EXT.apply(state.extWidgets, ev);
+        if (next !== state.extWidgets) {
+          state.extWidgets = next;
+          notify();
+        }
+        return;
+      }
+      if (EXT.isFireAndForget(ev.method)) return;
       // Any other/future method we have no UI for — cancel so the server
       // never hangs waiting on a response we can't produce.
       _send({ type: "extension_ui_response", id: ev.id, cancelled: true });
@@ -2680,7 +2732,11 @@
       sessionRegistry.set(id, { ...entry, ...fieldsOf(entry) });
     }
     const turnOk = lastTurnOk;
+    // The process keeps running its extensions, and omp sends no clear on a
+    // session change: keep their status lines and widgets, as omp's TUI does.
+    const extWidgets = state.extWidgets;
     _resetSessionVars();
+    state.extWidgets = extWidgets;
     if (keepTurnOutcome) lastTurnOk = turnOk;
     _initFetch();
     notify();

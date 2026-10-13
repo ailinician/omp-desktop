@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter};
 use crate::approval::{self, RuleBook};
 use crate::redaction::{is_credential_key, REDACTED_PLACEHOLDER};
 
+use super::ext_ui::{self, ExtUiState};
 use super::inner::BridgeInner;
 use super::journal::EventJournal;
 
@@ -157,6 +158,9 @@ pub(super) struct StdoutReaderConfig {
     pub(super) sid: String,
     pub(super) gen: u64,
     pub(super) journal: Arc<Mutex<EventJournal>>,
+    /// This session's extension status lines and widgets, kept up to date
+    /// for a tab that comes back with a `dropped` replay.
+    pub(super) ext_ui: Arc<Mutex<ExtUiState>>,
     pub(super) stdin: Arc<Mutex<ChildStdin>>,
     pub(super) rule_book: Arc<RuleBook>,
     pub(super) project_root: Option<PathBuf>,
@@ -196,6 +200,7 @@ pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
         sid,
         gen,
         journal,
+        ext_ui,
         stdin,
         rule_book,
         project_root,
@@ -262,21 +267,23 @@ pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
                             )
                         })
                         .unwrap_or(sanitized);
+                    let frame_type = parsed
+                        .as_ref()
+                        .and_then(|frame| frame.get("type"))
+                        .and_then(serde_json::Value::as_str);
                     // One allocation for the line, shared with the journal
                     // by refcount rather than copied into it.
                     let shared: std::sync::Arc<str> = std::sync::Arc::from(text);
                     let seq = journal.lock().map_or(0, |mut j| j.push(shared.clone()));
+                    // After the push, stamped with its seq: a snapshot taken
+                    // in between names an older seq, so the frontend still
+                    // applies this frame from the replay.
+                    ext_ui::record(&ext_ui, seq, frame_type, parsed.as_ref());
                     if should_emit(&alive) {
                         let _ = app.emit(&line_event, LineEvent { seq, text: &shared });
                         // Rail widgets with a `turn_end` trigger rerun after
-                        // the turn's last frame. Reuses the parse above; other
-                        // frames cost one map lookup and a string compare.
-                        if parsed
-                            .as_ref()
-                            .and_then(|frame| frame.get("type"))
-                            .and_then(serde_json::Value::as_str)
-                            == Some("agent_end")
-                        {
+                        // the turn's last frame. Reuses the parse above.
+                        if frame_type == Some("agent_end") {
                             crate::widgets::notify_turn_end(&app, &sid);
                         }
                     }
@@ -381,13 +388,9 @@ impl StderrTail {
         // every other retained line *and* itself in the loop below,
         // leaving `to_reason` with nothing at all to report — the exact
         // blank-tab failure this type exists to prevent. Keep a prefix
-        // instead. Cut on a char boundary: `String::truncate` panics
-        // otherwise, and omp's banners are not pure ASCII.
+        // instead. Cut on a char boundary: omp's banners are not pure ASCII.
         if line.len() > STDERR_TAIL_BYTES {
-            let mut cut = STDERR_TAIL_BYTES;
-            while cut > 0 && !line.is_char_boundary(cut) {
-                cut -= 1;
-            }
+            let cut = crate::text::prefix_within(&line, STDERR_TAIL_BYTES).len();
             line.truncate(cut);
         }
         self.bytes += line.len();

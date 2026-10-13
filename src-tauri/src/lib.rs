@@ -24,6 +24,7 @@ mod recent_projects;
 mod redaction;
 mod saved_sessions;
 mod stats;
+mod text;
 mod updater;
 mod widgets;
 mod workspace;
@@ -331,6 +332,19 @@ fn replay_events(
     bridge: State<'_, AgentBridge>,
 ) -> Result<agent::journal::Replay, String> {
     bridge.replay_events(&session_id, after_seq)
+}
+
+/// The latest status lines and widgets omp extensions published in a
+/// session (`ctx.ui.setStatus` / `setWidget`, #52). The frontend applies
+/// them live for the tab it shows; it asks for this when a reactivated tab's
+/// replay came back `dropped`, because those frames may be among the
+/// evicted lines. Empty for an unknown or ended session.
+#[tauri::command]
+fn extension_ui_state(
+    session_id: String,
+    bridge: State<'_, AgentBridge>,
+) -> agent::ext_ui::ExtUiState {
+    bridge.extension_ui_state(&session_id)
 }
 
 /// List tool-approval rules currently in effect for a session/project pair.
@@ -994,6 +1008,7 @@ pub fn run() {
             stop_session,
             session_status,
             replay_events,
+            extension_ui_state,
             open_project,
             take_pending_open_projects,
             start_git_watch,

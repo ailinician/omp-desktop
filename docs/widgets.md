@@ -52,6 +52,7 @@ Widget cards sit in the ambient rail **between the Subagents card and the Minima
 1. Error cards about `widgets.json` itself.
 2. **Approval cards**, in `widgets.json` order: one for every enabled plugin that is not approved yet, or that changed since you approved it. They show in every tab, whatever the plugin's `match` says, so you can approve a plugin before you open a project it applies to. An approval card whose Tweaks toggle is off is hidden too.
 3. **Result cards**, in `widgets.json` order, for the approved plugins that apply to the active tab (their `match` fits its project and remote). A card shows as idle until its first run.
+4. **omp extension cards** of the active tab (see [omp extension widgets](#omp-extension-widgets)): one card for the extensions' status lines, then one per widget, marked `extension`.
 
 A disabled plugin (`"enabled": false`) gets no card.
 
@@ -345,11 +346,33 @@ The desktop knows nothing about MCP. A plugin that wants to use an MCP tool is i
 
 ## omp extension widgets
 
-omp extensions can show their own UI through `ctx.ui.setWidget` and `ctx.ui.setStatus`, which omp forwards as `extension_ui_request` in `--mode rpc-ui`. **This mechanism does not render those**: the desktop currently ignores them, and an omp extension cannot register a rail card through `widgets.json`.
+omp extensions show their own UI through `ctx.ui.setStatus(key, text)` and `ctx.ui.setWidget(key, lines)`, which omp forwards to the desktop in `--mode rpc-ui`. The desktop draws them in the rail, after the plugin cards:
 
-The two are separate interfaces:
+- **Status lines**: one `status` card for all of the tab's status lines, a row per key (`plan-mode  📋 2/4`). omp's own `/review` and `/annotate` report their progress this way.
+- **Widgets**: one card per widget key, titled with the key, its lines in monospace. Up to 50 lines of up to 500 characters each are shown; a longer widget says how many lines are left out.
 
-- **Rail widgets** are desktop-specific: external processes configured per user, independent of omp and of any session's extensions.
-- **omp extension widgets** belong to a session and come from extensions loaded into that omp process.
+Both cards carry an `extension` chip and the accent border. They have no refresh button: the extension pushes every update, and `setStatus(key, undefined)` / `setWidget(key, undefined)` removes the row or card. Terminal styling is stripped (colours from `ctx.ui.theme.fg`, OSC 8 hyperlinks keep their text), and everything is shown as text. A widget an extension builds as a component (a factory instead of a `string[]`) never reaches the desktop: omp only forwards line arrays.
 
-Rendering them in the rail is tracked in [#52](https://github.com/apoc/omp-desktop/issues/52). It will reuse the same card component (`WidgetCard`), with its own Tweaks keys (`widget:ext:<key>`, next to this mechanism's `widget:plugin:<id>`).
+**Per tab.** Each tab shows what its own omp process published, including what a background tab published while you were elsewhere. A tab's statuses and widgets stay through `/new`, branch and fork, as in omp's terminal UI (extensions that care refresh them on `session_switch`, and on `session_branch` for a branch), and go away when its omp process ends or is restarted (profile switch).
+
+**Hiding.** Tweaks → Rail lists `extension: status lines` and `extension: <key>` for what the active tab has published, stored as `widget:ext-status` and `widget:ext:<key>` next to the plugins' `widget:plugin:<id>`. A hidden card's updates are still kept, so it comes back current.
+
+**Trust.** The code runs inside omp, with the trust you already give an installed omp extension; the desktop runs none of it and needs no approval. It only displays the text.
+
+**Example.** Save as `~/.omp/agent/extensions/rail-demo.ts` (for a profile: `~/.omp/profiles/<profile>/agent/extensions/`, for one project: `<project>/.omp/extensions/`) and open a new tab:
+
+```ts
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+  let turns = 0;
+  const show = (ctx: ExtensionContext) => {
+    ctx.ui.setStatus("rail-demo", `${turns} turn${turns === 1 ? "" : "s"}`);
+    ctx.ui.setWidget("rail-demo", [`cwd   ${ctx.cwd}`, `turns ${turns}`]);
+  };
+  pi.on("session_start", async (_event, ctx) => show(ctx));
+  pi.on("turn_end", async (_event, ctx) => { turns++; show(ctx); });
+}
+```
+
+**Not the same as rail widgets.** A rail widget plugin (the rest of this page) is a program you list in `widgets.json` and approve, run by the desktop for every matching tab. An extension widget belongs to one omp session and comes from the extensions loaded into it. Internals: [`architecture/extension-widgets.md`](architecture/extension-widgets.md).
