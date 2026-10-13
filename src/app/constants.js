@@ -30,7 +30,9 @@
     "collapseAfter": 5,
     "updateCheck": true,
     "skippedUpdate": null,
-    "sidebar": true
+    "sidebar": true,
+    "terminalAutoOpen": false,
+    "terminalHeight": 240
   }/*EDITMODE-END*/;
 
   const NULL_MODEL    = { id: "", name: "–", provider: "", note: "", latency: 0, current: false };

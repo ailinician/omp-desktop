@@ -9,6 +9,8 @@
   <!-- Design tokens — copied into src/design/ -->
   <link rel="stylesheet" href="design/styles.css" />
   <link rel="stylesheet" href="design/layout.css" />
+  <!-- xterm.js base styles (terminal panel) — vendored, see scripts/vendor-xterm.mjs -->
+  <link rel="stylesheet" href="xterm.css" />
   <link rel="stylesheet" href="platform.css" />
 
   <!-- Syntax highlighting theme (atom-one-dark) -->
@@ -28,6 +30,16 @@
   <script src="react.development.js"></script>
   <script src="react-dom.development.js"></script>
   <script src="babel.min.js"></script>
+
+  <!-- xterm.js for the terminal panel, vendored from npm by
+       scripts/vendor-xterm.mjs (never edit by hand). Both are UMD builds that
+       attach to window: xterm.js → window.Terminal (use `new Terminal(opts)`),
+       xterm-addon-fit.js → window.FitAddon, an object whose class is
+       FitAddon.FitAddon (use `new FitAddon.FitAddon()`). Their stylesheet is
+       linked in <head>. Read lazily (inside function bodies) by
+       app/terminal-xterm.js, so the position only has to precede it. -->
+  <script src="xterm.js"></script>
+  <script src="xterm-addon-fit.js"></script>
 
   <!-- Markdown + syntax highlighting — must load before design components.
        marked-setup.js wires marked to hljs and escapes raw HTML / unsafe
@@ -171,6 +183,23 @@
        window.OMP_EXT_WIDGETS at its top-level init and app-live.jsx at top
        level, so it must load before both. -->
   <script src="app/extension-widgets.js"></script>
+  <!-- Terminal panel: pure per-tab panel state over Rust's shell status,
+       key bypass, clipboard chords, shell label and height clamp. IIFE that
+       calls window.OMP_KEYMAP.detectMac() at load (so after app/keymap.js);
+       app/use-terminal.jsx and design/terminal-panel.jsx destructure
+       window.OMP_TERMINAL at top level, so it must load before them. -->
+  <script src="app/terminal.js"></script>
+  <!-- Terminal output sync: the pure reducer (instance adoption, seq dedupe,
+       gap → replay, queue while replaying, acks). Dependency-free IIFE;
+       app/use-terminal.jsx destructures window.OMP_TERMINAL_STREAM at top
+       level, so it must load before it. -->
+  <script src="app/terminal-stream.js"></script>
+  <!-- Terminal xterm setup: builds a tab's xterm and its key routing, the
+       ConPTY option, theme colours and the lines written into it. IIFE;
+       window.Terminal / window.FitAddon (above) and window.OMP_TERMINAL are
+       read at call time; app/use-terminal.jsx destructures
+       window.OMP_TERMINAL_XTERM at top level, so it must load before it. -->
+  <script src="app/terminal-xterm.js"></script>
 
   <!-- Design components (unchanged — from src/design/ copy) -->
   <script src="design/tweaks/style.js"></script>
@@ -268,6 +297,14 @@
   <script type="text/babel" src="design/conversation-tree-rows.jsx"></script>
   <script type="text/babel" src="design/conversation-tree-detail.jsx"></script>
   <script type="text/babel" src="design/conversation-tree.jsx"></script>
+  <!-- Per-tab terminal panel and the list app-live.jsx renders; destructures
+       window.Icon and window.OMP_TERMINAL (app/terminal.js, above) at top
+       level. -->
+  <script type="text/babel" src="design/terminal-panel.jsx"></script>
+  <!-- Tweaks → Terminal section (with its shell-setting state);
+       destructures window.TweakSection, window.TweakRow and
+       window.TweakToggle (tweaks/, above) at top level. -->
+  <script type="text/babel" src="design/terminal-tweaks.jsx"></script>
 
   <!-- Live data layer (must load before app-live.jsx) -->
   <script src="model-names.js"></script>
@@ -301,6 +338,10 @@
   <script type="text/babel" src="app/use-goal-mode.jsx"></script>
   <!-- Rail widgets hook; destructures window.OMP_WIDGETS at top level. -->
   <script type="text/babel" src="app/use-widgets.jsx"></script>
+  <!-- Per-tab terminal lifecycle (xterm instances, pty listeners);
+       destructures window.OMP_TERMINAL, window.OMP_TERMINAL_STREAM,
+       window.OMP_TERMINAL_XTERM and window.OMP_SESSION_UI at top level. -->
+  <script type="text/babel" src="app/use-terminal.jsx"></script>
   <script type="text/babel" src="app/use-conversation-tree.jsx"></script>
 
   <script type="text/babel" src="app-live.jsx"></script>

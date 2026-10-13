@@ -24,7 +24,7 @@ const {
   useWidgets, WidgetCard, WidgetErrorCard, WidgetApprovalCard, WidgetBoundary,
   TWEAK_DEFAULTS, NULL_MODEL, EMPTY_PROJECT, DEFAULT_PROFILE_ID,
   INTENT_FRAMING, APPROVAL_PROMPT,
-  useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, timeNow,
+  useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, useTerminal, TerminalPanels, TerminalTweaks, timeNow,
   useKeymap, useKeymapDispatch, ShortcutsModal,
 } = window;
 const { isCommandInvocation } = window.OMP_SLASH;
@@ -36,6 +36,7 @@ const {
 const { NO_OVERRIDES: NO_COLLAPSE_OVERRIDES, foldModes: _foldModes, overridesForAll: _collapseOverridesForAll } = window.OMP_COLLAPSE;
 const { tweakKey: _widgetTweakKey } = window.OMP_WIDGETS;
 const { EMPTY: _EXT_EMPTY, cards: _extCards, toggles: _extToggles } = window.OMP_EXT_WIDGETS;
+const { entryOf: _TERM_entryOf } = window.OMP_TERMINAL;
 
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
@@ -224,6 +225,11 @@ function App() {
   // startup default / empty-workspace pick, which must reload the omp layer.
   const keymap = useKeymap(bridge, activeProfileId);
 
+  // One shell per tab, in a panel above the composer (app/use-terminal.jsx).
+  const terminal = useTerminal({
+    bridge, activeSessionId: planKey, sessionIds, tweaks: t, setTweak,
+  });
+
   const subagentUi = useSubagentManager({
     bridge, layout: t.layout, setTweak, activeSessionId, subagents, messages, setHoveredMsgIdx,
   });
@@ -408,6 +414,7 @@ function App() {
     else if (c.name === "collapse-all")  { handleCollapseAll(true); }
     else if (c.name === "expand-all")    { handleCollapseAll(false); }
     else if (c.name === "tweaks")    { openTweaks(); }
+    else if (c.name === "terminal")  { terminal.toggle(planKey); }
   };
 
   const handleResumeSession = async (session) => {
@@ -562,6 +569,7 @@ function App() {
     "desktop.update.check":    updater.check,
     "desktop.chat.collapseAll": () => handleCollapseAll(true),
     "desktop.chat.expandAll":  () => handleCollapseAll(false),
+    "desktop.terminal.toggle": () => terminal.toggle(planKey),
   };
 
   // Profile switch applies to the active tab only: its omp process is
@@ -676,6 +684,7 @@ function App() {
                     collapseOverrides={tabCollapseOverrides}
                     onToggleCollapse={handleToggleCollapse}
                   />
+                  <TerminalPanels sessions={sessions} activeId={planKey} terminal={terminal} />
                   <Composer
                     sessionId={planKey}
                     sessionIds={sessionIds}
@@ -724,6 +733,8 @@ function App() {
                   onRules={() => setRulesOpen(true)}
                   onStats={() => setStatsOpen(true)}
                   onTree={() => setTreeOpen(v => !v)}
+                  onTerminal={() => terminal.toggle(planKey)}
+                  terminalOpen={_TERM_entryOf(terminal.state, planKey).open}
                   onTweaks={openTweaks}
                   autosave={t.autosave ?? true}
                   onAutosave={v => setTweak("autosave", v)}
@@ -938,6 +949,8 @@ function App() {
             <TweakButton label="reload widgets" secondary onClick={widgets.reload} />
           </TweakRow>
         </TweakSection>
+        <TerminalTweaks bridge={bridge} height={terminal.height} autoOpen={t.terminalAutoOpen ?? false}
+          onAutoOpen={v => setTweak("terminalAutoOpen", v)} />
         <TweakSection label="Session">
           <TweakSlider label="prompt history" value={t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT}
             min={window.OMP_PROMPT_HISTORY.MIN_LIMIT} max={window.OMP_PROMPT_HISTORY.MAX_LIMIT} step={10} unit=" prompts"

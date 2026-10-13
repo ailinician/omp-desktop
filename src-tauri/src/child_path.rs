@@ -19,15 +19,21 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Override the child command's PATH with the inherited PATH plus the
-/// [`extra_dirs`] entries it lacks ([`merged_path`]). Recomputed on every
-/// call, so a PATH changed while the app runs is picked up too. `Command`
+/// The PATH a child must be spawned with: the inherited PATH plus the
+/// [`extra_dirs`] entries it lacks ([`merged_path`]). `None` when it can't be
+/// built, so the caller keeps the inherited one. Recomputed on every call, so
+/// a PATH changed while the app runs is picked up too.
+pub fn child_path() -> Option<OsString> {
+    let extra = extra_dirs();
+    let current = std::env::var_os("PATH");
+    merged_path(current.as_deref(), &extra)
+}
+
+/// Override the child command's PATH with [`child_path`]. `Command`
 /// searches a PATH set on the command itself, so this is what makes the
 /// added dirs effective for program lookup.
 pub fn apply_child_path(cmd: &mut Command) {
-    let extra = extra_dirs();
-    let current = std::env::var_os("PATH");
-    if let Some(path) = merged_path(current.as_deref(), &extra) {
+    if let Some(path) = child_path() {
         cmd.env("PATH", path);
     }
 }

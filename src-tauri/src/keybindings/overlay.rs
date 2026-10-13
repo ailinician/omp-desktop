@@ -17,7 +17,6 @@
 //! surfaced to the Shortcuts screen; dispatch still works because the frontend
 //! falls back to omp + defaults.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -65,7 +64,7 @@ impl OverlayStore {
     /// Read the current overlay. A missing file returns an empty map; a
     /// malformed or unreadable file returns `Err`.
     pub fn read(&self) -> Result<Bindings, String> {
-        read_file_strict(&self.path).map(|f| f.bindings)
+        json_store::read_strict::<OverlayFile>(&self.path).map(|f| f.bindings)
     }
 
     /// Set `action` → `keys` in the overlay and return the updated map.
@@ -123,43 +122,19 @@ impl OverlayStore {
     /// rewrite the file (or create it, for a fresh install) with identical
     /// content.
     fn mutate(&self, f: impl FnOnce(&mut Bindings) -> bool) -> Result<Bindings, String> {
-        json_store::with_lock_str(&self.lock, || {
-            let mut file_data = read_file_strict(&self.path)?;
-            if !f(&mut file_data.bindings) {
-                return Ok(file_data.bindings);
-            }
-            let serialised = serde_json::to_vec_pretty(&file_data).map_err(|e| e.to_string())?;
-            // `json_store::with_lock` already calls `fs::create_dir_all` on the
-            // lock-file's parent before acquiring — same directory as
-            // `keybindings.json` — so no explicit `create_dir_all` is needed here.
-            json_store::write_atomic(&self.path, &serialised).map_err(|e| e.to_string())?;
-            Ok(file_data.bindings)
-        })
-    }
-}
-
-// ── file helpers ──────────────────────────────────────────────────────────────
-
-/// Read the overlay file's full on-disk shape. `NotFound` ⇒ default (empty)
-/// `OverlayFile`; any other error (malformed JSON, IO failure) ⇒ `Err`.
-///
-/// Returns the whole struct, not just `bindings` — `mutate` re-serialises
-/// this same struct after editing its `bindings` field, which is also where
-/// a future sibling field would round-trip once `OverlayFile` gains one.
-/// Today `OverlayFile` has no `#[serde(flatten)]` catch-all, so an *unknown*
-/// top-level key is dropped on the first write; add one before introducing a
-/// second field.
-fn read_file_strict(path: &Path) -> Result<OverlayFile, String> {
-    match fs::read(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(OverlayFile::default()),
-        Err(e) => Err(e.to_string()),
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
+        json_store::update_strict(
+            &self.path,
+            &self.lock,
+            |file: &mut OverlayFile| f(&mut file.bindings),
+            |file| file.bindings,
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 

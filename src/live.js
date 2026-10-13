@@ -979,6 +979,14 @@
   // rpc_chunk frames. Each carries a base64 segment of the original UTF-8 JSON.
   const MAX_REASSEMBLED_FRAME = 64 * 1024 * 1024; // matches ready.maxReassembledFrameBytes
 
+  /** Decode base64 (rpc_chunk segments, terminal output) to its bytes. */
+  function _b64Bytes(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
   // Pure: validate a complete set of rpc_chunk frames for one chunkId and
   // return the parsed JSON object. Throws on any inconsistency.
   function reassembleRpcChunks(frames) {
@@ -995,10 +1003,7 @@
       if (f.byteLength !== byteLength) throw new Error("rpc_chunk: byteLength mismatch");
       if (!Number.isInteger(f.index) || f.index < 0 || f.index >= count) throw new Error("rpc_chunk: index out of range");
       if (parts[f.index] !== undefined) throw new Error("rpc_chunk: duplicate index");
-      const bin = atob(f.data);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      parts[f.index] = bytes;
+      parts[f.index] = _b64Bytes(f.data);
     }
     let total = 0;
     for (const p of parts) total += p.length;
@@ -1089,14 +1094,13 @@
   }
 
   /** Kill a session's omp process and everything bound to it (git watcher,
-   *  cached snapshot). Shared by tab close and profile respawn so a new
-   *  per-session resource only has to be released in one place. The
-   *  registry entry is left to the caller.
+   *  cached snapshot) for a profile respawn; the tab and its terminal shell
+   *  stay (a tab ends only through `_closeTab`). The registry entry is left
+   *  to the caller.
    *
-   *  Returns a promise for the `stop_session` round-trip. Tab close can
-   *  ignore it (that id is never reused), but a profile respawn MUST await
-   *  it: `stop_session`'s backend body does an unconditional
-   *  `sessions.remove(id)`, so if it were still queued when
+   *  Returns a promise for the `stop_session` round-trip, which a profile
+   *  respawn MUST await: `stop_session`'s backend body does an
+   *  unconditional `sessions.remove(id)`, so if it were still queued when
    *  `start_session` installed the fresh incarnation under the same id, it
    *  would reap the *new* process instead of the dead one. */
   function _killSessionProcess(id) {
@@ -1108,6 +1112,38 @@
     _dropGitListener(id);
     sessionSnapshots.delete(id);
     return stopped;
+  }
+
+  /** End a tab for good in Rust (`close_tab`: its omp process, git watcher,
+   *  widget state and terminal shell) and drop its JS-side bindings. Every
+   *  path that removes a tab from `sessionRegistry` goes through here; a
+   *  profile respawn uses `_killSessionProcess`, which keeps the shell. */
+  function _closeTab(id) {
+    const closed = _invokeSafe("close_tab", { sessionId: id });
+    _dropGitListener(id);
+    sessionSnapshots.delete(id);
+    return closed;
+  }
+
+  /** Listen to a Tauri event. Returns `{ stop, ready }`: `stop` is valid at
+   *  once (a call before the async `listen` settled unlistens when it does);
+   *  `ready` resolves once the listener is registered (or failed), so a
+   *  caller can query state knowing no later event is missed. */
+  function _listenTerminal(event, handler) {
+    if (!window.__TAURI__) return { stop: () => {}, ready: Promise.resolve() };
+    let unlisten = null;
+    let stopped = false;
+    const ready = window.__TAURI__.event.listen(event, ev => handler(ev.payload)).then(
+      off => { if (stopped) off(); else unlisten = off; },
+      err => console.error(`[live] listen ${event} failed:`, err),
+    );
+    return {
+      stop: () => {
+        stopped = true;
+        if (unlisten) { unlisten(); unlisten = null; }
+      },
+      ready,
+    };
   }
 
   /** Detach the active session's listeners and clear all per-session state,
@@ -1274,14 +1310,14 @@
       // so openSession/resumeSession keep their "resolves to id, rejects
       // on failure" contract for the caller to handle.
       //
-      // The kill releases more than the tab, because `_spawnSession` has two
-      // failure points: `start_session` itself (nothing spawned, so the kill
-      // is a no-op) and the `listen("git://branch/{id}")` that follows it,
-      // by which point a live child is installed in the backend's session
-      // map and `start_git_watch` is armed. Deleting only the registration
-      // there would strand that child — with no tab, nothing ever calls
-      // `stop_session` for this id again and it survives until app exit.
-      _killSessionProcess(id);
+      // `close_tab` releases more than the registration, because
+      // `_spawnSession` has two failure points: `start_session` itself (it
+      // already registered the tab's terminal slot; no omp spawned) and the
+      // `listen("git://branch/{id}")` that follows it, by which point a live
+      // child is installed in the backend's session map and
+      // `start_git_watch` is armed. Deleting only the registration there
+      // would strand both — with no tab, nothing ever ends this id again.
+      _closeTab(id);
       sessionRegistry.delete(id);
       notify();
       throw e;
@@ -3341,6 +3377,80 @@
       return () => { for (const u of unlistens) u?.(); };
     },
 
+    // ── Terminal (src-tauri/src/terminal/, one shell per tab) ────────────────
+    // IPC glue only: Rust owns the tab's shell, its folder, the shell setting
+    // and the output ring (docs/architecture/terminal.md). No fake
+    // `__TAURI__` harness exists to unit-test this against (see the note at
+    // `login`); the backend's own tests cover the commands and events, the
+    // view state lives in app/terminal.js (test-terminal.mjs).
+
+    /** Start the tab's shell (Rust picks the folder and the shell) at `cols`
+     *  x `rows`; a live or starting shell is returned as is. Resolves
+     *  `{ ok: true, status }` (Rust's `TerminalStatus`) or `{ ok: false, error }`. */
+    async terminalOpen(sessionId, cols, rows) {
+      const res = await _invokeResult("terminal_open", { sessionId, cols, rows });
+      return res.ok ? { ok: true, status: res.value } : res;
+    },
+
+    /** The tab's shell as Rust sees it — `{ instance, shell, state,
+     *  exitCode }` — or `null` when none was started (or no Tauri). */
+    terminalStatus(sessionId) {
+      return _invokeSafe("terminal_status", { sessionId }, null);
+    },
+
+    /** Output of the tab's shell held by Rust after `afterSeq` (0 = all):
+     *  `{ instance, bytes, headSeq, dropped }`, or `null` without a shell.
+     *  `instance` is the current one even when `instance` asked for an older
+     *  shell (then everything is replayed). */
+    async terminalReplay(sessionId, instance, afterSeq) {
+      const r = await _invokeSafe("terminal_replay", { sessionId, instance, afterSeq }, null);
+      if (!r) return null;
+      return { instance: r.instance, bytes: _b64Bytes(r.b64), headSeq: r.headSeq, dropped: r.dropped };
+    },
+
+    /** `n` bytes of `instance`'s output were rendered (flow control). */
+    terminalAck(sessionId, instance, n) {
+      return _invokeSafe("terminal_ack", { sessionId, instance, bytes: n });
+    },
+
+    /** Send keystrokes (a string, as xterm's `onData` emits it) to the shell. */
+    terminalWrite(sessionId, data) {
+      return _invokeSafe("terminal_write", { sessionId, data });
+    },
+
+    terminalResize(sessionId, cols, rows) {
+      return _invokeSafe("terminal_resize", { sessionId, cols, rows });
+    },
+
+    /** Shell output: `cb({ instance, seq, bytes })` per chunk, bytes as the
+     *  pty produced them (feed straight to `Terminal.write`, which
+     *  reassembles split UTF-8). Returns `{ stop, ready }`. */
+    onTerminalData(sessionId, cb) {
+      return _listenTerminal(`terminal://data/${sessionId}`,
+        p => cb({ instance: p.instance, seq: p.seq, bytes: _b64Bytes(p.b64) }));
+    },
+
+    /** A shell exited: `cb({ instance, code })`, `code` null when a signal
+     *  killed it. Returns `{ stop, ready }`. */
+    onTerminalExit(sessionId, cb) {
+      return _listenTerminal(`terminal://exit/${sessionId}`,
+        p => cb({ instance: p.instance, code: p.code ?? null }));
+    },
+
+    /** The saved shell setting: `{ shell, defaultShell }` (`shell` "" = the
+     *  default, `defaultShell` = what that runs); `null` without Tauri or
+     *  when Rust refused. */
+    terminalSettings() {
+      return _invokeSafe("terminal_settings", {}, null);
+    },
+
+    /** Save the shell for new terminals ("" = default). Rust validates and
+     *  persists it: `{ ok: true, settings }` or `{ ok: false, error }`. */
+    async setTerminalShell(shell) {
+      const res = await _invokeResult("terminal_set_shell", { shell: typeof shell === "string" ? shell : "" });
+      return res.ok ? { ok: true, settings: res.value } : res;
+    },
+
     /** Usage statistics for the active tab's profile — see usage_stats in
      *  lib.rs / stats.rs::fetch. Unlike the workspace methods above, this
      *  is not scoped to the active tab's *project*, but it IS scoped to
@@ -3669,7 +3779,7 @@
         // matching `stop_git_watch`, and `_send` routed to an orphaned child
         // no teardown path can reach. Undo our own spawn instead.
         if (!sessionRegistry.has(id)) {
-          _killSessionProcess(id);
+          _closeTab(id);
           // `closeSession` saw `activeSessionId === null` (this switch had
           // already detached) so it never handed focus on. Do it here, or the
           // app sits with tabs rendered and `_send` routed at `null`.
@@ -3722,9 +3832,9 @@
       }
     },
 
-    /** Close a tab and kill its omp process. */
+    /** Close a tab: Rust ends its omp process, git watcher, widgets and shell. */
     async closeSession(id) {
-      _killSessionProcess(id);
+      _closeTab(id);
       sessionRegistry.delete(id);
       promptHistories.delete(id);
       if (id === activeSessionId) {
@@ -3860,6 +3970,9 @@
     // not disable folder opens.
     _refreshProfiles()
       .catch(e => console.error("[live] startup profile load failed:", e))
+      // Tab ids are never reused across a webview reload: anything Rust still
+      // holds now (omp children, shells) belongs to a previous document.
+      .then(() => _invokeSafe("close_all_tabs", {}))
       .then(() => _restoreOpenTabs())
       .catch(e => console.error("[live] restoring the open tabs failed:", e))
       .finally(_setupExternalOpens);

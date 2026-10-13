@@ -24,6 +24,7 @@ mod recent_projects;
 mod redaction;
 mod saved_sessions;
 mod stats;
+mod terminal;
 mod text;
 mod updater;
 mod widgets;
@@ -74,8 +75,11 @@ struct StartSessionArgs {
     profile: Option<String>,
 }
 
-/// Start an omp process for a new tab session, then tell the widget host
-/// (which computes the project's git context on its own thread).
+/// Register the tab with the terminal, start an omp process for it, then
+/// tell the widget host (which computes the project's git context on its own
+/// thread). The terminal comes first so a failed omp spawn still leaves the
+/// tab a working shell; registering an existing tab (a profile switch) keeps
+/// its shell.
 #[tauri::command]
 fn start_session(
     args: StartSessionArgs,
@@ -83,6 +87,7 @@ fn start_session(
     rule_book: State<'_, Arc<RuleBook>>,
     store: State<'_, Arc<profiles::ProfileStore>>,
     widget_host: State<'_, Arc<widgets::WidgetHost>>,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let profile = store.resolve(args.profile.as_deref())?;
@@ -94,6 +99,7 @@ fn start_session(
     } else {
         Some(args.cwd.as_str())
     };
+    terminal.register_tab(&args.session_id, cwd_opt.map(Path::new));
     // The bridge takes the id by value; the widget hook below still needs it.
     let session_id = args.session_id.clone();
     bridge.start_session(
@@ -283,6 +289,11 @@ async fn conversation_tree(
 /// Kill the omp process for a tab session. Also drops its session-scoped
 /// approval-rule grants (see `approval::RuleBook::clear_session`) and its
 /// widget runs.
+///
+/// Deliberately does NOT touch the tab's terminal: a profile switch stops and
+/// respawns the omp process under the same tab id while the tab, and with it
+/// its shell, stays. The terminal ends only through [`close_tab`] /
+/// [`close_all_tabs`] and `TerminalManager::shutdown_all`.
 #[tauri::command]
 fn stop_session(
     session_id: String,
@@ -292,6 +303,156 @@ fn stop_session(
 ) {
     bridge.stop_session(&session_id, &rule_book);
     widget_host.session_closed(&session_id);
+}
+
+/// End a tab for good: its omp process (with its session grants), widget
+/// runs, git watcher and terminal shell. The one place a tab ends.
+fn end_tab(app: &AppHandle, session_id: &str) {
+    end_tab_but_terminal(app, session_id);
+    app.state::<Arc<terminal::TerminalManager>>()
+        .close_tab(session_id);
+}
+
+/// [`end_tab`] without the terminal, for [`close_all_tabs`], which ends
+/// every terminal at once.
+fn end_tab_but_terminal(app: &AppHandle, session_id: &str) {
+    let rule_book = app.state::<Arc<RuleBook>>();
+    app.state::<AgentBridge>()
+        .stop_session(session_id, &rule_book);
+    app.state::<Arc<widgets::WidgetHost>>()
+        .session_closed(session_id);
+    app.state::<GitWatcherState>().stop(session_id);
+}
+
+/// Close a tab (the frontend's `closeSession`) — see [`end_tab`]. `async` +
+/// `spawn_blocking`: reaping omp and killing the shell's processes block.
+#[tauri::command]
+async fn close_tab(session_id: String, app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || end_tab(&app, &session_id))
+        .await
+        .map_err(|e| format!("join error: {e}"))
+}
+
+/// End every tab the backend knows. Called by the webview at boot, before
+/// it restores its tabs: tab ids are never reused across a reload, so
+/// whatever is registered then belongs to a previous document and would
+/// otherwise run on unseen. The terminal's registry is the tab set:
+/// [`start_session`] registers the tab before it spawns omp, and only
+/// [`end_tab`] (or an app exit) unregisters it. Only the tabs registered at
+/// the start end: one started meanwhile keeps its terminal. Their shells
+/// share one hang-up grace (`TerminalManager::close_tabs`) instead of one
+/// per tab.
+#[tauri::command]
+async fn close_all_tabs(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let terminal = app.state::<Arc<terminal::TerminalManager>>();
+        let ids = terminal.tab_ids();
+        for id in &ids {
+            end_tab_but_terminal(&app, id);
+        }
+        terminal.close_tabs(&ids);
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))
+}
+
+/// Start the tab's terminal shell, in the tab's folder (else the home
+/// folder) with the shell setting — see `terminal`. While one is starting or
+/// running, returns its status instead. `async` + `spawn_blocking`: spawning
+/// a shell (and killing an exited one's leftovers) blocks.
+#[tauri::command]
+async fn terminal_open(
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    app: AppHandle,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Result<terminal::TerminalStatus, String> {
+    with_blocking(&terminal, move |t| {
+        t.open(terminal::TauriEmit(app), &session_id, cols, rows)
+    })
+    .await
+}
+
+/// The tab's shell (`None` while it has none). A map lookup.
+#[tauri::command]
+fn terminal_status(
+    session_id: String,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Option<terminal::TerminalStatus> {
+    terminal.status(&session_id)
+}
+
+/// Output the tab's shell still holds after event `after_seq` of `instance`
+/// (everything it holds when `instance` is not the current shell). A copy
+/// of at most the ring's budget; never blocks.
+#[tauri::command]
+fn terminal_replay(
+    session_id: String,
+    instance: u64,
+    after_seq: u64,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Option<terminal::ReplayWire> {
+    terminal.replay(&session_id, instance, after_seq)
+}
+
+/// The webview rendered `bytes` of `instance`'s output (flow control).
+#[tauri::command]
+fn terminal_ack(
+    session_id: String,
+    instance: u64,
+    bytes: u64,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) {
+    terminal.ack(&session_id, instance, bytes);
+}
+
+/// Type into the tab's terminal: `data` reaches the shell unchanged.
+///
+/// Deliberately a sync command although it is called often: it only queues
+/// the bytes for the terminal's writer thread (never blocks), and sync
+/// commands run in invocation order, which keystrokes need — concurrent
+/// async tasks (or `spawn_blocking` jobs) could reorder them.
+#[tauri::command]
+fn terminal_write(
+    session_id: String,
+    data: String,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Result<(), String> {
+    terminal.write(&session_id, data)
+}
+
+/// Resize the tab's terminal to `cols` × `rows` characters. Sync for the
+/// ordering reason of `terminal_write` (the last size must win); it is a
+/// single non-blocking ioctl.
+#[tauri::command]
+fn terminal_resize(
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Result<(), String> {
+    terminal.resize(&session_id, cols, rows)
+}
+
+/// The shell setting and what an empty one runs. `spawn_blocking`: the
+/// default may come from the user database (`getpwuid`, possibly a
+/// directory service).
+#[tauri::command]
+async fn terminal_settings(
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Result<terminal::TerminalSettings, String> {
+    with_blocking(&terminal, |t| Ok(t.settings())).await
+}
+
+/// Store the shell setting (empty = default, else an absolute path to an
+/// executable file) in `terminal.json`; the next shell started uses it.
+#[tauri::command]
+async fn terminal_set_shell(
+    shell: String,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Result<terminal::TerminalSettings, String> {
+    with_blocking(&terminal, move |t| t.set_shell(&shell)).await
 }
 
 /// Query a session's last error. Returns `None` if the session is
@@ -877,13 +1038,18 @@ async fn app_update_install(
 }
 
 /// Kill every child process tree the app owns — omp sessions first, then
-/// running widget plugins — on the calling thread. For the exits where
-/// managed state is never dropped (app exit, the updater relaunch); on Unix
-/// each tree sits in its own process group and would outlive us. Both steps
-/// are idempotent.
+/// running widget plugins, then the terminal shells — on the calling thread.
+/// For the exits where managed state is never dropped (app exit, the updater
+/// relaunch); on Unix each tree sits in its own process group or session and
+/// would outlive us. Every step is idempotent.
 pub(crate) fn kill_child_processes(app: &AppHandle) {
     app.state::<AgentBridge>().shutdown_all();
     widgets::kill_all(app);
+    // Managed in `setup` (it needs the config dir): absent only if the app
+    // exits before that ran, when there is no shell to kill either.
+    if let Some(terminal) = app.try_state::<Arc<terminal::TerminalManager>>() {
+        terminal.shutdown_all();
+    }
 }
 
 /// App-level state that needs a resolved path, and the cold-start "Open
@@ -903,6 +1069,14 @@ fn setup(app: &tauri::App) {
         .as_deref()
         .map(|dir| (dir.join("widgets.json"), dir.join("widget-approvals.json")))
         .unzip();
+    // Terminal tabs and the shell setting: <app_config_dir>/terminal.json.
+    // No temp-dir fallback either: another account could plant the shell
+    // this one runs; without a config dir the setting stays in memory.
+    app.manage(Arc::new(terminal::TerminalManager::new(
+        resolved_config_dir
+            .as_deref()
+            .map(|dir| dir.join("terminal.json")),
+    )));
     // Falls back to the temp dir if the config dir can't be resolved
     // (e.g. a locked-down test environment) rather than failing
     // startup — approval grants and profiles just won't survive a
@@ -1006,6 +1180,16 @@ pub fn run() {
             send_command,
             start_session,
             stop_session,
+            terminal_open,
+            terminal_status,
+            terminal_replay,
+            terminal_ack,
+            terminal_write,
+            terminal_resize,
+            terminal_settings,
+            terminal_set_shell,
+            close_tab,
+            close_all_tabs,
             session_status,
             replay_events,
             extension_ui_state,

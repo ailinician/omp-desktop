@@ -4,7 +4,8 @@
 //!
 //! - [`write_atomic`] / [`sweep_orphan_temp_files`] — write-to-temp-then-rename
 //!   so a crash mid-write never corrupts the destination file, plus cleanup
-//!   for temp files left behind by a previous crash.
+//!   for temp files left behind by a previous crash; [`read_strict`] /
+//!   [`read_or_default`] / [`update_strict`] read and rewrite JSON with it.
 //! - [`SnapshotRing`] — a small content-addressed history of a file's past
 //!   contents, so a bad write (or a bad read of a good write) can be rolled
 //!   back to the last known-good version.
@@ -22,6 +23,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 // ── atomic write ────────────────────────────────────────────────────────────
@@ -115,21 +117,65 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
-/// Read `path` as JSON for disposable data (recent projects, open tabs):
-/// `NotFound` reads as `T::default()`, and so does anything else (IO error,
-/// malformed JSON) after logging it — the next write replaces the bad file.
-pub fn read_or_default<T: DeserializeOwned + Default>(path: &Path) -> T {
-    let parsed = match fs::read(path) {
-        Err(e) if e.kind() == ErrorKind::NotFound => return T::default(),
+/// Read `path` as JSON for state a bad file must not silently replace
+/// (keybinding overlay, terminal settings): `NotFound` reads as
+/// `T::default()`; any other failure (IO error, malformed JSON) is an `Err`.
+///
+/// # Errors
+/// The IO or JSON error's message.
+pub fn read_strict<T: DeserializeOwned + Default>(path: &Path) -> Result<T, String> {
+    match fs::read(path) {
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(e.to_string()),
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
-    };
-    parsed.unwrap_or_else(|e| {
+    }
+}
+
+/// Read `path` as JSON for disposable data (recent projects, open tabs):
+/// [`read_strict`], except that a failure also reads as `T::default()`
+/// after logging it — the next write replaces the bad file.
+pub fn read_or_default<T: DeserializeOwned + Default>(path: &Path) -> T {
+    read_strict(path).unwrap_or_else(|e| {
         eprintln!(
             "[omp-desktop] {} unreadable, reading as empty: {e}",
             path.display()
         );
         T::default()
+    })
+}
+
+/// Locked read-modify-write of the JSON file at `path`, under
+/// [`with_lock_str`] on `lock`: read it with [`read_strict`], let `modify`
+/// edit it, write it back atomically **only when `modify` reports a change**
+/// (a no-op must not rewrite the file, or create it on a fresh install),
+/// then hand the result to `commit` — still under the lock, so a caller's
+/// in-memory copy updated there follows the file's write order.
+///
+/// A file that exists but cannot be read is never overwritten: that would
+/// silently discard whatever the user had stored there.
+///
+/// # Errors
+/// `"<path> is unreadable: …"` when the read fails, otherwise the lock,
+/// serialisation or write error.
+pub fn update_strict<T, R>(
+    path: &Path,
+    lock: &Path,
+    modify: impl FnOnce(&mut T) -> bool,
+    commit: impl FnOnce(T) -> R,
+) -> Result<R, String>
+where
+    T: Serialize + DeserializeOwned + Default,
+{
+    with_lock_str(lock, || {
+        let mut data: T =
+            read_strict(path).map_err(|e| format!("{} is unreadable: {e}", path.display()))?;
+        if modify(&mut data) {
+            let bytes = serde_json::to_vec_pretty(&data).map_err(|e| e.to_string())?;
+            // `with_lock` already created the lock file's directory, which
+            // callers keep next to `path`.
+            write_atomic(path, &bytes).map_err(|e| e.to_string())?;
+        }
+        Ok(commit(data))
     })
 }
 
@@ -606,6 +652,80 @@ mod tests {
 
         fs::write(&path, b"[1, 2]").expect("write");
         assert_eq!(read_or_default::<Vec<u32>>(&path), vec![1, 2]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_strict_defaults_only_a_missing_file() {
+        let dir = unique_test_dir("read_strict");
+        let path = dir.join("data.json");
+        assert_eq!(read_strict::<Vec<u32>>(&path), Ok(Vec::new()));
+
+        fs::write(&path, b"{ not json").expect("write");
+        assert!(read_strict::<Vec<u32>>(&path).is_err());
+
+        fs::write(&path, b"[1, 2]").expect("write");
+        assert_eq!(read_strict::<Vec<u32>>(&path), Ok(vec![1, 2]));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_strict_writes_only_changes_and_commits_under_the_lock() {
+        let dir = unique_test_dir("update_strict");
+        let path = dir.join("data.json");
+        let lock = path.with_extension("lock");
+
+        // A no-op on a fresh install creates no file.
+        let seen = update_strict(&path, &lock, |_: &mut Vec<u32>| false, |v| v);
+        assert_eq!(seen, Ok(Vec::new()));
+        assert!(!path.exists(), "an unchanged update must not write");
+
+        let seen = update_strict(
+            &path,
+            &lock,
+            |v: &mut Vec<u32>| {
+                v.push(7);
+                true
+            },
+            |v| {
+                assert!(lock.exists(), "commit runs while the lock is held");
+                v
+            },
+        );
+        assert_eq!(seen, Ok(vec![7]));
+        assert_eq!(read_strict::<Vec<u32>>(&path), Ok(vec![7]));
+        assert!(!lock.exists(), "the lock is released afterwards");
+
+        // An unchanged update leaves the bytes alone.
+        let before = fs::read(&path).expect("read");
+        let seen = update_strict(&path, &lock, |_: &mut Vec<u32>| false, |v| v);
+        assert_eq!(seen, Ok(vec![7]));
+        assert_eq!(fs::read(&path).expect("read"), before);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_strict_refuses_to_overwrite_an_unreadable_file() {
+        let dir = unique_test_dir("update_strict_corrupt");
+        let path = dir.join("data.json");
+        let lock = path.with_extension("lock");
+        fs::write(&path, b"{ not json").expect("write");
+
+        let mut modified = false;
+        let err = update_strict(
+            &path,
+            &lock,
+            |v: &mut Vec<u32>| {
+                modified = true;
+                v.push(1);
+                true
+            },
+            |v| v,
+        )
+        .expect_err("a corrupt file is an error");
+        assert!(err.contains("is unreadable"), "{err}");
+        assert!(!modified, "modify never sees a corrupt file");
+        assert_eq!(fs::read(&path).expect("read"), b"{ not json");
         let _ = fs::remove_dir_all(&dir);
     }
 

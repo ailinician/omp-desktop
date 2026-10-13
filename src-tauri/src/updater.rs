@@ -19,8 +19,8 @@
 //!
 //! The non-Windows relaunch (`request_restart`) ends the process without
 //! dropping managed state, so `AgentBridge`'s `Drop` never runs; the omp
-//! children and the widget plugin processes are killed explicitly
-//! ([`crate::kill_child_processes`]) first —
+//! children, the widget plugin processes and the terminal shells are
+//! killed explicitly ([`crate::kill_child_processes`]) first —
 //! on Unix each sits in its own process group and would outlive us. On
 //! Windows the plugin launches the installer and then exits; every omp
 //! tree sits in a `KILL_ON_JOB_CLOSE` job object and dies with us. Killing

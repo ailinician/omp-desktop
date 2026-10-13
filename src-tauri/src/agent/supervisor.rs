@@ -22,7 +22,9 @@
 //! after `.spawn()`. Dropping the returned supervisor — or calling
 //! [`ProcessSupervisor::kill_tree`] explicitly — kills the whole tree.
 //! Both steps store only a pid or a raw job handle in an atomic, so
-//! `ProcessSupervisor` is `Send` with no unsafe impl required.
+//! `ProcessSupervisor` is `Send` with no unsafe impl required. On Windows
+//! the terminal (`terminal/kill.rs`) uses `ProcessSupervisor::attach_process`
+//! for its `portable-pty` shell, so the job setup exists once.
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -108,6 +110,16 @@ impl ProcessSupervisor {
     /// handle closes, and assigning the child to it.
     #[cfg(windows)]
     pub fn attach(child: &Child) -> Self {
+        Self::attach_process(child.as_raw_handle())
+    }
+
+    /// [`ProcessSupervisor::attach`] for a process that is not a
+    /// `std::process::Child` (the terminal's shell, spawned by
+    /// `portable-pty`): `process` must be the live handle of a just-spawned
+    /// process, valid for the duration of this call. This is the one place
+    /// that sets up a kill-on-close job.
+    #[cfg(windows)]
+    pub fn attach_process(process: HANDLE) -> Self {
         // SAFETY: null security attributes and a null (anonymous) name is
         // the documented way to create an unnamed job object usable only
         // through the returned handle, which this call exclusively owns
@@ -149,10 +161,10 @@ impl ProcessSupervisor {
             return Self::unsupervised();
         }
 
-        // SAFETY: `job` is a valid, configured job handle; the process
-        // handle is the live handle of the `Child` passed in, which
-        // outlives this call.
-        let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle()) };
+        // SAFETY: `job` is a valid, configured job handle; `process` is a
+        // live process handle that outlives this call (the caller's
+        // contract).
+        let assigned = unsafe { AssignProcessToJobObject(job, process) };
         if assigned == 0 {
             // SAFETY: same reasoning as the `configured == 0` branch above.
             unsafe { CloseHandle(job) };
@@ -165,9 +177,9 @@ impl ProcessSupervisor {
     }
 
     /// A supervisor with nothing to close — the fallback when job-object
-    /// setup fails.
+    /// setup fails, or when there is no process handle to attach to.
     #[cfg(windows)]
-    const fn unsupervised() -> Self {
+    pub const fn unsupervised() -> Self {
         Self {
             job: AtomicPtr::new(std::ptr::null_mut()),
         }
