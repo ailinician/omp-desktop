@@ -281,6 +281,17 @@ check("item label and detail coerce scalars; null/object labels drop the item", 
     { label: "ok", tone: "neutral" },
   ]);
 });
+check("non-finite numbers are dropped from scalar fields", () => {
+  // out() would JSON.stringify Infinity to null, so parse a literal 1e400.
+  const r = W.parseOutput(`{"version":1,"blocks":[
+    {"type":"status","label":"x","value":1e400},
+    {"type":"kv","rows":[{"k":"inf","v":1e400},{"k":"ok","v":1}]},
+    {"type":"list","items":[{"label":-1e400},{"label":"a","detail":1e400}]}
+  ]}`);
+  assert.equal(r.widget.blocks[0].value, "");
+  assert.deepEqual(r.widget.blocks[1].rows, [{ k: "ok", v: "1" }]);
+  assert.deepEqual(r.widget.blocks[2].items, [{ label: "a", tone: "neutral" }]);
+});
 
 // ── tone info ─────────────────────────────────────────────────────────────
 check("info tone is preserved", () => {
@@ -320,6 +331,22 @@ check("item time: ISO string and epoch seconds become epoch ms; invalid is dropp
   const times = r.widget.blocks[0].items.map(i => i.time);
   assert.deepEqual(times, [Date.parse("2026-01-15T12:00:00Z"), 1736942400000, undefined, undefined, undefined, undefined]);
   assert.equal(r.widget.blocks[0].items.length, 6, "a bad time never drops the item");
+});
+check("item time: only ISO 8601 strings are parsed; free-form dates are dropped", () => {
+  const r = out({ version: 1, blocks: [{ type: "list", items: [
+    { label: "a", time: "2026-01-15" },
+    { label: "b", time: "2026-01-15T12:00" },
+    { label: "c", time: "2026-01-15T12:00:30.5+02:00" },
+    { label: "d", time: "2026-01-15T12:00:00-0500" },
+    { label: "e", time: "March 7" },
+    { label: "f", time: "Jan 15 2026 12:00" },
+    { label: "g", time: "2026-01-15 12:00" },
+    { label: "h", time: "1/15/2026" },
+  ] }] });
+  const times = r.widget.blocks[0].items.map(i => i.time);
+  assert.deepEqual(times.map(t => t !== undefined), [true, true, true, true, false, false, false, false]);
+  assert.equal(times[0], Date.parse("2026-01-15"));
+  assert.equal(times[3], Date.parse("2026-01-15T12:00:00-0500"));
 });
 
 // ── relativeTime ──────────────────────────────────────────────────────────
@@ -390,6 +417,52 @@ check("activateDue: tab plugins always run; global ones only without a fresh res
   assert.equal(S.activateDue(g, { state: "ok", at: 40000 }, 100000), true, "stale result runs");
   assert.equal(S.activateDue(g, { state: "running" }, 100000), false, "first run in flight skips");
   assert.equal(S.activateDue({ scope: "global" }, { state: "ok", at: 99999 }, 100000), true, "no intervalMs = always");
+});
+
+// ── global plugins and queued follow-ups ──────────────────────────────────
+check("globalPlugins: from config by scope, enabled flag and tweak; independent of match", () => {
+  const cfg = [
+    { id: "g1", scope: "global", intervalMs: 30000 },
+    { id: "g2", scope: "global", matchPath: "/other" },
+    { id: "g3", scope: "global", enabled: false },
+    { id: "g4", scope: "global" },
+    { id: "t1", scope: "tab" },
+    { id: "t2" },
+  ];
+  const ids = (tw) => W.globalPlugins(cfg, tw).map(p => p.id);
+  assert.deepEqual(ids({}), ["g1", "g2", "g4"], "match ignored, disabled and tab plugins excluded");
+  assert.deepEqual(ids({ "widget:g1": false }), ["g2", "g4"], "tweak off removes it");
+  assert.deepEqual(ids({ "widget:g1": true }), ["g1", "g2", "g4"]);
+  assert.deepEqual(W.globalPlugins(undefined, {}), []);
+});
+check("followUpAllowed: a global follow-up re-checks match against the active tab's context", () => {
+  const g = { id: "g", scope: "global", matchPath: "/proj/a" };
+  const env = (project, extra) => ({ visible: true, sid: "s1", activeSid: "s2", ctx: { project, remote: "" }, ...extra });
+  assert.equal(W.followUpAllowed(g, "turn_end", env("/proj/a/sub")), true);
+  assert.equal(W.followUpAllowed(g, "turn_end", env("/proj/b")), false, "active project no longer matches");
+  assert.equal(W.followUpAllowed(g, "turn_end", env("/proj/a", { ctx: null })), false, "ctx pending with a matcher");
+  assert.equal(W.followUpAllowed({ id: "g", scope: "global" }, "turn_end", env("/proj/b")), true, "no matcher always applies");
+  assert.equal(W.followUpAllowed({ id: "g", scope: "global" }, "turn_end", env("/x", { ctx: null })), true);
+});
+check("followUpAllowed: interval follow-ups need a visible window; tab plugins also their active tab", () => {
+  const t = { id: "t" }, g = { id: "g", scope: "global" };
+  const env = (extra) => ({ visible: true, sid: "s1", activeSid: "s1", ctx: { project: "/p", remote: "" }, ...extra });
+  assert.equal(W.followUpAllowed(t, "interval", env()), true);
+  assert.equal(W.followUpAllowed(t, "interval", env({ visible: false })), false);
+  assert.equal(W.followUpAllowed(t, "interval", env({ activeSid: "s2" })), false);
+  assert.equal(W.followUpAllowed(t, "turn_end", env({ activeSid: "s2" })), true, "non-interval triggers ignore the active tab");
+  assert.equal(W.followUpAllowed(g, "interval", env({ activeSid: "s2" })), true, "global ignores the active tab");
+  assert.equal(W.followUpAllowed(g, "interval", env({ visible: false })), false);
+});
+check("runsFor selects each plugin's result by its current scope", () => {
+  let { state } = S.start(S.EMPTY, "__global__", "p", "activate");
+  state = S.finish(state, "__global__", "p", 1, { ok: true, widget: {}, at: 5 }).state;
+  state = S.start(state, "s1", "p", "activate").state;
+  state = S.finish(state, "s1", "p", 1, { ok: true, widget: {}, at: 7 }).state;
+  assert.equal(S.runsFor(state, [{ id: "p", scope: "global" }], "s1").p.at, 5, "now global: shared result");
+  assert.equal(S.runsFor(state, [{ id: "p", scope: "tab" }], "s1").p.at, 7, "now tab: own result");
+  assert.deepEqual(S.runsFor(state, [{ id: "p" }], "s2"), {}, "no result for a tab that never ran it");
+  assert.deepEqual(S.runsFor(state, [{ id: "q", scope: "global" }], "s1"), {});
 });
 
 console.log(`test-widgets: ${passed} checks passed`);

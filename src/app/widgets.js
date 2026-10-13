@@ -12,7 +12,8 @@
   const TRIGGERS = ["activate", "turn_end", "branch", "manual", "interval"];
 
   const clip = (v, max) => (typeof v === "string" ? v.replace(/\u0000/g, "").slice(0, max) : "");
-  const scalar = (v, max) => (typeof v === "string" || typeof v === "number" || typeof v === "boolean" ? String(v).replace(/\u0000/g, "").slice(0, max) : "");
+  const isScalar = (v) => typeof v === "string" || typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v));
+  const scalar = (v, max) => (isScalar(v) ? String(v).replace(/\u0000/g, "").slice(0, max) : "");
   const tone = (t) => (TONES.has(t) ? t : "neutral");
   const num = (v) => { if (typeof v !== "number" && typeof v !== "string") return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
 
@@ -37,10 +38,13 @@
     return out;
   }
 
-  // parseTime: ISO 8601 string or epoch seconds (number) → epoch ms; anything
-  // outside the Date range (toISOString would throw at render) → null.
+  // parseTime: ISO 8601 string (date, optionally with time and zone) or epoch
+  // seconds (number) → epoch ms. Free-form strings ("March 7") are not
+  // parsed; anything outside the Date range (toISOString would throw at
+  // render) → null.
+  const ISO_TIME = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
   function parseTime(v) {
-    const ms = typeof v === "number" ? v * 1000 : typeof v === "string" ? Date.parse(v) : NaN;
+    const ms = typeof v === "number" ? v * 1000 : typeof v === "string" && ISO_TIME.test(v) ? Date.parse(v) : NaN;
     return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? ms : null;
   }
 
@@ -50,7 +54,7 @@
     number: (b) => { const value = num(b.value); if (value === null) return null; const out = { type: "number", label: clip(b.label, LIMITS.short), value }; const unit = clip(b.unit, LIMITS.short); if (unit) out.unit = unit; return out; },
     progress: (b) => { const value = num(b.value); if (value === null) return null; const max = Math.max(1, num(b.max) ?? 1); return { type: "progress", label: clip(b.label, LIMITS.short), value: Math.min(Math.max(0, value), max), max }; },
     text: (b) => { const text = clip(b.text, LIMITS.long); if (!text) return null; const out = { type: "text", text }; const insert = clip(b.insert, LIMITS.long); if (insert) out.insert = insert; return out; },
-    kv: (b) => { const rows = (Array.isArray(b.rows) ? b.rows : []).filter(r => r && typeof r.k === "string" && (typeof r.v === "string" || typeof r.v === "number" || typeof r.v === "boolean")).slice(0, LIMITS.rows).map(r => ({ k: clip(r.k, LIMITS.short), v: clip(String(r.v), LIMITS.short) })); if (!rows.length) return null; const out = { type: "kv", rows }; const title = clip(b.title, LIMITS.short); if (title) out.title = title; return out; },
+    kv: (b) => { const rows = (Array.isArray(b.rows) ? b.rows : []).filter(r => r && typeof r.k === "string" && isScalar(r.v)).slice(0, LIMITS.rows).map(r => ({ k: clip(r.k, LIMITS.short), v: clip(String(r.v), LIMITS.short) })); if (!rows.length) return null; const out = { type: "kv", rows }; const title = clip(b.title, LIMITS.short); if (title) out.title = title; return out; },
     list: (b) => { const items = (Array.isArray(b.items) ? b.items : []).map(item).filter(Boolean).slice(0, LIMITS.items); if (!items.length) return null; const out = { type: "list", items }; const title = clip(b.title, LIMITS.short); if (title) out.title = title; return out; },
     link: (b) => { const url = safeUrl(b.url); return url ? { type: "link", label: clip(b.label, LIMITS.short) || clip(url, LIMITS.short), url } : null; },
   });
@@ -90,6 +94,24 @@
     if (trigger === "interval") return !!plugin?.intervalMs;
     return trigger === "manual" || (Array.isArray(plugin?.triggers) && plugin.triggers.includes(trigger));
   }
+  // globalPlugins: the global-scope plugins that may run on a timer, taken
+  // from the config (not from the per-tab applicable set) so the set, and
+  // the timers keyed by it, do not change on a tab switch. `match` is
+  // checked at launch time.
+  function globalPlugins(configPlugins, tweaks) {
+    return (configPlugins ?? []).filter(p => p.scope === "global" && p.enabled !== false && (tweaks?.[tweakKey(p.id)] ?? true));
+  }
+  // followUpAllowed: whether a queued follow-up (`trigger`) may still launch.
+  // `env`: { visible, sid, activeSid, ctx } — ctx is the active tab's current
+  // context, or null while it is still loading. A global plugin must match
+  // that context now; a queued interval run also needs a visible window and,
+  // for a tab plugin, its tab to still be active.
+  function followUpAllowed(plugin, trigger, env) {
+    const global = plugin?.scope === "global";
+    if (global && applicable([plugin], env.ctx).length === 0) return false;
+    if (trigger === "interval" && (!env.visible || (!global && env.sid !== env.activeSid))) return false;
+    return true;
+  }
   function insertText(it) {
     const explicit = clip(it?.insert, LIMITS.long);
     if (explicit) return explicit;
@@ -107,5 +129,5 @@
     return `${epochMs > nowMs ? "in " : ""}${Math.floor(n)}${unit}`;
   }
 
-  window.OMP_WIDGETS = { VERSION, LIMITS, TRIGGERS, parseOutput, applicable, wantsTrigger, insertText, safeUrl, tweakKey, relativeTime };
+  window.OMP_WIDGETS = { VERSION, LIMITS, TRIGGERS, parseOutput, applicable, wantsTrigger, globalPlugins, followUpAllowed, insertText, safeUrl, tweakKey, relativeTime };
 })();

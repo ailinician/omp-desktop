@@ -42,6 +42,9 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
       ? _UW.applicable(config.plugins, ctx).filter(p => (tweaks[_UW.tweakKey(p.id)] ?? true))
       : [],
     [config.plugins, ctx, ctxCurrent, tweaks]);
+  // The active tab's context for launch-time `match` checks; null while pending.
+  const ctxRef = React.useRef(null);
+  ctxRef.current = ctxCurrent ? ctx : null;
 
   // The one place a run is started. `sid` is captured here so a result that
   // lands after a tab switch still goes to the tab it was started for; a
@@ -67,9 +70,10 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
       // a global follow-up runs for whichever tab is active now.
       const nextSid = global ? activeSessionIdRef.current : sid;
       if (!nextSid || (!global && !sessionIdsRef.current.includes(sid))) return;
-      // A queued interval run was due when it was queued: drop it unless the
-      // window is visible and (tab plugins) the tab is still the active one.
-      if (done.next === "interval" && (document.visibilityState !== "visible" || (!global && sid !== activeSessionIdRef.current))) return;
+      // A queued interval run was due when it was queued, and a global plugin's
+      // `match` was evaluated for the tab that started it: re-check both now.
+      const env = { visible: document.visibilityState === "visible", sid, activeSid: activeSessionIdRef.current, ctx: ctxRef.current };
+      if (!_UW.followUpAllowed(plugin, done.next, env)) return;
       launch(nextSid, plugin, done.next);
     });
   }, [bridge]);
@@ -88,7 +92,7 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
   // activate: tab/project changed, or the applicable plugin set changed for it.
   // Plugins are empty until this tab's context has arrived, so the effect
   // re-runs (pluginKey changes) exactly once with the right plugin set.
-  const pluginKey = plugins.map(p => p.id + ":" + (p.intervalMs ?? 0)).join("\0");
+  const pluginKey = plugins.map(p => p.id + ":" + (p.intervalMs ?? 0) + ":" + (p.scope ?? "tab")).join("\0");
   React.useEffect(() => {
     if (ctxCurrent) fire("activate");
   }, [activeSessionId, activeProjectPath, pluginKey]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -124,7 +128,10 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
     const timers = new Map();
     const runFor = (p) => {
       const sid = activeSessionIdRef.current;
-      if (sid) launch(sid, p, "interval");
+      if (!sid) return;
+      // Global plugins are not gated by the active tab's match; check it now.
+      if (p.scope === "global" && _UW.applicable([p], ctxRef.current).length === 0) return;
+      launch(sid, p, "interval");
     };
     const arm = (p) => {
       clearInterval(timers.get(p.id));
@@ -153,16 +160,19 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
   React.useEffect(
     () => startIntervals(plugins.filter(p => p.intervalMs && p.scope !== "global")),
     [activeSessionId, pluginKey, startIntervals]); // eslint-disable-line react-hooks/exhaustive-deps
-  // Global plugins: one timer set for the app, untouched by a tab switch.
-  const globalKey = plugins.filter(p => p.intervalMs && p.scope === "global").map(p => p.id + ":" + p.intervalMs).join("\0");
+  // Global plugins: one timer set for the app, untouched by a tab switch. The
+  // set comes from the config, not from the ctx-gated `plugins`, so it is
+  // stable while a tab's context is pending; `match` is checked per run.
+  const globalTimed = _UW.globalPlugins(config.plugins, tweaks).filter(p => p.intervalMs);
+  const globalKey = globalTimed.map(p => p.id + ":" + p.intervalMs).join("\0");
   React.useEffect(
-    () => startIntervals(plugins.filter(p => p.intervalMs && p.scope === "global")),
+    () => startIntervals(globalTimed),
     [globalKey, startIntervals]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return {
     plugins, configErrors: config.errors, fatal: config.fatal, configPath: config.path,
     allPlugins: config.plugins,
-    runs: { ...sched.runs[_UWS.GLOBAL], ...sched.runs[activeSessionId] },
+    runs: _UWS.runsFor(sched, config.plugins, activeSessionId),
     refresh, reload,
   };
 }

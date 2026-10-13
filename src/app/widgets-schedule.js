@@ -35,6 +35,17 @@
   const GLOBAL = "__global__";
   const keyFor = (plugin, sid) => (plugin?.scope === "global" ? GLOBAL : sid);
 
+  // runsFor: the cached run of each plugin, looked up by the plugin's current
+  // scope (a scope edited on reload must not show the result of the old one).
+  function runsFor(s, plugins, sid) {
+    const out = {};
+    for (const p of plugins) {
+      const run = runOf(s, keyFor(p, sid), p.id);
+      if (run) out[p.id] = run;
+    }
+    return out;
+  }
+
   function prune(s, sessionIds) {
     const keep = new Set([...sessionIds, GLOBAL]);
     const runs = Object.fromEntries(Object.entries(s.runs).filter(([sid]) => keep.has(sid)));
@@ -52,5 +63,5 @@
   // it has no result yet or its last one is older than intervalMs (no intervalMs → always).
   const activateDue = (plugin, run, now) => plugin?.scope !== "global" || !plugin.intervalMs || dueNow(run, plugin.intervalMs, now);
 
-  window.OMP_WIDGET_SCHEDULE = { EMPTY, GLOBAL, start, finish, prune, runOf, keyFor, turnEnded, dueNow, activateDue };
+  window.OMP_WIDGET_SCHEDULE = { EMPTY, GLOBAL, start, finish, prune, runOf, keyFor, runsFor, turnEnded, dueNow, activateDue };
 })();
