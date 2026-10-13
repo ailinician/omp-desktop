@@ -189,7 +189,14 @@ fn validate(raw: RawEntry, index: usize, seen: &[PluginEntry]) -> Result<PluginE
         .interval_ms
         .filter(|&v| v > 0)
         .map(|v| v.clamp(INTERVAL_MIN_MS, INTERVAL_MAX_MS));
-    let (match_path, match_remote) = raw.matcher.map_or((None, None), |m| (m.path, m.remote));
+    let (mut match_path, match_remote) = raw.matcher.map_or((None, None), |m| (m.path, m.remote));
+    // Same `~/` rule as for the command: a config can describe its folders
+    // portably (`~/GIT/work`).
+    if let Some(p) = match_path.as_mut() {
+        expand_home(std::slice::from_mut(p), home_dir().as_deref()).map_err(|()| {
+            format!("plugin \"{id}\": cannot expand ~ in match.path: no home directory")
+        })?;
+    }
     // `title` falls back to the id and the entry keeps both, so one copy is unavoidable.
     let title = match raw.title {
         Some(t) if !t.is_empty() => t,
@@ -372,6 +379,21 @@ mod tests {
         );
         // `~x` is left alone: a bare program name.
         assert_eq!(c.plugins[1].command, ["~x"]);
+    }
+
+    #[test]
+    fn tilde_in_match_path_is_expanded() {
+        let Some(home) = home_dir() else { return };
+        let body = br#"{"version":1,"plugins":[
+            {"id":"t","command":["true"],"match":{"path":"~/GIT/work","remote":"~/kept"}}
+        ]}"#;
+        let c = load(&tmp("tilde-match", body)).expect("ok");
+        assert_eq!(
+            c.plugins[0].match_path.as_deref(),
+            Some(Path::new(&home).join("GIT/work").to_string_lossy().as_ref())
+        );
+        // `remote` is a substring, never a path.
+        assert_eq!(c.plugins[0].match_remote.as_deref(), Some("~/kept"));
     }
 
     #[test]
