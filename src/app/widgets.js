@@ -9,7 +9,7 @@
   const VERSION = 1;
   const LIMITS = { blocks: 32, items: 50, rows: 50, short: 200, long: 2000 };
   const TONES = new Set(["ok", "warn", "error", "neutral"]);
-  const TRIGGERS = ["activate", "turn_end", "branch", "manual"];
+  const TRIGGERS = ["activate", "turn_end", "branch", "manual", "interval"];
 
   const clip = (v, max) => (typeof v === "string" ? v.replace(/\u0000/g, "").slice(0, max) : "");
   const tone = (t) => (TONES.has(t) ? t : "neutral");
@@ -77,6 +77,7 @@
       && (!p.matchRemote || String(ctx?.remote ?? "").includes(p.matchRemote)));
   }
   function wantsTrigger(plugin, trigger) {
+    if (trigger === "interval") return !!plugin?.intervalMs;
     return trigger === "manual" || (Array.isArray(plugin?.triggers) && plugin.triggers.includes(trigger));
   }
   function insertText(it) {

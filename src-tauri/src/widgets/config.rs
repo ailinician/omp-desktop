@@ -7,7 +7,9 @@ use std::path::Path;
 pub const TIMEOUT_DEFAULT_MS: u64 = 10_000;
 pub const TIMEOUT_MIN_MS: u64 = 1_000;
 pub const TIMEOUT_MAX_MS: u64 = 60_000;
-pub const TRIGGERS: [&str; 4] = ["activate", "turn_end", "branch", "manual"];
+pub const INTERVAL_MIN_MS: u64 = 15_000;
+pub const INTERVAL_MAX_MS: u64 = 3_600_000;
+pub const TRIGGERS: [&str; 5] = ["activate", "turn_end", "branch", "manual", "interval"];
 /// Entries past this many in `widgets.json` are not validated; one error reports them.
 pub const MAX_PLUGINS: usize = 32;
 const SUPPORTED_VERSION: u64 = 1;
@@ -22,6 +24,7 @@ pub struct PluginEntry {
     pub match_remote: Option<String>,
     pub triggers: Vec<String>,
     pub timeout_ms: u64,
+    pub interval_ms: Option<u64>,
     pub enabled: bool,
 }
 
@@ -42,6 +45,7 @@ struct RawEntry {
     matcher: Option<RawMatch>,
     triggers: Option<Vec<String>>,
     timeout_ms: Option<u64>,
+    interval_ms: Option<u64>,
     enabled: Option<bool>,
 }
 
@@ -157,6 +161,7 @@ fn validate(raw: RawEntry, index: usize, seen: &[PluginEntry]) -> Result<PluginE
         .timeout_ms
         .unwrap_or(TIMEOUT_DEFAULT_MS)
         .clamp(TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
+    let interval_ms = raw.interval_ms.filter(|&v| v > 0).map(|v| v.clamp(INTERVAL_MIN_MS, INTERVAL_MAX_MS));
     let (match_path, match_remote) = raw.matcher.map_or((None, None), |m| (m.path, m.remote));
     // `title` falls back to the id and the entry keeps both, so one copy is unavoidable.
     let title = match raw.title {
@@ -171,6 +176,7 @@ fn validate(raw: RawEntry, index: usize, seen: &[PluginEntry]) -> Result<PluginE
         match_remote,
         triggers,
         timeout_ms,
+        interval_ms,
         enabled: raw.enabled.unwrap_or(true),
     })
 }
@@ -213,14 +219,17 @@ mod tests {
     fn entry_defaults_and_clamps() {
         let p = tmp("defaults", br#"{"version":1,"plugins":[
             {"id":"git","title":"Git","command":["bash","x.sh"]},
-            {"id":"slow","title":"Slow","command":["sleep"],"timeoutMs":999999,"triggers":["branch"],"enabled":false}
+            {"id":"slow","title":"Slow","command":["sleep"],"timeoutMs":999999,"triggers":["branch"],"enabled":false},
+            {"id":"int","title":"Interval","command":["date"],"intervalMs":1000},
+            {"id":"big","title":"Big","command":["date"],"intervalMs":1000000000}
         ]}"#);
         let c = load(&p).expect("ok");
-        assert_eq!(c.plugins.len(), 2);
+        assert_eq!(c.plugins.len(), 4);
         let git = &c.plugins[0];
         assert_eq!(git.timeout_ms, TIMEOUT_DEFAULT_MS);
         assert_eq!(git.triggers, TRIGGERS.map(String::from).to_vec());
         assert!(git.enabled);
+        assert_eq!(git.interval_ms, None);
         let slow = &c.plugins[1];
         assert_eq!(slow.timeout_ms, TIMEOUT_MAX_MS);
         assert_eq!(
@@ -228,6 +237,10 @@ mod tests {
             vec!["branch".to_string(), "manual".to_string()]
         );
         assert!(!slow.enabled);
+        let int = &c.plugins[2];
+        assert_eq!(int.interval_ms, Some(INTERVAL_MIN_MS));
+        let big = &c.plugins[3];
+        assert_eq!(big.interval_ms, Some(INTERVAL_MAX_MS));
     }
 
     #[test]

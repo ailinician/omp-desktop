@@ -1,7 +1,7 @@
 /* app/use-widgets.jsx — loads widgets.json, decides which plugins apply to
    the active tab, and runs them on triggers (activate, turn_end, branch,
-   manual). Transitions live in app/widgets-schedule.js; this file only
-   wires effects. */
+   manual, interval). Transitions live in app/widgets-schedule.js; this file
+   only wires effects. */
 
 const { OMP_WIDGETS: _UW, OMP_WIDGET_SCHEDULE: _UWS } = window;
 
@@ -98,6 +98,40 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
     const p = plugins.find(x => x.id === pluginId);
     if (p && activeSessionId) launch(activeSessionId, p, "manual");
   }, [plugins, activeSessionId, launch]);
+
+  // Interval timers for plugins with intervalMs (active tab only).
+  // Reset when activeSessionId or plugin set changes. Pause when hidden;
+  // fire one interval run per plugin on return to visible if due.
+  const intervalPluginsRef = React.useRef([]);
+  React.useEffect(() => {
+    const timers = [];
+    const intervalPlugins = plugins.filter(p => p.intervalMs);
+    intervalPluginsRef.current = intervalPlugins;
+
+    const fireIfVisible = (p) => {
+      if (document.visibilityState !== "visible") return;
+      if (activeSessionId) launch(activeSessionId, p, "interval");
+    };
+
+    for (const p of intervalPlugins) {
+      timers.push(setInterval(() => fireIfVisible(p), p.intervalMs));
+    }
+
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      for (const p of intervalPluginsRef.current) {
+        const run = _UWS.runOf(schedRef.current, activeSessionId, p.id);
+        if (_UWS.dueNow(run, p.intervalMs, now)) launch(activeSessionId, p, "interval");
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => {
+      for (const t of timers) clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [activeSessionId, pluginKey, launch]);
 
   return {
     plugins, configErrors: config.errors, fatal: config.fatal, configPath: config.path,

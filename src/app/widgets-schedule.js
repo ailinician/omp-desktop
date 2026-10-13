@@ -40,5 +40,8 @@
   // turn_end only counts inside one tab: streaming true → false across a tab switch is not a turn end.
   const turnEnded = (prev, next) => prev.sessionId === next.sessionId && prev.streaming && !next.streaming;
 
-  window.OMP_WIDGET_SCHEDULE = { EMPTY, start, finish, prune, runOf, turnEnded };
+  // dueNow: true when a plugin has never run or its last run is older than its interval.
+  const dueNow = (run, intervalMs, now) => !run?.at || now - run.at >= intervalMs;
+
+  window.OMP_WIDGET_SCHEDULE = { EMPTY, start, finish, prune, runOf, turnEnded, dueNow };
 })();

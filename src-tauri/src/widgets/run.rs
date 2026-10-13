@@ -370,6 +370,7 @@ mod tests {
             match_remote: None,
             triggers: vec!["manual".into()],
             timeout_ms,
+            interval_ms: None,
             enabled: true,
         }
     }

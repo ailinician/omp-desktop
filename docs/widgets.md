@@ -59,6 +59,7 @@ PY
 | `match` | no | All keys optional, all given keys must match. `path`: the project path starts with this prefix. `remote`: the fetch URL of the default remote contains this substring. No `match` = applies to every project. |
 | `triggers` | no | Default all four: `activate` (tab became active or project changed), `turn_end` (streaming went true→false), `branch` (branch chip changed), `manual` (refresh button). `manual` is always allowed even if omitted. |
 | `timeoutMs` | no | Default 10000, clamped 1000..60000. |
+| `intervalMs` | no | Absent or 0 = no periodic refresh. Clamped 15000..3600000 (15 s to 1 h). Only fires for the active tab; paused while the window is hidden. |
 | `enabled` | no | Default true. Disabled plugins are listed but never run. |
 
 At most 32 entries are read; the rest are ignored with one error card. A malformed plugin entry is skipped with an error card for that entry; the other plugins still run. A missing `widgets.json` means no plugins and no error.
@@ -156,7 +157,7 @@ The previous successful result stays visible (dimmed) while a run is in flight. 
 
 - One run per (plugin, trigger event). A new trigger while a run is in flight for the same plugin is coalesced: at most one queued follow-up run.
 - Results are per active tab; switching tabs shows that tab's cached results and fires `activate`.
-- There is no periodic polling; the refresh button fires `manual`.
+- `interval`: periodic refresh, active tab only. The plugin's `intervalMs` (clamped 15 s to 1 h) determines the cadence. Paused while the window is hidden; fires one run per interval-plugin on return to visible if the last run is older than the interval.
 
 ## Security
 

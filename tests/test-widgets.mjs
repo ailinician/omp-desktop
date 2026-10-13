@@ -131,7 +131,7 @@ check("insert falls back to label and url", () => {
 });
 
 // ── applicable / wantsTrigger ─────────────────────────────────────────────
-const plugin = (over = {}) => ({ id: "p", title: "P", command: ["x"], matchPath: null, matchRemote: null, triggers: ["activate", "manual"], timeoutMs: 1000, enabled: true, ...over });
+const plugin = (over = {}) => ({ id: "p", title: "P", command: ["x"], matchPath: null, matchRemote: null, triggers: ["activate", "manual"], timeoutMs: 1000, intervalMs: undefined, enabled: true, ...over });
 check("disabled plugins never apply", () => {
   assert.deepEqual(W.applicable([plugin({ enabled: false })], { project: "/a", remote: "" }), []);
 });
@@ -155,6 +155,12 @@ check("wantsTrigger honours the plugin's list and always allows manual", () => {
   assert.equal(W.wantsTrigger(plugin({ triggers: ["branch"] }), "branch"), true);
   assert.equal(W.wantsTrigger(plugin({ triggers: ["branch"] }), "turn_end"), false);
   assert.equal(W.wantsTrigger(plugin({ triggers: [] }), "manual"), true);
+});
+check("wantsTrigger interval is true only when intervalMs is set", () => {
+  assert.equal(W.wantsTrigger(plugin(), "interval"), false);
+  assert.equal(W.wantsTrigger(plugin({ intervalMs: 60000 }), "interval"), true);
+  assert.equal(W.wantsTrigger(plugin({ intervalMs: 0 }), "interval"), false, "0 = no interval");
+  assert.equal(W.wantsTrigger(plugin({ intervalMs: 60000, triggers: [] }), "interval"), true, "interval ignores triggers list");
 });
 check("tweakKey is namespaced", () => { assert.equal(W.tweakKey("git"), "widget:git"); });
 
@@ -226,6 +232,12 @@ check("turnEnded fires only for streaming true to false within one tab", () => {
   assert.equal(S.turnEnded({ sessionId: "a", streaming: true }, { sessionId: "b", streaming: false }), false, "tab switch");
   assert.equal(S.turnEnded({ sessionId: "a", streaming: false }, { sessionId: "a", streaming: true }), false);
   assert.equal(S.turnEnded({ sessionId: "a", streaming: true }, { sessionId: "a", streaming: true }), false);
+});
+check("dueNow is true when run is absent or last run is older than interval", () => {
+  assert.equal(S.dueNow(undefined, 60000, 100000), true);
+  assert.equal(S.dueNow({ at: 39000 }, 60000, 100000), true, "100000 - 39000 = 61000 >= 60000");
+  assert.equal(S.dueNow({ at: 40000 }, 60000, 100000), true, "100000 - 40000 = 60000 >= 60000");
+  assert.equal(S.dueNow({ at: 41000 }, 60000, 100000), false);
 });
 
 console.log(`test-widgets: ${passed} checks passed`);
