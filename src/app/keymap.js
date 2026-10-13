@@ -53,6 +53,7 @@
     { id: "desktop.update.check",    label: "Check for updates",       group: "View",    scope: "global",   defaultKeys: [] },
     { id: "desktop.chat.collapseAll", label: "Collapse all blocks",    group: "View",    scope: "global",   defaultKeys: [] },
     { id: "desktop.chat.expandAll",  label: "Expand all blocks",       group: "View",    scope: "global",   defaultKeys: [] },
+    { id: "desktop.terminal.toggle", label: "Toggle terminal",       group: "View",    scope: "global",   defaultKeys: ["ctrl+`", "super+`"] },
   ];
 
   // ── Chord algebra ─────────────────────────────────────────────────────────

@@ -1110,6 +1110,29 @@
     return stopped;
   }
 
+  // The user's shell setting for new terminals (see `setTerminalShell`).
+  let _terminalShell = "";
+
+  /** Listen to a Tauri event; returns a function that stops it, valid at once
+   *  (a call before the async `listen` settled unlistens when it does). */
+  function _listenTerminal(event, handler) {
+    if (!window.__TAURI__) return () => {};
+    let unlisten = null;
+    let stopped = false;
+    window.__TAURI__.event.listen(event, ev => handler(ev.payload)).then(
+      off => { if (stopped) off(); else unlisten = off; },
+      err => console.error(`[live] listen ${event} failed:`, err),
+    );
+    return () => {
+      stopped = true;
+      if (unlisten) { unlisten(); unlisten = null; }
+    };
+  }
+
+  function _b64Bytes(b64) {
+    return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  }
+
   /** Detach the active session's listeners and clear all per-session state,
    *  leaving no active session. Must run before re-activating a respawned
    *  session: `_switchToSession` snapshots whatever is active first, which
@@ -3341,6 +3364,66 @@
       return () => { for (const u of unlistens) u?.(); };
     },
 
+    // ── Terminal (src-tauri/src/terminal/, one shell per tab) ────────────────
+    // IPC glue over the pty backend; no fake `__TAURI__` harness exists to
+    // unit-test it against (see the note at `login`). The backend's own
+    // tests cover open/write/resize/close and the coalesced data/exit events.
+
+    /** Remember the user's shell setting (the terminal tweak); an empty
+     *  value means the default shell. Read by the next `terminalOpen`. */
+    setTerminalShell(path) {
+      _terminalShell = typeof path === "string" ? path.trim() : "";
+    },
+
+    /** Start the tab's shell in its project folder (the home folder for a tab
+     *  without one) at `cols` x `rows`. A no-op while its shell is alive.
+     *  Resolves `{ ok: true }` or `{ ok: false, error }`. */
+    async terminalOpen(sessionId, cols, rows) {
+      if (!window.__TAURI__) return { ok: false, error: "not connected" };
+      const cwd = sessionRegistry.get(sessionId)?.path
+        || await window.__TAURI__.path.homeDir().catch(() => "");
+      // If the tab was closed while we awaited homeDir(), bail — spawning a
+      // shell for a deleted tab would create an orphan with no teardown path.
+      if (!sessionRegistry.has(sessionId)) return { ok: false, error: "tab closed" };
+      const res = await _invokeResult("terminal_open", {
+        args: { sessionId, cwd, shell: _terminalShell || null, cols, rows },
+      });
+      // If the tab disappeared while terminal_open was in flight, immediately
+      // close the pty so no orphaned process lingers.
+      if (res.ok && !sessionRegistry.has(sessionId)) {
+        _invokeSafe("terminal_close", { sessionId });
+        return { ok: false, error: "tab closed" };
+      }
+      return res;
+    },
+
+    /** Send keystrokes (a string, as xterm's `onData` emits it) to the shell. */
+    terminalWrite(sessionId, data) {
+      return _invokeSafe("terminal_write", { sessionId, data });
+    },
+
+    terminalResize(sessionId, cols, rows) {
+      return _invokeSafe("terminal_resize", { sessionId, cols, rows });
+    },
+
+    /** Kill the tab's shell and everything it started. */
+    terminalClose(sessionId) {
+      return _invokeSafe("terminal_close", { sessionId });
+    },
+
+    /** Shell output: `cb(Uint8Array)` per chunk, bytes as the pty produced
+     *  them (feed straight to `Terminal.write`, which reassembles split
+     *  UTF-8). Returns a function that stops listening. */
+    onTerminalData(sessionId, cb) {
+      return _listenTerminal(`terminal://data/${sessionId}`, p => cb(_b64Bytes(p.b64)));
+    },
+
+    /** The shell exited: `cb(code)`, `null` when a signal killed it. Returns
+     *  a function that stops listening. */
+    onTerminalExit(sessionId, cb) {
+      return _listenTerminal(`terminal://exit/${sessionId}`, p => cb(p.code ?? null));
+    },
+
     /** Usage statistics for the active tab's profile — see usage_stats in
      *  lib.rs / stats.rs::fetch. Unlike the workspace methods above, this
      *  is not scoped to the active tab's *project*, but it IS scoped to
@@ -3725,6 +3808,8 @@
     /** Close a tab and kill its omp process. */
     async closeSession(id) {
       _killSessionProcess(id);
+      // Not in `_killSessionProcess`: a profile respawn keeps the tab's shell.
+      _invokeSafe("terminal_close", { sessionId: id });
       sessionRegistry.delete(id);
       promptHistories.delete(id);
       if (id === activeSessionId) {

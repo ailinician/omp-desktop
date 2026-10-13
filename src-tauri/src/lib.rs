@@ -24,6 +24,7 @@ mod recent_projects;
 mod redaction;
 mod saved_sessions;
 mod stats;
+mod terminal;
 mod text;
 mod updater;
 mod widgets;
@@ -283,6 +284,11 @@ async fn conversation_tree(
 /// Kill the omp process for a tab session. Also drops its session-scoped
 /// approval-rule grants (see `approval::RuleBook::clear_session`) and its
 /// widget runs.
+///
+/// Deliberately does NOT touch the tab's terminal: a profile switch stops and
+/// respawns the omp process under the same tab id while the tab, and with it
+/// its shell, stays. The terminal ends only through `terminal_close` (the
+/// frontend's `closeSession`) and `TerminalManager::shutdown_all`.
 #[tauri::command]
 fn stop_session(
     session_id: String,
@@ -292,6 +298,58 @@ fn stop_session(
 ) {
     bridge.stop_session(&session_id, &rule_book);
     widget_host.session_closed(&session_id);
+}
+
+/// Start the tab's terminal shell (no-op while it runs) — see `terminal`.
+/// `async` + `spawn_blocking`: spawning a shell (and killing a replaced
+/// one) blocks, and a sync command would run on the main thread.
+#[tauri::command]
+async fn terminal_open(args: terminal::OpenArgs, app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let emit = Arc::new(terminal::TauriEmit(app.clone()));
+        app.state::<terminal::TerminalManager>().open(emit, &args)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Type into the tab's terminal: `data` reaches the shell unchanged.
+///
+/// Deliberately a sync command although it is called often: it only queues
+/// the bytes for the terminal's writer thread (never blocks), and sync
+/// commands run in invocation order, which keystrokes need — concurrent
+/// async tasks (or `spawn_blocking` jobs) could reorder them.
+#[tauri::command]
+fn terminal_write(
+    session_id: String,
+    data: String,
+    terminal: State<'_, terminal::TerminalManager>,
+) -> Result<(), String> {
+    terminal.write(&session_id, data)
+}
+
+/// Resize the tab's terminal to `cols` × `rows` characters. Sync for the
+/// ordering reason of `terminal_write` (the last size must win); it is a
+/// single non-blocking ioctl.
+#[tauri::command]
+fn terminal_resize(
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    terminal: State<'_, terminal::TerminalManager>,
+) -> Result<(), String> {
+    terminal.resize(&session_id, cols, rows)
+}
+
+/// Kill the tab's terminal shell and everything it started (`async` +
+/// `spawn_blocking`: finding its processes blocks). Unknown tabs are fine.
+#[tauri::command]
+async fn terminal_close(session_id: String, app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<terminal::TerminalManager>().close(&session_id);
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))
 }
 
 /// Query a session's last error. Returns `None` if the session is
@@ -877,13 +935,14 @@ async fn app_update_install(
 }
 
 /// Kill every child process tree the app owns — omp sessions first, then
-/// running widget plugins — on the calling thread. For the exits where
-/// managed state is never dropped (app exit, the updater relaunch); on Unix
-/// each tree sits in its own process group and would outlive us. Both steps
-/// are idempotent.
+/// running widget plugins, then the terminal shells — on the calling thread.
+/// For the exits where managed state is never dropped (app exit, the updater
+/// relaunch); on Unix each tree sits in its own process group or session and
+/// would outlive us. Every step is idempotent.
 pub(crate) fn kill_child_processes(app: &AppHandle) {
     app.state::<AgentBridge>().shutdown_all();
     widgets::kill_all(app);
+    app.state::<terminal::TerminalManager>().shutdown_all();
 }
 
 /// App-level state that needs a resolved path, and the cold-start "Open
@@ -999,6 +1058,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AgentBridge::new())
+        .manage(terminal::TerminalManager::new())
         .manage(GitWatcherState::new())
         .manage(OpenProjectState::new())
         .manage(updater::UpdaterState::default())
@@ -1006,6 +1066,10 @@ pub fn run() {
             send_command,
             start_session,
             stop_session,
+            terminal_open,
+            terminal_write,
+            terminal_resize,
+            terminal_close,
             session_status,
             replay_events,
             extension_ui_state,

@@ -77,6 +77,10 @@ Toggle plan mode (`Shift+Alt+P`, `/plan` or the composer pill) and the agent dra
 | **History**: saved conversations for the tab's profile, searchable and resumable | **Shortcuts** (`Ctrl+/`): every action with its chord; rebind, add a second chord, or reset |
 | ![Conversation history](screenshots/history.webp) | ![Keyboard shortcuts](screenshots/shortcuts.webp) |
 
+### Terminal
+
+A real shell in every tab. `` Ctrl+` `` (`` ⌘` `` on macOS), the status-bar button or `/terminal` opens a panel above the prompt, in the tab's project folder, running your login shell (or the one set under Tweaks → Terminal). Hiding the panel keeps the shell running; closing the tab ends it and everything it started. After `exit`, press Enter in the panel to start a new one. It is your terminal, not the agent's: it runs with your full rights, omp's approvals do not apply to it, and nothing passes between it and the agent.
+
 ### Profiles, updates, look
 
 - **Profiles.** A tab can run under an omp profile (`omp --profile <id>`) with its own auth, sessions, settings and caches. Create, rename and switch profiles from the title bar, and tick one as the startup default. A new profile boots far enough to run `/login`.
@@ -118,7 +122,7 @@ Open a folder with the `+` button (or `Ctrl+T`), from the sidebar's recent proje
 
 ### Keyboard shortcuts
 
-On macOS, `Ctrl+K`, `Ctrl+H`, `Ctrl+/`, `Ctrl+B`, `Ctrl+T`, `Ctrl+W` and `Ctrl+↑` also work with `⌘`. All shortcuts can be rebound in `Ctrl+/`. Your overrides are stored in `<app config>/keybindings.json`, and omp's own `~/.omp/agent/keybindings.yml` is used as the base layer.
+On macOS, `Ctrl+K`, `Ctrl+H`, `Ctrl+/`, `Ctrl+B`, `Ctrl+T`, `Ctrl+W`, `` Ctrl+` `` and `Ctrl+↑` also work with `⌘`. All shortcuts can be rebound in `Ctrl+/`. Your overrides are stored in `<app config>/keybindings.json`, and omp's own `~/.omp/agent/keybindings.yml` is used as the base layer. With the terminal focused, only `` Ctrl+` ``, `Ctrl+Tab` and the `⌘` forms reach the app; `Ctrl+T`, `Ctrl+W`, `Ctrl+C` and `Esc` stay with the shell.
 
 | Action | Default |
 |---|---|
@@ -127,6 +131,7 @@ On macOS, `Ctrl+K`, `Ctrl+H`, `Ctrl+/`, `Ctrl+B`, `Ctrl+T`, `Ctrl+W` and `Ctrl+�
 | Keyboard shortcuts | `Ctrl+/` |
 | Toggle project sidebar | `Ctrl+B` |
 | New tab / close tab | `Ctrl+T` / `Ctrl+W` |
+| Toggle terminal | `` Ctrl+` `` |
 | Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
 | Move the tab's project left / right | `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown` |
 | Prompt history picker | `Ctrl+↑` |

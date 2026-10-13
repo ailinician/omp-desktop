@@ -24,7 +24,7 @@ const {
   useWidgets, WidgetCard, WidgetErrorCard, WidgetApprovalCard, WidgetBoundary,
   TWEAK_DEFAULTS, NULL_MODEL, EMPTY_PROJECT, DEFAULT_PROFILE_ID,
   INTENT_FRAMING, APPROVAL_PROMPT,
-  useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, timeNow,
+  useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, useTerminal, TerminalPanel, timeNow,
   useKeymap, useKeymapDispatch, ShortcutsModal,
 } = window;
 const { isCommandInvocation } = window.OMP_SLASH;
@@ -36,6 +36,7 @@ const {
 const { NO_OVERRIDES: NO_COLLAPSE_OVERRIDES, foldModes: _foldModes, overridesForAll: _collapseOverridesForAll } = window.OMP_COLLAPSE;
 const { tweakKey: _widgetTweakKey } = window.OMP_WIDGETS;
 const { EMPTY: _EXT_EMPTY, cards: _extCards, toggles: _extToggles } = window.OMP_EXT_WIDGETS;
+const { DEFAULT_HEIGHT: _TERM_DEFAULT_HEIGHT, entryOf: _TERM_entryOf, shellLabel: _TERM_shellLabel } = window.OMP_TERMINAL;
 
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
@@ -224,6 +225,18 @@ function App() {
   // startup default / empty-workspace pick, which must reload the omp layer.
   const keymap = useKeymap(bridge, activeProfileId);
 
+  // One shell per tab, in a panel above the composer (app/use-terminal.jsx).
+  const terminal = useTerminal({
+    bridge, activeSessionId: planKey, sessionIds, tweaks: t, setTweak,
+  });
+  const termHeight = t.terminalHeight ?? _TERM_DEFAULT_HEIGHT;
+  // Applied on blur: the next shell that starts uses it (running ones keep theirs).
+  const handleTerminalShell = v => {
+    const shell = v.trim();
+    bridge?.setTerminalShell(shell);
+    if (shell !== (t.terminalShell ?? "")) setTweak("terminalShell", shell);
+  };
+
   const subagentUi = useSubagentManager({
     bridge, layout: t.layout, setTweak, activeSessionId, subagents, messages, setHoveredMsgIdx,
   });
@@ -408,6 +421,7 @@ function App() {
     else if (c.name === "collapse-all")  { handleCollapseAll(true); }
     else if (c.name === "expand-all")    { handleCollapseAll(false); }
     else if (c.name === "tweaks")    { openTweaks(); }
+    else if (c.name === "terminal")  { terminal.toggle(planKey); }
   };
 
   const handleResumeSession = async (session) => {
@@ -562,6 +576,7 @@ function App() {
     "desktop.update.check":    updater.check,
     "desktop.chat.collapseAll": () => handleCollapseAll(true),
     "desktop.chat.expandAll":  () => handleCollapseAll(false),
+    "desktop.terminal.toggle": () => terminal.toggle(planKey),
   };
 
   // Profile switch applies to the active tab only: its omp process is
@@ -676,6 +691,26 @@ function App() {
                     collapseOverrides={tabCollapseOverrides}
                     onToggleCollapse={handleToggleCollapse}
                   />
+                  {/* One panel per tab that has ever opened its terminal, pending or
+                      failed spawn included; the others stay mounted but hidden, so a
+                      shell's output is kept off-screen and its xterm survives a hide. */}
+                  {sessions.map(s => {
+                    const entry = _TERM_entryOf(terminal.state, s.id);
+                    if (!entry.created) return null;
+                    return (
+                      <TerminalPanel key={s.id}
+                        entry={entry}
+                        height={termHeight}
+                        hidden={s.id !== planKey || !entry.open}
+                        onHeight={terminal.setHeight}
+                        onClose={() => terminal.close(s.id)}
+                        mountRef={terminal.mountFor(s.id)}
+                        onContextMenu={(e) => { if (terminal.copySelection(s.id)) e.preventDefault(); }}
+                        shellLabel={_TERM_shellLabel(t.terminalShell)}
+                        cwd={s.path}
+                      />
+                    );
+                  })}
                   <Composer
                     sessionId={planKey}
                     sessionIds={sessionIds}
@@ -724,6 +759,8 @@ function App() {
                   onRules={() => setRulesOpen(true)}
                   onStats={() => setStatsOpen(true)}
                   onTree={() => setTreeOpen(v => !v)}
+                  onTerminal={() => terminal.toggle(planKey)}
+                  terminalOpen={_TERM_entryOf(terminal.state, planKey).open}
                   onTweaks={openTweaks}
                   autosave={t.autosave ?? true}
                   onAutosave={v => setTweak("autosave", v)}
@@ -937,6 +974,18 @@ function App() {
           <TweakRow label="plugins" value={widgets.configPath ?? "unavailable"}>
             <TweakButton label="reload widgets" secondary onClick={widgets.reload} />
           </TweakRow>
+        </TweakSection>
+        <TweakSection label="Terminal">
+          {/* Applied on blur (and Enter), not per keystroke: a half-typed path is not a shell. */}
+          <TweakRow label="shell">
+            <input className="twk-field" type="text" spellCheck={false}
+              defaultValue={t.terminalShell ?? ""} placeholder="default ($SHELL)"
+              onBlur={e => handleTerminalShell(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }} />
+          </TweakRow>
+          <TweakToggle label="open with new tab" value={t.terminalAutoOpen ?? false}
+            onChange={v => setTweak("terminalAutoOpen", v)} />
+          <TweakRow label="height" value={`${termHeight} px`} />
         </TweakSection>
         <TweakSection label="Session">
           <TweakSlider label="prompt history" value={t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT}
