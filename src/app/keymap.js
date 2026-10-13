@@ -16,7 +16,9 @@
   // here without adding it there will cause every setKeybinding call for the
   // new id to fail at runtime.
 
-  /** @type {Array<{id: string, label: string, group: string, scope: "global"|"composer", defaultKeys: string[]}>} */
+  // `fromTerminal`: the chord reaches the action even while the terminal
+  // has focus, whatever its modifiers (app/terminal.js `keymapShouldBypass`).
+  /** @type {Array<{id: string, label: string, group: string, scope: "global"|"composer", defaultKeys: string[], fromTerminal?: boolean}>} */
   const KEYMAP_ACTIONS = [
     // Registry order only breaks ties *within* a resolution pass — it is not
     // itself the conflict-resolution order. `resolve()` is two-pass: every
@@ -39,8 +41,8 @@
     { id: "desktop.sidebar.toggle",  label: "Toggle project sidebar",  group: "View",    scope: "global",   defaultKeys: ["ctrl+b", "super+b"] },
     { id: "desktop.tab.new",         label: "New tab",                 group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+t", "super+t"] },
     { id: "desktop.tab.close",       label: "Close tab",               group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+w", "super+w"] },
-    { id: "desktop.tab.next",        label: "Next tab",                group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+tab"] },
-    { id: "desktop.tab.prev",        label: "Previous tab",            group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+shift+tab"] },
+    { id: "desktop.tab.next",        label: "Next tab",                group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+tab"], fromTerminal: true },
+    { id: "desktop.tab.prev",        label: "Previous tab",            group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+shift+tab"], fromTerminal: true },
     { id: "desktop.tab.moveLeft",    label: "Move tab left",           group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+shift+pageup"] },
     { id: "desktop.tab.moveRight",   label: "Move tab right",          group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+shift+pagedown"] },
     { id: "desktop.panel.todo",      label: "Plan kanban",             group: "View",    scope: "global",   defaultKeys: [] },
@@ -53,7 +55,7 @@
     { id: "desktop.update.check",    label: "Check for updates",       group: "View",    scope: "global",   defaultKeys: [] },
     { id: "desktop.chat.collapseAll", label: "Collapse all blocks",    group: "View",    scope: "global",   defaultKeys: [] },
     { id: "desktop.chat.expandAll",  label: "Expand all blocks",       group: "View",    scope: "global",   defaultKeys: [] },
-    { id: "desktop.terminal.toggle", label: "Toggle terminal",       group: "View",    scope: "global",   defaultKeys: ["ctrl+`", "super+`"] },
+    { id: "desktop.terminal.toggle", label: "Toggle terminal",       group: "View",    scope: "global",   defaultKeys: ["ctrl+`", "super+`"], fromTerminal: true },
   ];
 
   // ── Chord algebra ─────────────────────────────────────────────────────────

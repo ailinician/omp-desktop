@@ -92,8 +92,11 @@ pub fn pump(rx: &Receiver<Msg>, mut emit: impl TerminalEmit, stream: &Stream) {
         }
         let emit_at = (!pending.is_empty()).then(|| last_emit.map_or(now, |t| t + MIN_INTERVAL));
         if emit_at.is_some_and(|t| t <= now) {
-            let rest = pending.split_off(pending.len().min(MAX_EVENT));
-            let chunk = std::mem::replace(&mut pending, rest);
+            // An exact-size copy: `pending` keeps its buffer for the next
+            // event, and the ring is charged what the chunk really holds.
+            let n = pending.len().min(MAX_EVENT);
+            let chunk = pending[..n].to_vec();
+            pending.drain(..n);
             let Some((seq, chunk)) = stream.record(chunk) else {
                 return;
             };

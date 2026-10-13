@@ -46,7 +46,7 @@ const INPUT_DEPTH: usize = 1024;
 pub struct SpawnSpec<'a> {
     pub session_id: &'a str,
     pub cwd: &'a Path,
-    pub program: &'a Path,
+    pub program: PathBuf,
     pub shell_args: &'a [String],
     pub cols: u16,
     pub rows: u16,
@@ -103,37 +103,36 @@ impl Pty {
     /// Kill the shell and everything it started at once (SIGKILL), and
     /// silence the terminal: no event follows, and a pump stalled on flow
     /// control exits at once. Blocks briefly (see [`TreeKiller`]).
-    pub fn kill(&self) {
+    fn kill(&self) {
         self.stream.close();
         self.killer.kill();
     }
 
-    /// [`Pty::kill`] for several terminals, with one process-table scan per
-    /// pass for all of them (see [`kill::kill_all`]).
-    pub fn kill_all(ptys: &[Arc<Self>]) {
-        for pty in ptys {
-            pty.stream.close();
+    /// End the terminal the way closing a terminal window does — see
+    /// [`Pty::close_all`].
+    pub fn close(&self) {
+        Self::close_all(&[self]);
+    }
+
+    /// End several terminals the way closing a terminal window does: silence
+    /// them, hang each shell up, give them one shared [`HANGUP_GRACE`] to
+    /// exit, then kill what is left with one process-table scan per pass for
+    /// all of them (see [`kill::kill_all`]). Blocks up to the grace: call off
+    /// the IPC thread.
+    pub fn close_all(ptys: &[&Self]) {
+        let hung_up: Vec<&Self> = ptys.iter().copied().filter(|pty| pty.hang_up()).collect();
+        let deadline = Instant::now() + HANGUP_GRACE;
+        for pty in hung_up {
+            pty.wait_exit_until(deadline);
         }
         let killers: Vec<&TreeKiller> = ptys.iter().map(|pty| &*pty.killer).collect();
         kill::kill_all(&killers);
     }
 
-    /// End the terminal the way closing a terminal window does: silence it,
-    /// hang the shell up, give it up to [`HANGUP_GRACE`] to exit, then
-    /// [`Pty::kill`] what is left. Blocks up to the grace: call off the IPC
-    /// thread. Several terminals share one grace through [`Pty::hang_up`],
-    /// [`Pty::wait_exit_until`] and [`Pty::kill_all`].
-    pub fn close(&self) {
-        if self.hang_up() {
-            self.wait_exit_until(Instant::now() + HANGUP_GRACE);
-        }
-        self.kill();
-    }
-
     /// Silence the terminal and hang the shell up (unix: SIGHUP to its
     /// process group; Windows has no hang-up, the job kill ends it). Returns
     /// whether there is an exit worth waiting for.
-    pub fn hang_up(&self) -> bool {
+    fn hang_up(&self) -> bool {
         self.stream.close();
         #[cfg(unix)]
         {
@@ -146,7 +145,7 @@ impl Pty {
     }
 
     /// Wait until the shell has exited or `deadline` has passed.
-    pub fn wait_exit_until(&self, deadline: Instant) {
+    fn wait_exit_until(&self, deadline: Instant) {
         while self.state() == ShellState::Running && Instant::now() < deadline {
             thread::sleep(HANGUP_POLL);
         }
@@ -187,16 +186,16 @@ const fn size(cols: u16, rows: u16) -> PtySize {
 pub fn spawn(
     emit: impl TerminalEmit + Send + 'static,
     instance: u64,
-    spec: &SpawnSpec<'_>,
+    spec: SpawnSpec<'_>,
 ) -> Result<Pty, String> {
     let pair = native_pty_system()
         .openpty(size(spec.cols, spec.rows))
         .map_err(|e| format!("open pty: {e}"))?;
 
-    let mut cmd = CommandBuilder::new(spec.program);
+    let mut cmd = CommandBuilder::new(&spec.program);
     cmd.args(spec.shell_args);
     cmd.cwd(spec.cwd);
-    shell::apply_env(&mut cmd, spec.program, spec.session_id);
+    shell::apply_env(&mut cmd, &spec.program, spec.session_id);
     let child = pair
         .slave
         .spawn_command(cmd)
@@ -253,7 +252,7 @@ pub fn spawn(
 
     Ok(Pty {
         instance,
-        shell: spec.program.to_path_buf(),
+        shell: spec.program,
         killer,
         master: Mutex::new(pair.master),
         input,

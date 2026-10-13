@@ -127,24 +127,11 @@
     return isExited(entry) && !shellLive(entry, opened);
   }
 
-  /** Drop entries of sessions that no longer exist. */
-  function prune(s, sessionIds) {
-    const live = new Set(sessionIds);
-    const keys = Object.keys(s || {});
-    if (keys.every((k) => live.has(k))) return s;
-    const next = {};
-    for (const k of keys) if (live.has(k)) next[k] = s[k];
-    return next;
-  }
-
   // While xterm has focus, a keydown either goes to the shell or is handed
   // back to the page, where the global keymap (use-keymap.jsx) handles it.
   // The decision follows the *resolved* keymap, so rebinding an action in
   // Settings → Keyboard changes what the terminal lets through.
   const IS_MAC = window.OMP_KEYMAP.detectMac();
-
-  /** Handed to the app whatever their chord (switching tabs, leaving the shell). */
-  const ALWAYS = new Set(["desktop.terminal.toggle", "desktop.tab.next", "desktop.tab.prev"]);
 
   /**
    * The terminal's copy / paste chord for this keydown: `"copy"`,
@@ -171,8 +158,9 @@
    * True when xterm must hand this keydown back to the global keymap
    * (`attachCustomKeyEventHandler` returns false for it, so it bubbles).
    * A chord goes to the app iff it resolves (`OMP_KEYMAP.lookup`) to a
-   * global-scope action and that action is in `ALWAYS`, or the chord has
-   * the `super` modifier, or — off macOS — both `ctrl` and `shift`. Plain
+   * global-scope action marked `fromTerminal` (switching tabs, leaving the
+   * shell), or the chord has the `super` modifier, or — off macOS — both
+   * `ctrl` and `shift`. Plain
    * `ctrl+<key>` and `alt+<key>` stay the shell's (ctrl+w kills a word,
    * ctrl+p is history), as do unbound chords and the platform's copy /
    * paste chords. Chords are normalised exactly like the global keymap
@@ -189,7 +177,7 @@
     if (id === null) return false;
     const action = keymap.KEYMAP_ACTIONS.find((a) => a.id === id);
     if (!action || action.scope !== "global") return false;
-    if (ALWAYS.has(id)) return true;
+    if (action.fromTerminal) return true;
     const mods = chord.split("+").slice(0, -1);
     if (mods.includes("super")) return true;
     return !isMac && mods.includes("ctrl") && mods.includes("shift");
@@ -225,7 +213,6 @@
     isExited,
     shellLive,
     canRestart,
-    prune,
     entryOf,
     keymapShouldBypass,
     clipboardAction,

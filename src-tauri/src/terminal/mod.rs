@@ -46,7 +46,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -64,6 +63,16 @@ struct Tab {
     /// The project folder `start_session` registered.
     folder: Option<PathBuf>,
     slot: Slot,
+}
+
+impl Tab {
+    /// The tab's running shell, if it has one.
+    fn into_shell(self) -> Option<Arc<Pty>> {
+        match self.slot {
+            Slot::Live(pty) => Some(pty),
+            Slot::Idle | Slot::Spawning { .. } => None,
+        }
+    }
 }
 
 enum Slot {
@@ -194,7 +203,7 @@ impl TerminalManager {
         // Both may touch the disk (and the default shell may query the user
         // database): before taking the map again.
         let preference = self.settings.shell();
-        let (program, shell_args) = shell::resolve_shell(Some(preference.as_str()))?;
+        let (program, shell_args) = shell::resolve_shell(&preference)?;
         let cwd = tab_cwd(folder.as_deref())?;
 
         let (instance, replaced) = {
@@ -205,7 +214,7 @@ impl TerminalManager {
             }
             let instance = self.next_instance.fetch_add(1, Ordering::Relaxed);
             // The slot keeps its own copy for `status` while `spawn` below
-            // borrows `program`.
+            // moves `program` into the `Pty`.
             let starting = Slot::Spawning {
                 instance,
                 shell: program.clone(),
@@ -222,10 +231,10 @@ impl TerminalManager {
         let spawned = pty::spawn(
             emit.terminal(id, instance),
             instance,
-            &pty::SpawnSpec {
+            pty::SpawnSpec {
                 session_id: id,
                 cwd: &cwd,
-                program: &program,
+                program,
                 shell_args: &shell_args,
                 cols,
                 rows,
@@ -319,37 +328,35 @@ impl TerminalManager {
     /// ignored. An `open` spawning for it meanwhile closes its own shell.
     /// Blocks up to the grace: call off the IPC thread.
     pub fn close_tab(&self, id: &str) {
-        let removed = self.tabs().remove(id);
-        if let Some(Tab {
-            slot: Slot::Live(pty),
-            ..
-        }) = removed
-        {
-            pty.close();
-        }
+        self.close_tabs(&[id]);
+    }
+
+    /// [`TerminalManager::close_tab`] for exactly these tabs; a tab
+    /// registered meanwhile is left alone. Their shells share one
+    /// [`pty::HANGUP_GRACE`] and each kill pass over the process table (see
+    /// [`Pty::close_all`]).
+    pub fn close_tabs<S: AsRef<str>>(&self, ids: &[S]) {
+        let shells: Vec<Arc<Pty>> = {
+            let mut tabs = self.tabs();
+            ids.iter()
+                .filter_map(|id| tabs.remove(id.as_ref()))
+                .filter_map(Tab::into_shell)
+                .collect()
+        };
+        close_shells(&shells);
     }
 
     /// End every tab, synchronously — for the paths where the process ends
-    /// without running destructors (app exit, an update's relaunch). Every
-    /// shell is hung up first and they share one [`pty::HANGUP_GRACE`]
-    /// before the kills, so exiting takes one grace, not one per tab; the
-    /// kills share each pass over the process table. The manager stays
-    /// usable.
+    /// without running destructors (app exit, an update's relaunch). Like
+    /// [`TerminalManager::close_tabs`], so exiting takes one grace, not one
+    /// per tab. The manager stays usable.
     pub fn shutdown_all(&self) {
         let shells: Vec<Arc<Pty>> = self
             .tabs()
             .drain()
-            .filter_map(|(_, tab)| match tab.slot {
-                Slot::Live(pty) => Some(pty),
-                Slot::Idle | Slot::Spawning { .. } => None,
-            })
+            .filter_map(|(_, tab)| tab.into_shell())
             .collect();
-        let hung_up: Vec<&Arc<Pty>> = shells.iter().filter(|pty| pty.hang_up()).collect();
-        let deadline = Instant::now() + pty::HANGUP_GRACE;
-        for pty in hung_up {
-            pty.wait_exit_until(deadline);
-        }
-        Pty::kill_all(&shells);
+        close_shells(&shells);
     }
 
     /// The shell setting and its default. The default may query the user
@@ -364,6 +371,12 @@ impl TerminalManager {
     pub fn set_shell(&self, shell: &str) -> Result<TerminalSettings, String> {
         self.settings.set_shell(shell)
     }
+}
+
+/// Close the shells of tabs already taken out of the map.
+fn close_shells(shells: &[Arc<Pty>]) {
+    let shells: Vec<&Pty> = shells.iter().map(|pty| &**pty).collect();
+    Pty::close_all(&shells);
 }
 
 fn check_size(cols: u16, rows: u16) -> Result<(), String> {

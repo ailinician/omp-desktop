@@ -19,20 +19,21 @@ const FALLBACK_LANG: &str = "en_US.UTF-8";
 /// an absolute path to an executable file; empty means unset), else
 /// [`default_shell`]. Only the preference is an error — it was typed on
 /// purpose.
-pub fn resolve_shell(preference: Option<&str>) -> Result<(PathBuf, Vec<String>), String> {
+pub fn resolve_shell(preference: &str) -> Result<(PathBuf, Vec<String>), String> {
     resolve_shell_with(preference, default_shell)
 }
 
 /// [`resolve_shell`] with the default passed in, so it needs no process env
 /// or user database. `default` is only called for an unset preference.
 pub fn resolve_shell_with(
-    preference: Option<&str>,
+    preference: &str,
     default: impl FnOnce() -> PathBuf,
 ) -> Result<(PathBuf, Vec<String>), String> {
-    let preference = preference.map(str::trim).filter(|p| !p.is_empty());
-    let shell = match preference {
-        Some(path) => validate_shell(path)?,
-        None => default(),
+    let preference = preference.trim();
+    let shell = if preference.is_empty() {
+        default()
+    } else {
+        validate_shell(preference)?
     };
     let login = shell
         .file_name()
@@ -64,11 +65,10 @@ fn takes_login_args(name: &str, windows: bool) -> bool {
             .is_some_and(|stem| LOGIN_SHELLS.iter().any(|s| stem.eq_ignore_ascii_case(s)))
 }
 
-/// A shell setting the user typed: an absolute path to an executable file
-/// (surrounding whitespace ignored). An empty setting means "default" and is
-/// the caller's to handle; here it is refused like any other non-path.
+/// A shell setting the user typed, already trimmed: an absolute path to an
+/// executable file. An empty setting means "default" and is the caller's to
+/// handle; here it is refused like any other non-path.
 pub fn validate_shell(path: &str) -> Result<PathBuf, String> {
-    let path = path.trim();
     if is_executable_file(Path::new(path)) {
         Ok(PathBuf::from(path))
     } else {
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn a_preference_wins_and_an_empty_one_runs_the_default() {
         let default = || PathBuf::from("/the/default");
-        for empty in [None, Some(""), Some("  ")] {
+        for empty in ["", "  "] {
             assert_eq!(
                 resolve_shell_with(empty, default).unwrap().0,
                 default(),
@@ -198,7 +198,7 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         let typed = format!(" {} ", exe.display());
         let called = std::cell::Cell::new(false);
-        let (shell, args) = resolve_shell_with(Some(&typed), || {
+        let (shell, args) = resolve_shell_with(&typed, || {
             called.set(true);
             default()
         })
@@ -209,8 +209,15 @@ mod tests {
             !called.get(),
             "the default is not resolved for a preference"
         );
-        for bad in ["sh", "./sh", "/definitely/not/a/shell"] {
-            assert!(resolve_shell_with(Some(bad), default).is_err(), "{bad}");
+        // Not absolute, missing, not executable, not a file.
+        for bad in [
+            "sh",
+            "./sh",
+            "/definitely/not/a/shell",
+            "/etc/hosts",
+            "/bin",
+        ] {
+            assert!(resolve_shell_with(bad, default).is_err(), "{bad}");
         }
     }
 

@@ -236,16 +236,6 @@ check("no-op transitions return the same object", () => {
   assert.equal(T.openPanel(s, "a"), s);
   assert.equal(T.applyStatus(s, "a", St(1)), s, "same status again");
   assert.equal(T.closePanel(T.EMPTY, "a"), T.EMPTY);
-  assert.equal(T.prune(s, ["a", "b"]), s);
-});
-
-check("prune drops entries of sessions that no longer exist", () => {
-  let s = T.applyStatus(T.openPanel(opened("a"), "b"), "b", St(1));
-  s = T.prune(s, ["a"]);
-  assert.equal(T.entryOf(s, "a").open, true);
-  assert.deepEqual(T.entryOf(s, "b"), E({}));
-  assert.deepEqual(Object.keys(s), ["a"]);
-  assert.equal(T.applyExit(s, "b", 1, 0), s, "a pruned tab's late exit is ignored");
 });
 
 // ---- key bypass -----------------------------------------------------------

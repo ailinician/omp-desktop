@@ -3395,7 +3395,7 @@
     /** The tab's shell as Rust sees it — `{ instance, shell, state,
      *  exitCode }` — or `null` when none was started (or no Tauri). */
     terminalStatus(sessionId) {
-      return _invokeSafe("terminal_status", { sessionId }, null).then(s => s ?? null);
+      return _invokeSafe("terminal_status", { sessionId }, null);
     },
 
     /** Output of the tab's shell held by Rust after `afterSeq` (0 = all):
@@ -3447,7 +3447,7 @@
     /** Save the shell for new terminals ("" = default). Rust validates and
      *  persists it: `{ ok: true, settings }` or `{ ok: false, error }`. */
     async setTerminalShell(shell) {
-      const res = await _invokeResult("terminal_set_shell", { shell: typeof shell === "string" ? shell.trim() : "" });
+      const res = await _invokeResult("terminal_set_shell", { shell: typeof shell === "string" ? shell : "" });
       return res.ok ? { ok: true, settings: res.value } : res;
     },
 

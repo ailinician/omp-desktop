@@ -69,7 +69,7 @@ function TerminalPanel({ entry, height, hidden, onHeight, onClose, mountRef, onC
               : `exited${entry.status.exitCode == null ? "" : ` (${entry.status.exitCode})`}`}
           </span>
         )}
-        <button type="button" className="term-head-close" title="hide terminal" onClick={onClose}>
+        <button type="button" className="btn icon ghost term-head-close" title="hide terminal" onClick={onClose}>
           <_TP_Icon name="close" size={9} />
         </button>
       </div>
@@ -109,4 +109,4 @@ function TerminalPanels({ sessions, activeId, terminal }) {
   );
 }
 
-Object.assign(window, { TerminalPanel, TerminalPanels });
+Object.assign(window, { TerminalPanels });

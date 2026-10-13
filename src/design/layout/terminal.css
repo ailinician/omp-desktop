@@ -32,14 +32,8 @@
 }
 .term-head-shell + .term-head-exited { margin-left: auto; }
 .term-head-exited { color: var(--fg-4); font-style: italic; }
-.term-head-close {
-  display: grid; place-items: center;
-  width: 18px; height: 18px; margin-left: auto;
-  background: none; border: 0; border-radius: 4px;
-  color: var(--fg-4); cursor: pointer;
-}
-.term-head-exited ~ .term-head-close { margin-left: 0; }
-.term-head-close:hover { background: var(--bg-hover); color: var(--fg); }
+.btn.icon.term-head-close { width: 18px; height: 18px; margin-left: auto; }
+.term-head-exited ~ .btn.term-head-close { margin-left: 0; }
 
 .term-body { flex: 1; min-height: 0; overflow: hidden; }
 /* The inset sits on xterm's own element: FitAddon subtracts that padding

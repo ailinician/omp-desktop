@@ -20,8 +20,8 @@
    (or failed) shell starts a new one; auto-open, height and focus (a
    panel hidden while it holds the focus hands it to the composer).
 
-   Returns `{ state, height, toggle, close, respawn, setHeight, mountFor,
-   focus, copySelection }`. `height` is the panel height every
+   Returns `{ state, height, toggle, close, setHeight, mountFor,
+   copySelection }`. `height` is the panel height every
    panel shares, the `terminalHeight` tweak (its default lives in
    TWEAK_DEFAULTS). Every panel body is watched with a ResizeObserver:
    sidebar, tree, subagent pane and window changes all end in a
@@ -32,8 +32,9 @@ const {
   EMPTY: _UT_EMPTY, openPanel: _UT_open, closePanel: _UT_close, togglePanel: _UT_toggle,
   applyStatus: _UT_applyStatus, applyExit: _UT_applyExit, spawnFailed: _UT_spawnFailed,
   needsSpawn: _UT_needsSpawn, shellLive: _UT_shellLive, canRestart: _UT_canRestart,
-  prune: _UT_prune, entryOf: _UT_entryOf,
+  entryOf: _UT_entryOf,
 } = window.OMP_TERMINAL;
+const { pruneEntries: _UT_pruneEntries } = window.OMP_SESSION_UI;
 const {
   SKIPPED_LINE: _UT_SKIPPED, exitLine: _UT_exitLine, failLine: _UT_failLine, theme: _UT_theme,
   applyWindowsPty: _UT_applyWindowsPty, createXterm: _UT_createXterm, copySelection: _UT_copySelection,
@@ -313,7 +314,7 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
     const fresh = sessionIds.filter((sid) => !seen.current.has(sid));
     seen.current = new Set(sessionIds);
     setState((s) => {
-      let next = _UT_prune(s, sessionIds);
+      let next = _UT_pruneEntries(s, sessionIds);
       if (tweaks.terminalAutoOpen) for (const sid of fresh) next = _UT_open(next, sid);
       return next;
     });
@@ -329,7 +330,7 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
     }
   }, [tweaks.theme, tweaks.accent, fontSize, fit]);
 
-  return { state, height, toggle, close, respawn, setHeight, mountFor, focus, copySelection };
+  return { state, height, toggle, close, setHeight, mountFor, copySelection };
 }
 
 Object.assign(window, { useTerminal });

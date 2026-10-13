@@ -308,14 +308,20 @@ fn stop_session(
 /// End a tab for good: its omp process (with its session grants), widget
 /// runs, git watcher and terminal shell. The one place a tab ends.
 fn end_tab(app: &AppHandle, session_id: &str) {
+    end_tab_but_terminal(app, session_id);
+    app.state::<Arc<terminal::TerminalManager>>()
+        .close_tab(session_id);
+}
+
+/// [`end_tab`] without the terminal, for [`close_all_tabs`], which ends
+/// every terminal at once.
+fn end_tab_but_terminal(app: &AppHandle, session_id: &str) {
     let rule_book = app.state::<Arc<RuleBook>>();
     app.state::<AgentBridge>()
         .stop_session(session_id, &rule_book);
     app.state::<Arc<widgets::WidgetHost>>()
         .session_closed(session_id);
     app.state::<GitWatcherState>().stop(session_id);
-    app.state::<Arc<terminal::TerminalManager>>()
-        .close_tab(session_id);
 }
 
 /// Close a tab (the frontend's `closeSession`) — see [`end_tab`]. `async` +
@@ -327,20 +333,24 @@ async fn close_tab(session_id: String, app: AppHandle) -> Result<(), String> {
         .map_err(|e| format!("join error: {e}"))
 }
 
-/// End every tab the backend knows (omp sessions and terminal tabs). Called
-/// by the webview at boot, before it restores its tabs: tab ids are never
-/// reused across a reload, so whatever is registered then belongs to a
-/// previous document and would otherwise run on unseen.
+/// End every tab the backend knows. Called by the webview at boot, before
+/// it restores its tabs: tab ids are never reused across a reload, so
+/// whatever is registered then belongs to a previous document and would
+/// otherwise run on unseen. The terminal's registry is the tab set:
+/// [`start_session`] registers the tab before it spawns omp, and only
+/// [`end_tab`] (or an app exit) unregisters it. Only the tabs registered at
+/// the start end: one started meanwhile keeps its terminal. Their shells
+/// share one hang-up grace (`TerminalManager::close_tabs`) instead of one
+/// per tab.
 #[tauri::command]
 async fn close_all_tabs(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut ids = app.state::<AgentBridge>().session_ids();
-        ids.extend(app.state::<Arc<terminal::TerminalManager>>().tab_ids());
-        ids.sort_unstable();
-        ids.dedup();
+        let terminal = app.state::<Arc<terminal::TerminalManager>>();
+        let ids = terminal.tab_ids();
         for id in &ids {
-            end_tab(&app, id);
+            end_tab_but_terminal(&app, id);
         }
+        terminal.close_tabs(&ids);
     })
     .await
     .map_err(|e| format!("join error: {e}"))

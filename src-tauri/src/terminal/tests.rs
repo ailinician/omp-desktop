@@ -4,7 +4,6 @@
 use super::kill::process_exists as process_alive;
 use super::pty::HANGUP_GRACE;
 use super::pump::{TerminalEmit, MAX_EVENT, MIN_INTERVAL};
-use super::shell::resolve_shell_with;
 use super::test_support::{open_with, stdout_of, wait_until};
 use super::{Emit, Slot, TerminalManager, TerminalState, TerminalStatus};
 use std::os::unix::fs::PermissionsExt;
@@ -231,10 +230,6 @@ fn manager_with(shell: &str) -> TerminalManager {
     manager
 }
 
-fn temp_dir() -> PathBuf {
-    std::env::temp_dir()
-}
-
 /// `id` registered with the temp dir as its folder, its shell opened.
 fn open(id: &str) -> (TerminalManager, Arc<Collector>) {
     open_with(manager_with(&PLAIN_SHELL), id)
@@ -261,7 +256,7 @@ fn shell_gets_the_registered_folder_and_terminal_env() {
         )
         .unwrap();
 
-    let cwd = std::fs::canonicalize(temp_dir()).unwrap();
+    let cwd = std::fs::canonicalize(std::env::temp_dir()).unwrap();
     // `SHELL` is the program started, not the app's own `$SHELL`.
     let wanted = format!(
         "T=xterm-256color C=truecolor O=1 S=env SH={}\r\n{}",
@@ -528,7 +523,7 @@ fn re_registering_a_tab_keeps_its_shell() {
 fn status_goes_from_starting_to_running_to_exited() {
     let manager = manager_with(&PLAIN_SHELL);
     let out = Arc::new(Collector::default());
-    manager.register_tab("states", Some(temp_dir().as_path()));
+    manager.register_tab("states", Some(std::env::temp_dir().as_path()));
     assert_eq!(manager.status("states"), None);
 
     let pending = TerminalStatus {
@@ -657,6 +652,43 @@ fn shutdown_all_kills_every_shell_and_leaves_the_manager_usable() {
     manager.open(Arc::clone(&out), "down1", 80, 24).unwrap();
     manager.write("down1", "echo AG\"\"AIN\n").unwrap();
     assert!(wait_until(SLOW, || out.text().contains("AGAIN")));
+}
+
+/// `close_tabs` (the `close_all_tabs` command) ends exactly the tabs it is
+/// given: a tab registered after the caller took its snapshot keeps its
+/// registration and its shell.
+#[test]
+fn close_tabs_ends_only_the_listed_tabs() {
+    let (manager, out) = open("listed1");
+    for id in ["listed2", "later"] {
+        manager.register_tab(id, None);
+        manager.open(Arc::clone(&out), id, 80, 24).unwrap();
+    }
+    manager.write("listed1", "echo LA=$$\n").unwrap();
+    manager.write("listed2", "echo LB=$$\n").unwrap();
+    manager.write("later", "echo LC=$$\n").unwrap();
+    assert!(wait_until(SLOW, || ["LA=", "LB=", "LC="]
+        .iter()
+        .all(|m| out.number_after(m).is_some())));
+    let closed = [
+        out.number_after("LA=").unwrap(),
+        out.number_after("LB=").unwrap(),
+    ];
+    let kept = out.number_after("LC=").unwrap();
+
+    manager.close_tabs(&["listed1", "listed2", "never-registered"]);
+
+    for shell in closed {
+        assert!(
+            wait_until(Duration::from_secs(3), || !process_alive(shell)),
+            "shell {shell} survived close_tabs"
+        );
+    }
+    assert_eq!(manager.tab_ids(), ["later"]);
+    assert!(process_alive(kept), "an unlisted tab's shell was killed");
+    manager.write("later", "echo ST\"\"ILL\n").unwrap();
+    assert!(wait_until(SLOW, || out.text().contains("STILL")));
+    manager.close_tab("later");
 }
 
 #[test]
@@ -1038,7 +1070,7 @@ fn close_tab_racing_open_leaves_no_shell_and_no_tab() {
     let manager = manager_with(&shell);
     let out = Arc::new(Collector::default());
     for round in 0..20 {
-        manager.register_tab("race", Some(temp_dir().as_path()));
+        manager.register_tab("race", Some(std::env::temp_dir().as_path()));
         let result = Mutex::new(None);
         concurrently(
             || {
@@ -1075,7 +1107,7 @@ fn overlapping_opens_start_one_shell() {
     let manager = manager_with(&shell);
     let out = Arc::new(Collector::default());
     for round in 0..10 {
-        manager.register_tab("twice", Some(temp_dir().as_path()));
+        manager.register_tab("twice", Some(std::env::temp_dir().as_path()));
         let statuses = Mutex::new(Vec::new());
         let open = || {
             let status = manager
@@ -1100,57 +1132,4 @@ fn overlapping_opens_start_one_shell() {
         );
         manager.close_tab("twice");
     }
-}
-
-/// The setting must name an executable file; anything else is refused, not
-/// silently replaced by the default. Empty means the default, which a
-/// login shell's name gets `-l -i` for like any other.
-#[test]
-fn resolve_shell_takes_the_setting_or_else_the_default() {
-    let login = || vec!["-l".to_owned(), "-i".to_owned()];
-    let sh = || PathBuf::from("/bin/sh");
-    assert_eq!(
-        resolve_shell_with(Some("/bin/sh"), || PathBuf::from("/bin/zsh")).unwrap(),
-        (sh(), login())
-    );
-    assert_eq!(resolve_shell_with(Some(""), sh).unwrap(), (sh(), login()));
-    for pref in [
-        "/definitely/not/a/shell",
-        "/etc/hosts",
-        "sh",
-        "./sh",
-        "/bin",
-    ] {
-        assert!(
-            resolve_shell_with(Some(pref), sh).is_err(),
-            "{pref} must be rejected"
-        );
-    }
-}
-
-#[test]
-fn only_login_shells_get_login_interactive_args() {
-    let dir = TempDir::new("shells");
-    let mut seen = Vec::new();
-    for name in ["bash", "zsh", "fish", "dash", "ksh", "sh", "nu", "pwsh"] {
-        let path = dir.path().join(name);
-        std::fs::write(&path, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let (_, shell_args) = resolve_shell_with(path.to_str(), || unreachable!()).unwrap();
-        seen.push((name, shell_args.len()));
-    }
-
-    assert_eq!(
-        seen,
-        [
-            ("bash", 2),
-            ("zsh", 2),
-            ("fish", 2),
-            ("dash", 2),
-            ("ksh", 2),
-            ("sh", 2),
-            ("nu", 2),
-            ("pwsh", 0),
-        ]
-    );
 }
