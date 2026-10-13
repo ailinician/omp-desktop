@@ -152,25 +152,17 @@ impl ApprovalStore {
         store
     }
 
-    /// Re-read the file, replacing the in-memory approvals.
+    /// Re-read the file, replacing the in-memory approvals. A file that cannot
+    /// be used approves nothing.
     pub fn reload(&mut self) {
         let Some(path) = &self.path else {
             self.approved.clear();
             return;
         };
-        let file: ApprovalFile = json_store::read_or_default(path);
-        self.approved = if file.version == APPROVALS_VERSION {
-            file.approved
-        } else {
-            if file.version != 0 || !file.approved.is_empty() {
-                eprintln!(
-                    "[omp-desktop] {}: unsupported version {}, no widget is approved",
-                    path.display(),
-                    file.version
-                );
-            }
+        self.approved = read_file(path).unwrap_or_else(|e| {
+            eprintln!("[omp-desktop] {e}, no widget is approved");
             BTreeMap::new()
-        };
+        });
     }
 
     /// The fingerprint `id` was approved under, if any.
@@ -191,9 +183,16 @@ impl ApprovalStore {
     /// card; a mismatch means the plugin changed after the card was drawn, so
     /// the approval is refused rather than granted for something unseen.
     ///
+    /// Only `id` is written, into the file as it is on disk now: the in-memory
+    /// map can be older than the file (the user deleted an entry to revoke it
+    /// and has not reloaded yet), and writing it back would undo that. Memory
+    /// keeps such a revoked entry until the next [`Self::reload`], as documented.
+    ///
     /// # Errors
-    /// Stale `presented`, no config directory, or a failed write (the
-    /// in-memory state is then left unchanged).
+    /// Stale `presented`, no config directory, an existing file that cannot
+    /// be used (unreadable, malformed, unknown version — refused rather than
+    /// overwritten, which would drop every other approval), or a failed write.
+    /// The in-memory state is then left unchanged.
     pub fn approve(&mut self, id: &str, presented: &str, current: &str) -> Result<(), String> {
         if presented != current {
             return Err(format!(
@@ -203,20 +202,34 @@ impl ApprovalStore {
         let Some(path) = &self.path else {
             return Err("no app config directory: widget approvals cannot be saved".to_owned());
         };
-        let previous = self.approved.insert(id.to_owned(), current.to_owned());
-        if let Err(e) = write(path, &self.approved) {
-            // Roll back so memory never claims what the file does not hold.
-            match previous {
-                Some(fp) => {
-                    self.approved.insert(id.to_owned(), fp);
-                }
-                None => {
-                    self.approved.remove(id);
-                }
-            }
-            return Err(e);
-        }
+        let mut on_disk =
+            read_file(path).map_err(|e| format!("{e}: fix or delete it to approve widgets"))?;
+        on_disk.insert(id.to_owned(), current.to_owned());
+        write(path, &on_disk)?;
+        self.approved.insert(id.to_owned(), current.to_owned());
         Ok(())
+    }
+}
+
+/// The approvals in the file at `path`. A missing file, or one without a
+/// version and approvals (`{}`), is empty; an unreadable or malformed file,
+/// or one with another version, is an error naming the file.
+fn read_file(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let file: ApprovalFile =
+        serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    if file.version == APPROVALS_VERSION || (file.version == 0 && file.approved.is_empty()) {
+        Ok(file.approved)
+    } else {
+        Err(format!(
+            "{}: unsupported version {}",
+            path.display(),
+            file.version
+        ))
     }
 }
 
@@ -376,6 +389,45 @@ mod tests {
         fs::write(&path, r#"{"version":2,"approved":{"probe":"aa"}}"#).unwrap();
         let store = ApprovalStore::load(Some(path));
         assert_eq!(store.status("probe", "aa"), Approval::Pending);
+    }
+
+    #[test]
+    fn approving_keeps_a_revocation_made_on_disk() {
+        let dir = Scratch::new("revoke");
+        let path = || dir.0.join("widget-approvals.json");
+        let mut store = ApprovalStore::load(Some(path()));
+        store.approve("a", "aa", "aa").unwrap();
+        store.approve("b", "bb", "bb").unwrap();
+        // The user revokes `b` by editing the file, then approves `c` before
+        // reloading: `b` must stay revoked on disk.
+        fs::write(path(), r#"{"version":1,"approved":{"a":"aa"}}"#).unwrap();
+        store.approve("c", "cc", "cc").unwrap();
+        let raw: serde_json::Value = serde_json::from_slice(&fs::read(path()).unwrap()).unwrap();
+        assert_eq!(
+            raw,
+            serde_json::json!({ "version": 1, "approved": { "a": "aa", "c": "cc" } })
+        );
+        store.reload();
+        assert_eq!(store.status("b", "bb"), Approval::Pending);
+        assert_eq!(store.status("c", "cc"), Approval::Approved);
+    }
+
+    #[test]
+    fn approving_never_overwrites_an_unusable_file() {
+        let dir = Scratch::new("unusable");
+        let path = || dir.0.join("widget-approvals.json");
+        for bad in [
+            // A revoke that left a trailing comma.
+            r#"{"version":1,"approved":{"a":"aa",}}"#,
+            r#"{"version":2,"approved":{"a":"aa"}}"#,
+        ] {
+            fs::write(path(), bad).unwrap();
+            let mut store = ApprovalStore::load(Some(path()));
+            let err = store.approve("c", "cc", "cc").unwrap_err();
+            assert!(err.contains("fix or delete"), "{err}");
+            assert_eq!(fs::read_to_string(path()).unwrap(), bad, "file untouched");
+            assert_eq!(store.status("c", "cc"), Approval::Pending);
+        }
     }
 
     #[test]

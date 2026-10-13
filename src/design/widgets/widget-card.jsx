@@ -6,7 +6,7 @@
    exact command is approved, the card for a config-level error, and the
    per-card error boundary. Blocks come from widgets/widget-blocks.jsx. */
 
-const { Icon: _WC_Icon, WidgetBlocks: _WC_Blocks } = window;
+const { Icon: _WC_Icon, WidgetBlocks: _WC_Blocks, OMP_WIDGETS: { argvDisplay: _WC_argvDisplay } } = window;
 
 function _wcTime(ms) {
   if (!ms) return "";
@@ -63,7 +63,9 @@ function WidgetCard({ title, run, onRefresh, onInsert }) {
 
 /** A plugin that has never been approved, or whose command or script
  *  changed since (`changed`), runs nothing until the user approves its exact
- *  argv here. The argv is shown verbatim, one element per line, as text. */
+ *  argv here. The argv is shown one element per line, quoted and escaped
+ *  (OMP_WIDGETS.argvDisplay): this card is the only gate, so a newline, an
+ *  empty argument or a bidi override must not change what the user reads. */
 function WidgetApprovalCard({ title, command, changed, onApprove }) {
   const [busy, setBusy] = React.useState(false);
   const approve = () => {
@@ -89,7 +91,7 @@ function WidgetApprovalCard({ title, command, changed, onApprove }) {
           : "This plugin runs the command below automatically once approved."}
       </div>
       <div className="wdg-argv mono selectable">
-        {(command ?? []).map((arg, i) => <div key={i} className="wdg-argv-line">{arg}</div>)}
+        {(command ?? []).map((arg, i) => <div key={i} className="wdg-argv-line">{_WC_argvDisplay(arg)}</div>)}
       </div>
       <div className="wdg-approval-actions">
         <button className="btn primary" disabled={busy || !onApprove} onClick={approve}>

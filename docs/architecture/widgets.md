@@ -118,7 +118,7 @@ Pure, deterministic and fully unit-tested. The host translates the world into `E
   - Tab timers belong to the active session; global timers survive tab switches.
   - When the window or rail becomes visible again, every interval plugin whose last finish is older than its interval (or that never ran) runs once and is re-armed. A Waiting/Running run counts as fresh.
   - A change to interval, match, scope, enabled or approval rebuilds the plugin's timer.
-- **SessionClosed.** Kills every Running/Waiting key of the session and emits `Removed` for its run states. It drops the session's dirty set, branch memory, context and timers. If the session was active, `view.session` becomes `None`. Global keys are unaffected.
+- **SessionClosed.** Kills every Running/Waiting key of the session and emits `Removed` for its run states. It drops the session's dirty set, branch memory, context and timers. If the session was active, nothing is active until a session the view names is open: `view.session` is kept, so a profile switch, which respawns the tab under the same id without the frontend re-sending its view, makes the reopened session active again (with an `activate` run). Global keys are unaffected.
 - **Config.** Plugins that were removed, or whose approval was revoked, get Kill + Removed for all their keys. A scope change removes the old keys. Other field changes keep the results. Then only the newly runnable plugins activate.
 - **View with window or rail hidden.** No new starts. Running runs finish normally, and their non-interval follow-ups still need Runnable, which a hidden rail fails.
 
@@ -131,7 +131,7 @@ Commands (in `generate_handler!`). Blocking work goes through `spawn_blocking` o
 | `widgets_state` | — | `WidgetsSnapshot` |
 | `widgets_reload` | — | `WidgetsSnapshot` (also emitted as `widgets://config`) |
 | `widgets_approve` | `pluginId: string, fingerprint: string` | `Result<WidgetsSnapshot, String>`; `Err` if the id is unknown or the fingerprint is not the current one (stale approval card) |
-| `widgets_set_view` | `view: { sessionId: string\|null, railVisible: boolean, windowVisible: boolean, hidden: string[] }` | `()`. An unknown session becomes `null`. `hidden` keeps at most 64 ids matching `[a-z0-9-]{1,32}`; others are dropped. |
+| `widgets_set_view` | `view: { sessionId: string\|null, railVisible: boolean, windowVisible: boolean, hidden: string[] }` | `()`. An empty or over-long (>128 bytes) id becomes `null`. A well-formed id of a session that has not started yet is kept and becomes active once that session opens (the tab's first view can arrive before its `start_session` hook). `hidden` keeps at most 64 ids matching `[a-z0-9-]{1,32}`; others are dropped. |
 | `widgets_refresh` | `pluginId: string` | `()` (`Event::Manual`) |
 
 Events (global, via `app.emit`):
@@ -175,14 +175,14 @@ Frontend handling:
   - `"omp-widget-v1\0"`;
   - each argv element, NUL-terminated;
   - for every element that is an absolute path to a regular file: its length and contents, streamed in chunks. A file over 8 MiB contributes `len + mtime` instead.
-- **`ApprovalStore`.** `{ "version": 1, "approved": { "<id>": "<fingerprint>" } }`, written with `json_store::write_atomic` and read with `read_or_default`.
+- **`ApprovalStore`.** `{ "version": 1, "approved": { "<id>": "<fingerprint>" } }`, written with `json_store::write_atomic`. `approve` re-reads the file and writes only the approved id into it, so an entry the user deleted to revoke stays deleted even before a reload (memory keeps it until `reload`); a file that exists but is unreadable, malformed or of another version approves nothing on `reload` and makes `approve` fail instead of being overwritten.
 - **Recheck before every spawn.** The fingerprint is recomputed in the worker, before `run_plugin`.
 
 **Threat model.** Approval is enforced in Rust. The webview initiates approving (`widgets_approve(pluginId, fingerprint)`), just as it answers tool approvals:
 
 - **Compromised webview.** It could approve a plugin, but it can already send prompts and answer tool approvals, so this adds no new power.
-- **What approval defends against.** Config or script changes made outside the desktop UI, e.g. the agent writing `widgets.json` or a widget script under write-mode approval.
-- **What it does not defend against.** `widget-approvals.json` is a user file like `approval-rules/`. Anything with arbitrary user-file write access can edit it, as it can edit `~/.bashrc`.
+- **What approval defends against.** Changes to a plugin's `command` or script made outside the desktop UI, e.g. the agent writing `widgets.json` or a widget script under write-mode approval.
+- **What it does not defend against.** `widget-approvals.json` is a user file like `approval-rules/`. Anything with arbitrary user-file write access can edit it, as it can edit `~/.bashrc`. The rest of an entry (`match`, `triggers`, `intervalMs`, `timeoutMs`, `scope`, `title`, `enabled`) is not fingerprinted and takes effect on reload without a new approval.
 
 ## Runner (`run.rs`)
 

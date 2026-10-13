@@ -754,9 +754,6 @@ impl Scheduler {
         if self.sessions.remove(session).is_none() {
             return;
         }
-        if self.view.session.as_deref() == Some(session) {
-            self.view.session = None;
-        }
         self.purge(|k| k.scope_key == session, actions);
         self.refresh(now, actions);
         self.promote(actions);
@@ -1246,7 +1243,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_the_active_session_stops_everything_until_another_is_active() {
+    fn closing_the_active_session_stops_everything_until_it_reopens() {
         let mut h = H::settled(vec![plugin(
             "t",
             Scope::Tab,
@@ -1263,8 +1260,8 @@ mod tests {
         );
         assert_eq!(starts(&h.manual("t")), vec![]);
         assert_eq!(starts(&h.turn_end("s1")), vec![]);
-        // A view naming the closed session waits for it to be opened again.
-        assert_eq!(starts(&h.activate(Some("s1"))), vec![]);
+        // A profile switch respawns the tab under the same id and the
+        // frontend does not re-send its view: the reopened id is active again.
         assert_eq!(
             starts(&h.open("s1", "/p")),
             vec![("s1", "t", "s1", Activate)],

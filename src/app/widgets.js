@@ -4,6 +4,8 @@
 //                              what a click may do
 //   runKey / mergeRun / cardRun / parsedLast
 //                              the hook's run bookkeeping (events → card props)
+//   hiddenPluginIds(tweaks, ids) / argvDisplay(arg)
+//                              Tweaks-hidden plugins; approval-card argv text
 // User guide and schema: docs/widgets.md. Which plugin runs when (triggers,
 // matching, approval, scheduling) lives in Rust (src-tauri/src/widgets/);
 // every output-schema rule lives here so tests/test-widgets.mjs covers it.
@@ -81,7 +83,7 @@
     number: (b) => { const value = num(b.value); if (value === null) return null; const out = { type: "number", label: scalar(b.label, LIMITS.short), value }; const unit = clip(b.unit, LIMITS.short); if (unit) out.unit = unit; return out; },
     progress: (b) => { const value = num(b.value); if (value === null) return null; const max = Math.max(1, num(b.max) ?? 1); return { type: "progress", label: scalar(b.label, LIMITS.short), value: Math.min(Math.max(0, value), max), max }; },
     text: (b) => { const text = clip(b.text, LIMITS.long); if (!text) return null; const out = { type: "text", text }; const insert = clip(b.insert, LIMITS.long); if (insert) out.insert = insert; return out; },
-    kv: (b) => { const rows = (Array.isArray(b.rows) ? b.rows : []).filter(r => r && typeof r.k === "string" && isScalar(r.v)).slice(0, LIMITS.rows).map(r => ({ k: clip(r.k, LIMITS.short), v: scalar(r.v, LIMITS.short) })); if (!rows.length) return null; const out = { type: "kv", rows }; const title = clip(b.title, LIMITS.short); if (title) out.title = title; return out; },
+    kv: (b) => { const rows = (Array.isArray(b.rows) ? b.rows : []).filter(r => r && isScalar(r.k) && isScalar(r.v)).slice(0, LIMITS.rows).map(r => ({ k: scalar(r.k, LIMITS.short), v: scalar(r.v, LIMITS.short) })); if (!rows.length) return null; const out = { type: "kv", rows }; const title = clip(b.title, LIMITS.short); if (title) out.title = title; return out; },
     list: (b) => { const items = (Array.isArray(b.items) ? b.items : []).map(item).filter(Boolean).slice(0, LIMITS.items); if (!items.length) return null; const out = { type: "list", items }; const title = clip(b.title, LIMITS.short); if (title) out.title = title; const limit = Math.min(Math.floor(num(b.limit) ?? 0), LIMITS.items); if (limit >= 1) out.limit = limit; return out; },
     // A non-http(s) url keeps the block as plain text (no `url`, no button).
     link: (b) => {
@@ -132,7 +134,30 @@
   }
 
   // Namespaced per source so #52's extension widgets can use `widget:ext:<key>`.
-  const tweakKey = (id) => `widget:plugin:${id}`;
+  const TWEAK_PREFIX = "widget:plugin:";
+  const tweakKey = (id) => `${TWEAK_PREFIX}${id}`;
+  // hiddenPluginIds: every plugin id whose Tweaks toggle is off, read from the
+  // tweak keys rather than the loaded config — a plugin missing from the
+  // config (a broken reload, the first view before the snapshot) must still
+  // be hidden once a reload brings it back, before the hook re-sends the view.
+  // Ids of `pluginIds` (the current config) come first, in its order, so the
+  // backend's cap on hidden ids never drops a loaded plugin for stale keys.
+  function hiddenPluginIds(tweaks, pluginIds) {
+    const off = new Set();
+    for (const [k, v] of Object.entries(tweaks ?? {})) {
+      if (v === false && k.startsWith(TWEAK_PREFIX) && k.length > TWEAK_PREFIX.length) off.add(k.slice(TWEAK_PREFIX.length));
+    }
+    const known = (pluginIds ?? []).filter(id => off.delete(id));
+    return known.concat([...off].sort());
+  }
+
+  // argvDisplay: one command element as the approval card shows it — quoted,
+  // with control, invisible and direction-changing characters escaped, so a
+  // newline cannot pose as an argument boundary, an empty argument stays
+  // visible and a bidi override cannot reorder what the user reads.
+  const INVISIBLE = /[\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff\ufff9-\ufffb]/g;
+  const argvDisplay = (arg) => JSON.stringify(String(arg ?? ""))
+    .replace(INVISIBLE, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 
   // ── run bookkeeping (RunView events → card props) ─────────────────────
   // A RunView's seq grows by one per start; within one seq the phase only
@@ -189,7 +214,7 @@
   }
 
   window.OMP_WIDGETS = {
-    parseOutput, insertText, safeUrl, appendToDraft, tweakKey, relativeTime,
+    parseOutput, insertText, safeUrl, appendToDraft, tweakKey, hiddenPluginIds, argvDisplay, relativeTime,
     runKey, mergeRun, parsedLast, cardRun,
   };
 })();

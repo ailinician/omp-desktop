@@ -115,9 +115,9 @@ check("blank and non-decimal numeric strings are skipped, never shown as 0 or he
   const p = out({ version: 1, blocks: [{ type: "progress", label: "p", value: 1, max: "" }] });
   assert.equal(p.widget.blocks[0].max, 1, "blank max falls back to 1");
 });
-check("kv rows need a string k and a scalar v", () => {
-  const r = out({ version: 1, blocks: [{ type: "kv", rows: [{ k: "a", v: "b" }, { k: 1, v: "x" }, { k: "c" }, "junk"] }] });
-  assert.deepEqual(r.widget.blocks[0].rows, [{ k: "a", v: "b" }]);
+check("kv rows need a scalar k and v; a number or boolean k is coerced", () => {
+  const r = out({ version: 1, blocks: [{ type: "kv", rows: [{ k: "a", v: "b" }, { k: 2024, v: "x" }, { k: true, v: 1 }, { k: null, v: "y" }, { k: {}, v: "z" }, { k: "c" }, "junk"] }] });
+  assert.deepEqual(r.widget.blocks[0].rows, [{ k: "a", v: "b" }, { k: "2024", v: "x" }, { k: "true", v: "1" }]);
 });
 check("inherited Object.prototype keys are not block types", () => {
   const r = out({ version: 1, blocks: [{ type: "__proto__" }, { type: "constructor" }, { type: "toString" }, { type: "text", text: "ok" }] });
@@ -230,6 +230,31 @@ check("appendToDraft on an empty draft, or with an empty insert", () => {
 });
 check("tweakKey is namespaced per widget source", () => {
   assert.equal(W.tweakKey("git"), "widget:plugin:git");
+});
+check("hiddenPluginIds reads every switched-off plugin from the tweaks, loaded ones first", () => {
+  const tweaks = {
+    [W.tweakKey("zeta")]: false, // not in the config right now: still hidden
+    [W.tweakKey("git")]: false,
+    [W.tweakKey("mcp")]: true,
+    [W.tweakKey("")]: false,
+    "widget:ext:x": false,
+    showRadar: false,
+    [W.tweakKey("alpha")]: false,
+    [W.tweakKey("hello")]: false,
+  };
+  assert.deepEqual(W.hiddenPluginIds(tweaks, ["hello", "mcp", "git"]), ["hello", "git", "alpha", "zeta"]);
+  assert.deepEqual(W.hiddenPluginIds(tweaks, []), ["alpha", "git", "hello", "zeta"]);
+  assert.deepEqual(W.hiddenPluginIds({}, ["git"]), []);
+  assert.deepEqual(W.hiddenPluginIds(undefined, undefined), []);
+});
+check("argvDisplay quotes each element and escapes what could hide or fake an argument", () => {
+  assert.equal(W.argvDisplay("bash"), '"bash"');
+  assert.equal(W.argvDisplay(""), '""', "an empty argument stays visible");
+  assert.equal(W.argvDisplay("a\nb"), '"a\\nb"', "a newline cannot pose as a second argument");
+  assert.equal(W.argvDisplay('say "hi" \\ ok'), '"say \\"hi\\" \\\\ ok"');
+  assert.equal(W.argvDisplay("x\u202Ehs.lmth"), '"x\\u202ehs.lmth"', "bidi override");
+  assert.equal(W.argvDisplay("a\u200Bb\u0085c\u2028d\uFEFF"), '"a\\u200bb\\u0085c\\u2028d\\ufeff"');
+  assert.equal(W.argvDisplay("~/ä €"), '"~/ä €"', "ordinary text is untouched");
 });
 // ── scalar coercion ───────────────────────────────────────────────────────
 check("kv.v coerces string, number, boolean; drops null/object", () => {

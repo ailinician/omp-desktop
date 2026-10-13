@@ -244,21 +244,25 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// `scheme://userinfo@host` → the userinfo.
+    /// `scheme://userinfo@host` → the userinfo. The authority runs to the
+    /// first `/`, `?` or `#`, and the userinfo to its *last* `@`, as in URL
+    /// parsers and curl: `https://u:p@ss@host` has the password `p@ss`.
     fn userinfo(&mut self, start: usize, end: usize) {
         let word = &self.text[start..end]; // `&'a`, independent of the `&mut self` below
         let mut search = 0;
         while let Some(found) = word[search..].find("://") {
             let info_start = search + found + 3;
             let rest = &word.as_bytes()[info_start..];
-            let stop = rest
+            let authority = rest
                 .iter()
-                .position(|b| matches!(b, b'/' | b'?' | b'#' | b'@'))
+                .position(|b| matches!(b, b'/' | b'?' | b'#'))
                 .unwrap_or(rest.len());
-            if rest.get(stop) == Some(&b'@') {
-                self.mask(start + info_start, start + info_start + stop);
+            if let Some(at) = rest[..authority].iter().rposition(|&b| b == b'@') {
+                self.mask(start + info_start, start + info_start + at);
             }
-            search = info_start + stop;
+            // Not past the authority: its end can be the `/` of the next
+            // URL's `://` in the same word.
+            search = info_start;
         }
     }
 
@@ -406,6 +410,15 @@ mod tests {
             "cloning https://[REDACTED]@gitlab.example/g/r.git failed"
         );
         assert_untouched("see https://example.test/path?q=a@b");
+    }
+
+    #[test]
+    fn url_userinfo_runs_to_the_last_at_of_the_authority() {
+        let out = assert_masked("fatal: https://u:SY@NTH@h/x?q=a@b", &["SY", "NTH"]);
+        assert_eq!(out, "fatal: https://[REDACTED]@h/x?q=a@b");
+        // Two URLs in one word: the second one's userinfo is still found.
+        let out = assert_masked("https://h,https://u:SYNTH@h2/", &["SYNTH"]);
+        assert_eq!(out, "https://h,https://[REDACTED]@h2/");
     }
 
     #[test]

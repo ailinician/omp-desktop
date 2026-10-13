@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """omp-desktop rail widget that calls one MCP tool over stdio and shows its
-text result. Run with `uv run --no-project --no-config --with mcp mcp-tool.py`
-(the flags keep uv from reading the untrusted project's pyproject.toml,
-uv.toml or .venv) or install `mcp`. Edit SERVER and TOOL in main();
-arguments come from the widget context. Contract: docs/widgets.md."""
+text result. Run with
+`uv run --directory ~/.omp-desktop/widgets --no-project --no-config --with mcp mcp-tool.py`
+or install `mcp`. `--directory` keeps uv out of the untrusted project: without
+it uv still runs the interpreter of a `.venv` found in the project or any of
+its parents, even with `--no-project`. `--no-project`/`--no-config` keep it
+from reading pyproject.toml, uv.toml and .python-version. Edit SERVER and
+TOOL in main(); arguments come from the widget context. Contract:
+docs/widgets.md."""
 import asyncio, json, os, sys
 
 async def main():

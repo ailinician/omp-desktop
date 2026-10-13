@@ -88,10 +88,10 @@ function useWidgets({ bridge, activeSessionId, railVisible, tweaks }) {
     return () => document.removeEventListener("visibilitychange", onChange);
   }, []);
 
-  // Plugins whose Tweaks toggle is off: they neither run nor render.
-  const hiddenKey = config.plugins
-    .filter(p => tweaks[_UW.tweakKey(p.id)] === false)
-    .map(p => p.id).join("\0");
+  // Plugins whose Tweaks toggle is off: they neither run nor render. Taken
+  // from the tweak keys, not the config, so a plugin the config lacks right
+  // now stays hidden when a reload brings it back (see hiddenPluginIds).
+  const hiddenKey = _UW.hiddenPluginIds(tweaks, config.plugins.map(p => p.id)).join("\0");
   const hiddenIds = React.useMemo(() => (hiddenKey ? hiddenKey.split("\0") : _UW_NO_IDS), [hiddenKey]);
   const sessionId = activeSessionId || null;
   // Sent only when a field changes: the deps are the view's own values.

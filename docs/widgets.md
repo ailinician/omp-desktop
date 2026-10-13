@@ -109,11 +109,11 @@ A plugin never runs until you approve it. Approving pins the plugin's **fingerpr
 - every `command` element (after `~/` expansion), and
 - the contents of every element that is an absolute path to a regular file, such as the script in `["bash", "~/.omp-desktop/widgets/git.sh"]`. A file larger than 8 MiB contributes its size and modification time instead.
 
-The rail shows an approval card for each enabled plugin whose fingerprint is not approved, regardless of `match`. The card lists the command, one argument per line. If the plugin was approved before under a different fingerprint, the card says that it changed since you approved it.
+The rail shows an approval card for each enabled plugin whose fingerprint is not approved, regardless of `match`. The card lists the command, one argument per line, each in double quotes with line breaks, control characters and invisible or direction-changing Unicode characters escaped (`\n`, `\u202e`), so what you read is exactly what will run. If the plugin was approved before under a different fingerprint, the card says that it changed since you approved it.
 
 Before **every** run, the desktop recomputes the fingerprint. If anything changed (the command in `widgets.json` after a reload, or the script file on disk), nothing is started. The card shows `plugin changed since it was approved — approve it again`, and the approval card comes back.
 
-Approvals are stored in `<app config>/widget-approvals.json`, as `{ "version": 1, "approved": { "<id>": "<fingerprint>" } }`. To revoke one, delete its line, or the file, and click "reload widgets".
+Approvals are stored in `<app config>/widget-approvals.json`, as `{ "version": 1, "approved": { "<id>": "<fingerprint>" } }`. To revoke one, delete its entry (keep the JSON valid), or the file, and click "reload widgets". Approving writes only that plugin's entry into the file as it is on disk, so a revocation you have not reloaded yet stays revoked. If the file exists but is not valid JSON or has another `version`, no plugin is approved, and approving is refused until you fix or delete it.
 
 ## When a plugin runs
 
@@ -285,13 +285,14 @@ A card keeps its previous successful result visible, dimmed, while a new run is 
 
 **What approval protects against.** Changes made outside the desktop UI. Examples:
 
-- an agent with write access, or a script you ran, edits `widgets.json` (after the next reload);
+- an agent with write access, or a script you ran, edits a plugin's `command` in `widgets.json` (after the next reload);
 - someone edits an approved script file.
 
 Neither runs until you approve the new fingerprint in the rail. This matters because an agent working in a project can write files outside it, including `~/.omp-desktop/widgets/` and the app config directory, unless your setup prevents it.
 
 **What approval does not protect against:**
 
+- **The rest of the entry.** The fingerprint pins only `command` and the files it names. Edits to `match`, `triggers`, `intervalMs`, `timeoutMs`, `scope`, `title` and `enabled` take effect on the next reload without a new approval. So whoever can edit `widgets.json` can, for example, widen an approved plugin's `match.path` to `/` so that it runs in every project, untrusted clones included, or turn an approved plugin you disabled back on. Approve only commands you are willing to run in any project.
 - **Files the fingerprint does not cover.**
   - A program resolved via `PATH` (`bash`, `python3`, `node`) is hashed by name only.
   - So is anything the script loads by itself: modules, sourced files, config files, or packages fetched by `uv`/`npx`.
@@ -303,7 +304,7 @@ Neither runs until you approve the new fingerprint in the rail. This matters bec
 - **Hostile project contents.** The working directory is the project, which you should treat as untrusted: a cloned repo can contain any file. Make sure nothing from it is imported or executed:
   - **Python:** run with `python3 -I`. It ignores the working directory, the `PYTHON*` variables and the user site-packages. `python3 -c` and `python3 -` otherwise put the working directory on `sys.path`, so a repo's `json.py` would run. With `-I`, neither the working directory nor the script's directory is put on the path.
   - **Node** loads project code only if your script `require`s/`import`s a relative path.
-  - **`uv`** reads `pyproject.toml`, `uv.toml` and `.venv` from the working directory unless you pass `--no-project --no-config`.
+  - **`uv`** runs the interpreter of a `.venv` it finds in the working directory or any of its parents, even with `--no-project`, and otherwise reads `pyproject.toml`, `uv.toml` and `.python-version` there. Pass `--directory <your widgets dir>` so uv never looks at the project, plus `--no-project --no-config`.
   - **`npx`/`npm`** read the project's `.npmrc` and `node_modules`. Start them with another working directory.
   - **Arguments:** give script arguments as absolute paths too.
 
@@ -336,7 +337,7 @@ Put them in `~/.omp-desktop/widgets/`, one executable per widget, and reference 
 - `git.sh`: branch (or `detached @ <sha>`), upstream, changed files, ahead/behind, and the unpushed commits; with no upstream, the recent commits instead. Click `+` on a commit to insert `<sha> <subject>`. Needs `bash`, `git` and `python3` (for JSON escaping). It runs git with `GIT_OPTIONAL_LOCKS=0`, so it never takes `.git/index.lock` from under the agent's own `git add`/`commit`.
 - `hello.py`: Python 3, standard library only. Echoes the context as key/value rows; the remote is shown without its password, because the desktop already removed it.
 - `hello.mjs`: the same in Node ≥ 18.
-- `mcp-tool.py`: calls one MCP tool over stdio and shows its text result. Started with `uv run --no-project --no-config --with mcp`, and it starts the MCP server (`npx`) in your home directory, so nothing from the project is used.
+- `mcp-tool.py`: calls one MCP tool over stdio and shows its text result. Started with `uv run --directory ~/.omp-desktop/widgets --no-project --no-config --with mcp`, and it starts the MCP server (`npx`) in your home directory, so nothing from the project is used.
 
 ## MCP
 

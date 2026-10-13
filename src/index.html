@@ -161,8 +161,9 @@
 
   <!-- Rail widget plugin output contract (schema v1, insert/append text, run
        bookkeeping). Dependency-free IIFE; app/use-widgets.jsx,
-       design/widgets/widget-blocks.jsx and app-live.jsx destructure
-       window.OMP_WIDGETS at top level; composer.jsx reads it late-bound. -->
+       design/widgets/widget-blocks.jsx, design/widgets/widget-card.jsx and
+       app-live.jsx destructure window.OMP_WIDGETS at top level; composer.jsx
+       reads it late-bound. -->
   <script src="app/widgets.js"></script>
 
   <!-- Design components (unchanged — from src/design/ copy) -->
@@ -213,7 +214,8 @@
   <script type="text/babel" src="design/subagents/subagent-pane.jsx"></script>
   <script type="text/babel" src="design/subagents/subagent-rail-card.jsx"></script>
   <!-- Rail widget plugin cards (#49). widget-blocks.jsx destructures
-       window.Icon and window.OMP_WIDGETS; widget-card.jsx destructures
+       window.Icon, window.useSaNow (subagent-bits.jsx) and window.OMP_WIDGETS;
+       widget-card.jsx destructures window.Icon, window.OMP_WIDGETS and
        window.WidgetBlocks — order matters. -->
   <script type="text/babel" src="design/widgets/widget-blocks.jsx"></script>
   <script type="text/babel" src="design/widgets/widget-card.jsx"></script>

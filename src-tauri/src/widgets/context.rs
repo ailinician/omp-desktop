@@ -177,8 +177,10 @@ mod tests {
 
     #[test]
     fn outside_repo_has_project_but_empty_branch_and_remote() {
+        // Its own tag: tests run in parallel threads of one process, so a name
+        // shared with a `TmpRepo` would make this directory a repository.
         let dir =
-            std::env::temp_dir().join(format!("omp-widgets-ctx-plain-{}", std::process::id()));
+            std::env::temp_dir().join(format!("omp-widgets-ctx-norepo-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tmp dir");
         let c = session_ctx(Some(&dir));
         let _ = std::fs::remove_dir_all(&dir);

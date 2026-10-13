@@ -4,6 +4,10 @@
 set -euo pipefail
 # Never take .git/index.lock: the agent may be running `git add`/`commit` here.
 export GIT_OPTIONAL_LOCKS=0
+# Never run a command named by the (untrusted) project's git config, and never
+# treat a bare-repo-shaped project directory as a repository: its `config`
+# could set core.fsmonitor, which `git status` executes.
+git() { command git -c safe.bareRepository=explicit -c core.fsmonitor=false "$@"; }
 cd "${OMP_WIDGET_PROJECT:-.}"
 # -I: never import from the (untrusted) project cwd. Bytes are decoded leniently
 # so a non-UTF-8 commit subject cannot abort the script.
