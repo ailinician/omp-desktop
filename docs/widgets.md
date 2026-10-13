@@ -59,8 +59,9 @@ PY
 | `match` | no | All keys optional, all given keys must match. `path`: the project path starts with this prefix. `remote`: the fetch URL of the default remote contains this substring. No `match` = applies to every project. |
 | `triggers` | no | Default all four: `activate` (tab became active or project changed), `turn_end` (streaming went true→false), `branch` (branch chip changed), `manual` (refresh button). `manual` is always allowed even if omitted. |
 | `timeoutMs` | no | Default 10000, clamped 1000..60000. |
-| `intervalMs` | no | Absent or 0 = no periodic refresh. Clamped 15000..3600000 (15 s to 1 h). Only fires for the active tab; paused while the window is hidden. |
+| `intervalMs` | no | Absent or 0 = no periodic refresh. Clamped 15000..3600000 (15 s to 1 h). Only fires for the active tab (for `scope: "global"`: app-wide); paused while the window is hidden. |
 | `enabled` | no | Default true. Disabled plugins are listed but never run. |
+| `scope` | no | `"tab"` (default) or `"global"`. A `tab` plugin keeps one result per tab and refreshes when the tab becomes active. A `global` plugin keeps one result shared by all tabs: its interval timer is not restarted by a tab switch, and `activate` re-runs it only when it has no result yet or the last one is older than `intervalMs` (without `intervalMs` it runs on every `activate`, as a tab plugin does). `match` still applies; global widgets usually omit it. An unknown value rejects the entry. |
 
 At most 32 entries are read; the rest are ignored with one error card. A malformed plugin entry is skipped with an error card for that entry; the other plugins still run. A missing `widgets.json` means no plugins and no error.
 
@@ -115,28 +116,36 @@ Top level:
 | Field | Required | Meaning |
 |---|---|---|
 | `version` | yes | Must be the number `1`; another number → error card "plugin reports version N, this desktop supports 1"; a non-number → "plugin reports an invalid version, …". |
-| `status` | no | `ok` \| `warn` \| `error` \| `neutral` (default `neutral`); tints the card head dot. |
+| `status` | no | `ok` \| `warn` \| `error` \| `info` \| `neutral` (default `neutral`); tints the card head dot. |
 | `blocks` | yes | Array, max 32. |
 
 Blocks:
 
 | `type` | Fields |
 |---|---|
-| `status` | `label`, `value`, `tone` |
+| `status` | `label`, `value` (string \| number \| boolean, coerced to string), `tone` |
 | `number` | `label`, `value` (number), `unit` (optional) |
 | `progress` | `label`, `value`, `max` |
-| `text` | `text` |
-| `kv` | `rows`: `[{ "k", "v" }]` |
-| `list` | `items`: `[{ "label", "detail", "tone", "url", "insert" }]`; only `label` is required |
+| `text` | `text`, `insert` (optional, ≤ 2000; renders a + button to insert the text into the composer) |
+| `kv` | `title` (optional, ≤ 200), `rows`: `[{ "k" (string), "v" (string \| number \| boolean, coerced) }]` |
+| `list` | `title` (optional, ≤ 200), `items`: `[{ "label" (string \| number \| boolean), "detail" (same), "tone", "url", "insert", "time" }]`; only `label` is required |
 | `link` | `label`, `url` |
 
 - An unknown block `type` is skipped; the rest renders and the card shows a small "1 unsupported block" note.
-- `tone` (on `status` and list items): `ok` | `warn` | `error` | `neutral`.
+- `tone` (on `status` and list items): `ok` | `warn` | `error` | `info` | `neutral`.
 - `url`: only `http:`/`https:` are opened (via the system browser); anything else is rendered as plain text.
 - `insert`: text placed into the composer draft on click (appended to the current draft). Without `insert` the click inserts `label` plus `url` (space-separated, if present). Max 2000 chars; truncated.
+- `time` (list items): ISO 8601 string or epoch seconds; invalid values are dropped. Shown right of the label as a compact relative label (`now` under a minute, `5m`, `3h`, `2d`, future `in 12m`, a `YYYY-MM-DD` UTC date beyond 30 days); the tooltip is the ISO timestamp.
+- `label`/`value`/`detail`/`v` accept a string, finite number or boolean and coerce to string; `null` and objects stay invalid and are dropped.
 - Strings are rendered as text, never as HTML or markdown.
-- Limits: `label`/`value`/`detail`/`k`/`v` ≤ 200 chars (truncated), `text` ≤ 2000, list ≤ 50 items, kv ≤ 50 rows. Caps are enforced in the JS parser, not in Rust.
+- Limits: `label`/`value`/`detail`/`k`/`v`/`title` ≤ 200 chars (truncated), `text` ≤ 2000, list ≤ 50 items, kv ≤ 50 rows. Caps are enforced in the JS parser, not in Rust.
 - Process limits: stdout is capped at 256 KiB; the timeout is `timeoutMs`. On timeout or cap the plugin's whole process group is killed.
+
+### Conventions
+
+- A list item is the clickable status row — use it for MRs, CI jobs, branches or any row the user can act on.
+- Empty state: use a `text` block ("No open MRs.", "Pipeline never run.") rather than an empty `list` or `kv`.
+- One config entry per card: each plugin produces one card with up to 32 blocks.
 
 ## Errors
 
@@ -156,8 +165,8 @@ The previous successful result stays visible (dimmed) while a run is in flight. 
 ## Triggers
 
 - One run per (plugin, trigger event). A new trigger while a run is in flight for the same plugin is coalesced: at most one queued follow-up run.
-- Results are per active tab; switching tabs shows that tab's cached results and fires `activate`.
-- `interval`: periodic refresh, active tab only. The plugin's `intervalMs` (clamped 15 s to 1 h) determines the cadence. Paused while the window is hidden; fires one run per interval-plugin on return to visible if the last run is older than the interval.
+- Results are per tab (global plugins: one shared result); switching tabs shows that tab's cached results and fires `activate`.
+- `interval`: periodic refresh, active tab only (global plugins: one timer for the whole app). The plugin's `intervalMs` (clamped 15 s to 1 h) determines the cadence. Paused while the window is hidden; fires one run per interval-plugin on return to visible if the last run is older than the interval (a run still in flight counts as fresh). A queued interval follow-up is dropped when its tab is no longer active or the window is hidden. Reloading widgets recreates the timers, so a changed `intervalMs` takes effect at once.
 
 ## Security
 

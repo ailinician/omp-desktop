@@ -44,9 +44,11 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
     [config.plugins, ctx, ctxCurrent, tweaks]);
 
   // The one place a run is started. `sid` is captured here so a result that
-  // lands after a tab switch still goes to the tab it was started for.
+  // lands after a tab switch still goes to the tab it was started for; a
+  // global plugin's result is keyed by the pseudo-session instead.
   const launch = React.useCallback((sid, plugin, trigger) => {
-    const started = _UWS.start(schedRef.current, sid, plugin.id, trigger);
+    const key = _UWS.keyFor(plugin, sid);
+    const started = _UWS.start(schedRef.current, key, plugin.id, trigger);
     setSched(started.state); schedRef.current = started.state;
     if (!started.run) return;
     bridge.runWidgetPlugin(plugin.id, sid, trigger).then(res => {
@@ -57,20 +59,30 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
         // finish() must always run, or the plugin's slot stays "running" forever.
         parsed = { ok: false, error: "could not parse plugin output: " + String(err?.message ?? err) };
       }
-      const done = _UWS.finish(schedRef.current, sid, plugin.id, started.seq, { ...parsed, durationMs: res.durationMs });
+      const done = _UWS.finish(schedRef.current, key, plugin.id, started.seq, { ...parsed, durationMs: res.durationMs });
       setSched(done.state); schedRef.current = done.state;
-      // A tab closed while its run was in flight must not spawn the follow-up.
-      // An interval follow-up must also check the tab is still active and visible.
-      if (done.next && sessionIdsRef.current.includes(sid)) {
-        if (done.next === "interval" && (sid !== activeSessionIdRef.current || document.visibilityState !== "visible")) return;
-        launch(sid, plugin, done.next);
-      }
+      if (!done.next) return;
+      const global = key === _UWS.GLOBAL;
+      // A tab closed while its run was in flight must not spawn the follow-up;
+      // a global follow-up runs for whichever tab is active now.
+      const nextSid = global ? activeSessionIdRef.current : sid;
+      if (!nextSid || (!global && !sessionIdsRef.current.includes(sid))) return;
+      // A queued interval run was due when it was queued: drop it unless the
+      // window is visible and (tab plugins) the tab is still the active one.
+      if (done.next === "interval" && (document.visibilityState !== "visible" || (!global && sid !== activeSessionIdRef.current))) return;
+      launch(nextSid, plugin, done.next);
     });
   }, [bridge]);
 
   const fire = React.useCallback((trigger) => {
     if (!activeSessionId) return;
-    for (const p of plugins) if (_UW.wantsTrigger(p, trigger)) launch(activeSessionId, p, trigger);
+    const now = Date.now();
+    for (const p of plugins) {
+      if (!_UW.wantsTrigger(p, trigger)) continue;
+      // A global plugin already has a fresh result when the tab merely changed.
+      if (trigger === "activate" && !_UWS.activateDue(p, _UWS.runOf(schedRef.current, _UWS.keyFor(p, activeSessionId), p.id), now)) continue;
+      launch(activeSessionId, p, trigger);
+    }
   }, [activeSessionId, plugins, launch]);
 
   // activate: tab/project changed, or the applicable plugin set changed for it.
@@ -105,56 +117,52 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, stream
     if (p && activeSessionId) launch(activeSessionId, p, "manual");
   }, [plugins, activeSessionId, launch]);
 
-  // Interval timers for plugins with intervalMs (active tab only).
-  // Reset when activeSessionId or plugin set changes. Pause when hidden;
-  // fire one interval run per plugin on return to visible if due.
-  const intervalPluginsRef = React.useRef([]);
-  const intervalTimersRef = React.useRef([]);
-  React.useEffect(() => {
-    const timers = [];
-    const intervalPlugins = plugins.filter(p => p.intervalMs);
-    intervalPluginsRef.current = intervalPlugins;
-
-    const fireIfVisible = (p) => {
-      if (document.visibilityState !== "visible") return;
-      if (activeSessionId) launch(activeSessionId, p, "interval");
+  // Interval timers + visibility catch-up for `list`. Paused while the window
+  // is hidden; on return to visible each due plugin fires once and its timer
+  // restarts, so the next tick cannot queue a second run right behind it.
+  const startIntervals = React.useCallback((list) => {
+    const timers = new Map();
+    const runFor = (p) => {
+      const sid = activeSessionIdRef.current;
+      if (sid) launch(sid, p, "interval");
     };
-
-    for (const p of intervalPlugins) {
-      timers.push(setInterval(() => fireIfVisible(p), p.intervalMs));
-    }
-
+    const arm = (p) => {
+      clearInterval(timers.get(p.id));
+      timers.set(p.id, setInterval(() => { if (document.visibilityState === "visible") runFor(p); }, p.intervalMs));
+    };
+    list.forEach(arm);
     const onVisible = () => {
       if (document.visibilityState !== "visible") return;
       const now = Date.now();
-      for (const p of intervalPluginsRef.current) {
-        const run = _UWS.runOf(schedRef.current, activeSessionId, p.id);
-        if (_UWS.dueNow(run, p.intervalMs, now)) {
-          // Fire the catch-up, then restart the timer so the next tick
-          // does not queue a double run right after this one lands.
-          launch(activeSessionId, p, "interval");
-          // Restart this plugin's timer: clear the old one and set a new one.
-          const idx = intervalPluginsRef.current.findIndex(x => x.id === p.id);
-          if (idx >= 0 && intervalTimersRef.current[idx]) {
-            clearInterval(intervalTimersRef.current[idx]);
-            intervalTimersRef.current[idx] = setInterval(() => fireIfVisible(p), p.intervalMs);
-          }
-        }
+      for (const p of list) {
+        const run = _UWS.runOf(schedRef.current, _UWS.keyFor(p, activeSessionIdRef.current), p.id);
+        if (!_UWS.dueNow(run, p.intervalMs, now)) continue;
+        runFor(p);
+        arm(p);
       }
     };
     document.addEventListener("visibilitychange", onVisible);
-
-    intervalTimersRef.current = timers;
     return () => {
-      for (const t of timers) clearInterval(t);
+      for (const t of timers.values()) clearInterval(t);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [activeSessionId, pluginKey, launch]);
+  }, [launch]);
+
+  // Tab plugins: active tab only; timers restart on a tab switch or when the
+  // plugin set or any intervalMs changes (pluginKey carries the intervals).
+  React.useEffect(
+    () => startIntervals(plugins.filter(p => p.intervalMs && p.scope !== "global")),
+    [activeSessionId, pluginKey, startIntervals]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Global plugins: one timer set for the app, untouched by a tab switch.
+  const globalKey = plugins.filter(p => p.intervalMs && p.scope === "global").map(p => p.id + ":" + p.intervalMs).join("\0");
+  React.useEffect(
+    () => startIntervals(plugins.filter(p => p.intervalMs && p.scope === "global")),
+    [globalKey, startIntervals]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return {
     plugins, configErrors: config.errors, fatal: config.fatal, configPath: config.path,
     allPlugins: config.plugins,
-    runs: sched.runs[activeSessionId] ?? {},
+    runs: { ...sched.runs[_UWS.GLOBAL], ...sched.runs[activeSessionId] },
     refresh, reload,
   };
 }

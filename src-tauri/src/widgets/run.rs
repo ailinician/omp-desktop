@@ -372,6 +372,7 @@ mod tests {
             timeout_ms,
             interval_ms: None,
             enabled: true,
+            scope: "tab".into(),
         }
     }
 

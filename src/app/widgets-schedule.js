@@ -31,8 +31,12 @@
     return { state: put(s, sid, pid, run), next: prev.queued ?? null };
   }
 
+  // Global-scope plugins keep one result for all tabs under this pseudo-session.
+  const GLOBAL = "__global__";
+  const keyFor = (plugin, sid) => (plugin?.scope === "global" ? GLOBAL : sid);
+
   function prune(s, sessionIds) {
-    const keep = new Set(sessionIds);
+    const keep = new Set([...sessionIds, GLOBAL]);
     const runs = Object.fromEntries(Object.entries(s.runs).filter(([sid]) => keep.has(sid)));
     return { runs };
   }
@@ -40,9 +44,13 @@
   // turn_end only counts inside one tab: streaming true → false across a tab switch is not a turn end.
   const turnEnded = (prev, next) => prev.sessionId === next.sessionId && prev.streaming && !next.streaming;
 
-  // dueNow: true when a plugin has never run or its last run is older than its interval.
-  // A run in flight is still "fresh" — its result is pending.
-  const dueNow = (run, intervalMs, now) => !run?.at || (run.state !== "running" && now - run.at >= intervalMs);
+  // dueNow: true when a plugin has never completed a run and none is in flight,
+  // or its last run is older than its interval. A run in flight counts as fresh.
+  const dueNow = (run, intervalMs, now) => run?.state === "running" ? false : !run?.at || now - run.at >= intervalMs;
 
-  window.OMP_WIDGET_SCHEDULE = { EMPTY, start, finish, prune, runOf, turnEnded, dueNow };
+  // activateDue: a tab plugin always runs on activate; a global plugin only when
+  // it has no result yet or its last one is older than intervalMs (no intervalMs → always).
+  const activateDue = (plugin, run, now) => plugin?.scope !== "global" || !plugin.intervalMs || dueNow(run, plugin.intervalMs, now);
+
+  window.OMP_WIDGET_SCHEDULE = { EMPTY, GLOBAL, start, finish, prune, runOf, keyFor, turnEnded, dueNow, activateDue };
 })();

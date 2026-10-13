@@ -8,10 +8,11 @@
 (function () {
   const VERSION = 1;
   const LIMITS = { blocks: 32, items: 50, rows: 50, short: 200, long: 2000 };
-  const TONES = new Set(["ok", "warn", "error", "neutral"]);
+  const TONES = new Set(["ok", "warn", "error", "neutral", "info"]);
   const TRIGGERS = ["activate", "turn_end", "branch", "manual", "interval"];
 
   const clip = (v, max) => (typeof v === "string" ? v.replace(/\u0000/g, "").slice(0, max) : "");
+  const scalar = (v, max) => (typeof v === "string" || typeof v === "number" || typeof v === "boolean" ? String(v).replace(/\u0000/g, "").slice(0, max) : "");
   const tone = (t) => (TONES.has(t) ? t : "neutral");
   const num = (v) => { if (typeof v !== "number" && typeof v !== "string") return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
 
@@ -22,26 +23,35 @@
 
   function item(raw) {
     if (!raw || typeof raw !== "object") return null;
-    const label = clip(raw.label, LIMITS.short);
+    const label = scalar(raw.label, LIMITS.short);
     if (!label) return null;
     const out = { label, tone: tone(raw.tone) };
-    const detail = clip(raw.detail, LIMITS.short);
+    const detail = scalar(raw.detail, LIMITS.short);
     if (detail) out.detail = detail;
     const url = safeUrl(raw.url);
     if (url) out.url = url;
     const insert = clip(raw.insert, LIMITS.long);
     if (insert) out.insert = insert;
+    const time = parseTime(raw.time);
+    if (time != null) out.time = time;
     return out;
+  }
+
+  // parseTime: ISO 8601 string or epoch seconds (number) → epoch ms; anything
+  // outside the Date range (toISOString would throw at render) → null.
+  function parseTime(v) {
+    const ms = typeof v === "number" ? v * 1000 : typeof v === "string" ? Date.parse(v) : NaN;
+    return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? ms : null;
   }
 
   // One normaliser per block type; `null` = skip the block.
   const BLOCKS = Object.assign(Object.create(null), {
-    status: (b) => { const label = clip(b.label, LIMITS.short), value = clip(b.value, LIMITS.short); return label || value ? { type: "status", label, value, tone: tone(b.tone) } : null; },
+    status: (b) => { const label = clip(b.label, LIMITS.short), value = scalar(b.value, LIMITS.short); return label || value ? { type: "status", label, value, tone: tone(b.tone) } : null; },
     number: (b) => { const value = num(b.value); if (value === null) return null; const out = { type: "number", label: clip(b.label, LIMITS.short), value }; const unit = clip(b.unit, LIMITS.short); if (unit) out.unit = unit; return out; },
     progress: (b) => { const value = num(b.value); if (value === null) return null; const max = Math.max(1, num(b.max) ?? 1); return { type: "progress", label: clip(b.label, LIMITS.short), value: Math.min(Math.max(0, value), max), max }; },
-    text: (b) => { const text = clip(b.text, LIMITS.long); return text ? { type: "text", text } : null; },
-    kv: (b) => { const rows = (Array.isArray(b.rows) ? b.rows : []).filter(r => r && typeof r.k === "string" && typeof r.v === "string").slice(0, LIMITS.rows).map(r => ({ k: clip(r.k, LIMITS.short), v: clip(r.v, LIMITS.short) })); return rows.length ? { type: "kv", rows } : null; },
-    list: (b) => { const items = (Array.isArray(b.items) ? b.items : []).map(item).filter(Boolean).slice(0, LIMITS.items); return items.length ? { type: "list", items } : null; },
+    text: (b) => { const text = clip(b.text, LIMITS.long); if (!text) return null; const out = { type: "text", text }; const insert = clip(b.insert, LIMITS.long); if (insert) out.insert = insert; return out; },
+    kv: (b) => { const rows = (Array.isArray(b.rows) ? b.rows : []).filter(r => r && typeof r.k === "string" && (typeof r.v === "string" || typeof r.v === "number" || typeof r.v === "boolean")).slice(0, LIMITS.rows).map(r => ({ k: clip(r.k, LIMITS.short), v: clip(String(r.v), LIMITS.short) })); if (!rows.length) return null; const out = { type: "kv", rows }; const title = clip(b.title, LIMITS.short); if (title) out.title = title; return out; },
+    list: (b) => { const items = (Array.isArray(b.items) ? b.items : []).map(item).filter(Boolean).slice(0, LIMITS.items); if (!items.length) return null; const out = { type: "list", items }; const title = clip(b.title, LIMITS.short); if (title) out.title = title; return out; },
     link: (b) => { const url = safeUrl(b.url); return url ? { type: "link", label: clip(b.label, LIMITS.short) || clip(url, LIMITS.short), url } : null; },
   });
 
@@ -87,5 +97,15 @@
   }
   const tweakKey = (id) => `widget:${id}`;
 
-  window.OMP_WIDGETS = { VERSION, LIMITS, TRIGGERS, parseOutput, applicable, wantsTrigger, insertText, safeUrl, tweakKey };
+  // relativeTime: compact label for a past/future instant. Under a minute is
+  // "now"; whole units are floored; more than 30 days away is the UTC date.
+  function relativeTime(epochMs, nowMs) {
+    const abs = Math.abs(epochMs - nowMs);
+    if (abs < 60_000) return "now";
+    if (abs > 30 * 86_400_000) return new Date(epochMs).toISOString().slice(0, 10);
+    const [n, unit] = abs < 3_600_000 ? [abs / 60_000, "m"] : abs < 86_400_000 ? [abs / 3_600_000, "h"] : [abs / 86_400_000, "d"];
+    return `${epochMs > nowMs ? "in " : ""}${Math.floor(n)}${unit}`;
+  }
+
+  window.OMP_WIDGETS = { VERSION, LIMITS, TRIGGERS, parseOutput, applicable, wantsTrigger, insertText, safeUrl, tweakKey, relativeTime };
 })();

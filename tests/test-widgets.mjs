@@ -243,5 +243,153 @@ check("dueNow is false while a run is in flight", () => {
   assert.equal(S.dueNow({ state: "running", at: 1000 }, 60000, 100000), false, "in-flight counts as fresh");
   assert.equal(S.dueNow({ state: "ok", at: 1000 }, 60000, 100000), true, "ok with old at is due");
 });
+check("dueNow is false for a first run still in flight (no result time yet)", () => {
+  const { state } = S.start(S.EMPTY, "s1", "git", "activate");
+  assert.equal(S.dueNow(S.runOf(state, "s1", "git"), 60000, 100000), false);
+});
+
+// ── scalar coercion ───────────────────────────────────────────────────────
+check("kv.v coerces string, number, boolean; drops null/object", () => {
+  const r = out({ version: 1, blocks: [{ type: "kv", rows: [
+    { k: "ahead", v: 3 },
+    { k: "x", v: true },
+    { k: "y", v: false },
+    { k: "bad", v: {} },
+    { k: "nul", v: null },
+    { k: "ok", v: "str" },
+  ] }] });
+  assert.deepEqual(r.widget.blocks[0].rows, [
+    { k: "ahead", v: "3" },
+    { k: "x", v: "true" },
+    { k: "y", v: "false" },
+    { k: "ok", v: "str" },
+  ]);
+});
+check("status.value coerces scalars", () => {
+  const r = out({ version: 1, blocks: [{ type: "status", label: "x", value: 42 }] });
+  assert.equal(r.widget.blocks[0].value, "42");
+});
+check("item label and detail coerce scalars; null/object labels drop the item", () => {
+  const r = out({ version: 1, blocks: [{ type: "list", items: [
+    { label: 3, detail: true },
+    { label: {}, detail: "dropped" },
+    { label: null },
+    { label: "ok", detail: {} },
+  ] }] });
+  assert.deepEqual(r.widget.blocks[0].items, [
+    { label: "3", tone: "neutral", detail: "true" },
+    { label: "ok", tone: "neutral" },
+  ]);
+});
+
+// ── tone info ─────────────────────────────────────────────────────────────
+check("info tone is preserved", () => {
+  const r = out({ version: 1, status: "info", blocks: [{ type: "status", label: "x", value: "y", tone: "info" }] });
+  assert.equal(r.widget.status, "info");
+  assert.equal(r.widget.blocks[0].tone, "info");
+});
+check("unknown tone still falls back to neutral", () => {
+  assert.equal(out({ version: 1, status: "purple", blocks: [] }).widget.status, "neutral");
+});
+
+// ── title on list and kv ──────────────────────────────────────────────────
+check("title on list and kv is preserved and clipped", () => {
+  const long = "t".repeat(300);
+  const r = out({ version: 1, blocks: [
+    { type: "list", items: [{ label: "a" }], title: "Section A" },
+    { type: "kv", rows: [{ k: "x", v: "y" }], title: long },
+  ] });
+  assert.equal(r.widget.blocks[0].title, "Section A");
+  assert.equal(r.widget.blocks[1].title.length, 200);
+});
+check("absent title means no field", () => {
+  const r = out({ version: 1, blocks: [{ type: "list", items: [{ label: "a" }] }] });
+  assert.equal("title" in r.widget.blocks[0], false);
+});
+
+// ── item time ─────────────────────────────────────────────────────────────
+check("item time: ISO string and epoch seconds become epoch ms; invalid is dropped", () => {
+  const r = out({ version: 1, blocks: [{ type: "list", items: [
+    { label: "a", time: "2026-01-15T12:00:00Z" },
+    { label: "b", time: 1736942400 },
+    { label: "c", time: "not a date" },
+    { label: "d", time: null },
+    { label: "e", time: 1e20 },
+    { label: "f", time: {} },
+  ] }] });
+  const times = r.widget.blocks[0].items.map(i => i.time);
+  assert.deepEqual(times, [Date.parse("2026-01-15T12:00:00Z"), 1736942400000, undefined, undefined, undefined, undefined]);
+  assert.equal(r.widget.blocks[0].items.length, 6, "a bad time never drops the item");
+});
+
+// ── relativeTime ──────────────────────────────────────────────────────────
+const NOW = Date.parse("2026-06-15T12:00:00Z");
+const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
+check("relativeTime: past minutes, hours, days (floored)", () => {
+  assert.equal(W.relativeTime(NOW - 5 * MIN, NOW), "5m");
+  assert.equal(W.relativeTime(NOW - 3 * HOUR, NOW), "3h");
+  assert.equal(W.relativeTime(NOW - 2 * DAY, NOW), "2d");
+  assert.equal(W.relativeTime(NOW - (HOUR - 1), NOW), "59m", "floors, never rounds up to 60m");
+  assert.equal(W.relativeTime(NOW - (DAY - 1), NOW), "23h");
+});
+check("relativeTime: future gets an in prefix", () => {
+  assert.equal(W.relativeTime(NOW + 12 * MIN, NOW), "in 12m");
+  assert.equal(W.relativeTime(NOW + 3 * HOUR, NOW), "in 3h");
+  assert.equal(W.relativeTime(NOW + 2 * DAY, NOW), "in 2d");
+});
+check("relativeTime: under a minute is now, unit boundaries are exact", () => {
+  assert.equal(W.relativeTime(NOW - (MIN - 1), NOW), "now");
+  assert.equal(W.relativeTime(NOW + 30_000, NOW), "now");
+  assert.equal(W.relativeTime(NOW - MIN, NOW), "1m");
+  assert.equal(W.relativeTime(NOW - HOUR, NOW), "1h");
+  assert.equal(W.relativeTime(NOW - DAY, NOW), "1d");
+});
+check("relativeTime: 30 days is still days, beyond is the UTC date (past and future)", () => {
+  assert.equal(W.relativeTime(NOW - 30 * DAY, NOW), "30d");
+  assert.equal(W.relativeTime(NOW - 30 * DAY - 1, NOW), "2026-05-16");
+  assert.equal(W.relativeTime(NOW + 31 * DAY, NOW), "2026-07-16");
+});
+
+// ── insert on text block ──────────────────────────────────────────────────
+check("text block insert is preserved and clipped", () => {
+  const r = out({ version: 1, blocks: [
+    { type: "text", text: "hi", insert: "insert me" },
+    { type: "text", text: "no insert" },
+    { type: "text", text: "long", insert: "x".repeat(3000) },
+  ] });
+  assert.equal(r.widget.blocks[0].insert, "insert me");
+  assert.equal("insert" in r.widget.blocks[1], false);
+  assert.equal(r.widget.blocks[2].insert.length, 2000);
+});
+
+// ── scope / schedule key mapping ──────────────────────────────────────────
+check("keyFor maps global plugins to the pseudo-session and tab plugins to their session", () => {
+  assert.equal(S.keyFor({ scope: "global" }, "s1"), "__global__");
+  assert.equal(S.keyFor({ scope: "tab" }, "s1"), "s1");
+  assert.equal(S.keyFor({}, "s1"), "s1", "absent scope = tab");
+});
+check("a global run is shared across tabs under the pseudo-session key", () => {
+  const key = (sid) => S.keyFor({ scope: "global" }, sid);
+  let { state, seq } = S.start(S.EMPTY, key("s1"), "g", "activate");
+  state = S.finish(state, key("s1"), "g", seq, { ...okResult, at: 5 }).state;
+  assert.equal(S.runOf(state, key("s2"), "g").at, 5, "tab s2 sees the result started from s1");
+  assert.equal(S.start(state, key("s2"), "g", "manual").run, true);
+});
+check("prune never drops __global__ but still drops closed tabs", () => {
+  let { state } = S.start(S.EMPTY, "__global__", "git", "activate");
+  state = S.start(state, "s1", "git", "activate").state;
+  state = S.prune(state, []);
+  assert.ok(S.runOf(state, "__global__", "git"));
+  assert.equal(S.runOf(state, "s1", "git"), undefined);
+});
+check("activateDue: tab plugins always run; global ones only without a fresh result", () => {
+  const g = { scope: "global", intervalMs: 60000 };
+  assert.equal(S.activateDue({ scope: "tab", intervalMs: 60000 }, { state: "ok", at: 99000 }, 100000), true);
+  assert.equal(S.activateDue(g, undefined, 100000), true, "no result yet");
+  assert.equal(S.activateDue(g, { state: "ok", at: 99000 }, 100000), false, "fresh result skips");
+  assert.equal(S.activateDue(g, { state: "ok", at: 40000 }, 100000), true, "stale result runs");
+  assert.equal(S.activateDue(g, { state: "running" }, 100000), false, "first run in flight skips");
+  assert.equal(S.activateDue({ scope: "global" }, { state: "ok", at: 99999 }, 100000), true, "no intervalMs = always");
+});
 
 console.log(`test-widgets: ${passed} checks passed`);

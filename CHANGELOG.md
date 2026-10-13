@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Collapse all / Expand all (#43): `/collapse-all` and `/expand-all` in the command bridge and the prompt box's `/` menu fold or unfold every tool card and thinking block in the current tab at once; blocks that arrive later follow your settings again. Both can be given a key in the shortcuts screen.
 - `/tweaks` opens the Tweaks panel from the command bridge or the prompt box, like the cog in the status bar.
 - Tweaks → Rail: show or hide the context gauge, agent radar, subagents card and minimap individually; the choice is kept across restarts (#51).
-- Rail widget plugins: any executable listed in `<app config>/widgets.json` that prints JSON v1 to stdout renders a card in the ambient rail; runs on tab activate, turn end, branch change, the card's refresh button, or every `intervalMs`; list items can insert text into the composer or open a link; each plugin card has its own toggle under Tweaks → Rail. Bundled examples in `examples/widgets/`, contract in `docs/widgets.md` (#49).
+- Rail widget plugins: any executable listed in `<app config>/widgets.json` that prints JSON v1 to stdout renders a card in the ambient rail; runs on tab activate, turn end, branch change, the card's refresh button, or every `intervalMs`; list items can insert text into the composer or open a link; section titles, relative times, global scope; each plugin card has its own toggle under Tweaks → Rail. Bundled examples in `examples/widgets/`, contract in `docs/widgets.md` (#49).
 
 ### Changed
 

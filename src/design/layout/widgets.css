@@ -7,6 +7,7 @@
 .tone-ok    > .rail-card-head .wdg-dot, .wdg-item.tone-ok .wdg-dot, .wdg-status.tone-ok .wdg-dot    { background: var(--accent); }
 .tone-warn  > .rail-card-head .wdg-dot, .wdg-item.tone-warn .wdg-dot, .wdg-status.tone-warn .wdg-dot  { background: var(--amber); }
 .tone-error > .rail-card-head .wdg-dot, .wdg-item.tone-error .wdg-dot, .wdg-status.tone-error .wdg-dot { background: var(--rose); }
+.tone-info  > .rail-card-head .wdg-dot, .wdg-item.tone-info .wdg-dot, .wdg-status.tone-info .wdg-dot  { background: var(--cyan); }
 .wdg-label { color: var(--fg-4); font-size: var(--d-text-xs); }
 .wdg-value { color: var(--fg-2); font-size: var(--d-text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wdg-status, .wdg-item { display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -25,3 +26,7 @@
 .wdg-link { justify-content: flex-start; height: 22px; }
 .wdg-error { color: var(--rose); font-size: var(--d-text-xs); font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word; }
 .wdg-note { color: var(--fg-5); font-size: var(--d-text-xs); }
+.wdg-section { color: var(--fg-3); font-size: var(--d-text-xs); letter-spacing: .04em; text-transform: uppercase; margin-top: 2px; }
+.wdg-item-time { color: var(--fg-4); font-size: var(--d-text-xs); white-space: nowrap; flex: none; }
+.wdg-text-row { display: flex; align-items: flex-start; gap: 4px; }
+.wdg-text-row .wdg-text { flex: 1; }

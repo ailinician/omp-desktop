@@ -26,6 +26,7 @@ pub struct PluginEntry {
     pub timeout_ms: u64,
     pub interval_ms: Option<u64>,
     pub enabled: bool,
+    pub scope: String,
 }
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -47,6 +48,7 @@ struct RawEntry {
     timeout_ms: Option<u64>,
     interval_ms: Option<u64>,
     enabled: Option<bool>,
+    scope: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -161,13 +163,22 @@ fn validate(raw: RawEntry, index: usize, seen: &[PluginEntry]) -> Result<PluginE
         .timeout_ms
         .unwrap_or(TIMEOUT_DEFAULT_MS)
         .clamp(TIMEOUT_MIN_MS, TIMEOUT_MAX_MS);
-    let interval_ms = raw.interval_ms.filter(|&v| v > 0).map(|v| v.clamp(INTERVAL_MIN_MS, INTERVAL_MAX_MS));
+    let interval_ms = raw
+        .interval_ms
+        .filter(|&v| v > 0)
+        .map(|v| v.clamp(INTERVAL_MIN_MS, INTERVAL_MAX_MS));
     let (match_path, match_remote) = raw.matcher.map_or((None, None), |m| (m.path, m.remote));
     // `title` falls back to the id and the entry keeps both, so one copy is unavoidable.
     let title = match raw.title {
         Some(t) if !t.is_empty() => t,
         _ => id.clone(),
     };
+    let scope = raw.scope.unwrap_or_else(|| "tab".to_string());
+    if scope != "tab" && scope != "global" {
+        return Err(format!(
+            "plugin \"{id}\": scope must be \"tab\" or \"global\""
+        ));
+    }
     Ok(PluginEntry {
         id,
         title,
@@ -178,6 +189,7 @@ fn validate(raw: RawEntry, index: usize, seen: &[PluginEntry]) -> Result<PluginE
         timeout_ms,
         interval_ms,
         enabled: raw.enabled.unwrap_or(true),
+        scope,
     })
 }
 
@@ -351,5 +363,31 @@ mod tests {
         assert_eq!(c.errors.len(), 2, "{:?}", c.errors);
         assert!(c.errors.iter().any(|e| e.contains("#0")), "{:?}", c.errors);
         assert!(c.errors.iter().any(|e| e.contains("#2")), "{:?}", c.errors);
+    }
+
+    #[test]
+    fn scope_defaults_to_tab_and_rejects_unknown_values() {
+        let p = tmp(
+            "scope",
+            br#"{"version":1,"plugins":[
+            {"id":"a","command":["true"]},
+            {"id":"b","command":["true"],"scope":"global"},
+            {"id":"c","command":["true"],"scope":"tab"},
+            {"id":"d","command":["true"],"scope":"window"}
+        ]}"#,
+        );
+        let c = load(&p).expect("ok");
+        let scopes: Vec<_> = c
+            .plugins
+            .iter()
+            .map(|p| (p.id.as_str(), p.scope.as_str()))
+            .collect();
+        assert_eq!(scopes, vec![("a", "tab"), ("b", "global"), ("c", "tab")]);
+        assert_eq!(c.errors.len(), 1, "{:?}", c.errors);
+        assert!(
+            c.errors[0].contains("\"d\"") && c.errors[0].contains("scope"),
+            "{:?}",
+            c.errors
+        );
     }
 }
