@@ -364,16 +364,18 @@ fn close_tab_hangs_up_the_shell_before_killing_it() {
     let marker = dir.path().join("hung");
     let (manager, out) = open("hup");
     // The trap is set by a non-interactive `sh` that replaces the prompt
-    // (same pid, so still the session leader) and waits in a foreground
-    // `sleep`: the hang-up ends the `sleep`, and the wait returns into the
-    // trap. A shell waiting at its prompt is no portable witness: dash
-    // retries its interrupted read and runs a trap only once input arrives,
-    // and bash at a readline prompt exits without running it.
+    // (same pid, so still the session leader) and then waits in the `wait`
+    // builtin, which a trapped signal interrupts at once (POSIX); one that
+    // arrives before it runs at the boundary after `echo`. A shell at its
+    // prompt is no portable witness: dash retries its interrupted read and
+    // runs a trap only once input arrives, and bash at a readline prompt
+    // exits without running it. Nor is a foreground `sleep`: a hang-up that
+    // lands while it is being forked leaves the trap pending until it ends.
     manager
         .write(
             "hup",
             format!(
-                "exec sh -c 'trap \"echo hung > {}; exit\" HUP; echo TR\"\"APPED; sleep 30'\n",
+                "exec sh -c 'trap \"echo hung > {}; exit\" HUP; sleep 30 & echo TR\"\"APPED; wait'\n",
                 marker.display()
             ),
         )
