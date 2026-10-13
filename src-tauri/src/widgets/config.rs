@@ -124,6 +124,26 @@ fn id_ok(id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+fn home_dir() -> Option<String> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var)
+        .and_then(|h| h.into_string().ok())
+        .filter(|h| !h.is_empty())
+}
+
+/// Replaces a leading `~/` in every argv element with `home`. Only the exact
+/// `~/` prefix counts: `~user` and a bare `~` stay untouched. Fails when an
+/// element needs expanding but there is no home directory.
+fn expand_home(command: &mut [String], home: Option<&str>) -> Result<(), ()> {
+    for arg in command {
+        if let Some(rest) = arg.strip_prefix("~/") {
+            let home = home.ok_or(())?;
+            *arg = Path::new(home).join(rest).to_string_lossy().into_owned();
+        }
+    }
+    Ok(())
+}
+
 fn validate(raw: RawEntry, index: usize, seen: &[PluginEntry]) -> Result<PluginEntry, String> {
     let id = raw.id.unwrap_or_default();
     if !id_ok(&id) {
@@ -134,12 +154,14 @@ fn validate(raw: RawEntry, index: usize, seen: &[PluginEntry]) -> Result<PluginE
     if seen.iter().any(|p| p.id == id) {
         return Err(format!("plugin \"{id}\": duplicate id"));
     }
-    let command = raw.command.unwrap_or_default();
+    let mut command = raw.command.unwrap_or_default();
     if command.first().is_none_or(String::is_empty) {
         return Err(format!(
             "plugin \"{id}\": command must be a non-empty argv array"
         ));
     }
+    expand_home(&mut command, home_dir().as_deref())
+        .map_err(|()| format!("plugin \"{id}\": cannot expand ~: no home directory"))?;
     // The working directory is the untrusted project: a relative program path
     // (`./x`, `bin/x`) would resolve inside it.
     let argv0 = command.first().map_or("", String::as_str);
@@ -307,6 +329,49 @@ mod tests {
             "{:?}",
             c.errors
         );
+    }
+
+    #[test]
+    fn leading_tilde_is_expanded_in_every_argv_element() {
+        let mut cmd = ["~/bin/run", "~/conf.json", "~x", "~", "a~/b"].map(String::from);
+        expand_home(&mut cmd, Some("/home/u")).expect("home set");
+        assert_eq!(
+            cmd.to_vec(),
+            [
+                Path::new("/home/u").join("bin/run"),
+                Path::new("/home/u").join("conf.json"),
+                "~x".into(),
+                "~".into(),
+                "a~/b".into(),
+            ]
+            .map(|p| p.to_string_lossy().into_owned())
+        );
+    }
+
+    #[test]
+    fn tilde_without_home_is_an_error_but_plain_commands_pass() {
+        let mut cmd = vec!["~/x".to_string()];
+        assert!(expand_home(&mut cmd, None).is_err());
+        let mut plain = vec!["bash".to_string(), "~x".to_string()];
+        assert!(expand_home(&mut plain, None).is_ok());
+    }
+
+    #[test]
+    fn tilde_command_passes_the_absolute_check() {
+        let Some(home) = home_dir() else { return };
+        let body = br#"{"version":1,"plugins":[
+            {"id":"t","command":["~/.omp-desktop/widgets/x","~/arg"]},
+            {"id":"u","command":["~x"]}
+        ]}"#;
+        let c = load(&tmp("tilde", body)).expect("ok");
+        let expected = |rest: &str| Path::new(&home).join(rest).to_string_lossy().into_owned();
+        assert_eq!(c.plugins.len(), 2, "{:?}", c.errors);
+        assert_eq!(
+            c.plugins[0].command,
+            [expected(".omp-desktop/widgets/x"), expected("arg")]
+        );
+        // `~x` is left alone: a bare program name.
+        assert_eq!(c.plugins[1].command, ["~x"]);
     }
 
     #[test]

@@ -6,12 +6,12 @@ A widget is a small program, in any language, that the desktop runs on demand. I
 
 ## Five-minute start
 
-1. Copy `examples/widgets/hello.py` somewhere stable (or use it in place).
+1. Copy `examples/widgets/hello.py` to `~/.omp-desktop/widgets/` (`mkdir -p ~/.omp-desktop/widgets && chmod +x` as needed; see [Where to keep your widgets](#where-to-keep-your-widgets)).
 2. Open Tweaks → Rail. The `plugins` row shows the path of `widgets.json` (on macOS `~/Library/Application Support/dev.ohMyPi.desktop/widgets.json`). Create that file:
 
    ```json
    { "version": 1, "plugins": [
-     { "id": "hello", "title": "Hello", "command": ["python3", "-I", "/absolute/path/to/hello.py"] }
+     { "id": "hello", "title": "Hello", "command": ["python3", "-I", "~/.omp-desktop/widgets/hello.py"] }
    ] }
    ```
 
@@ -55,7 +55,7 @@ PY
 | `version` | yes | Must be `1`. Anything else rejects the whole file with one error card in the rail. |
 | `id` | yes | `[a-z0-9-]{1,32}`, unique. Also the key of the card's Tweaks toggle (`widget:<id>`). |
 | `title` | no | Shown in the card head; default = `id`. |
-| `command` | yes | argv array; element 0 is a bare program name (resolved via PATH) or an absolute path; a relative path such as `./x` or `bin/x` is rejected, because the working directory is the untrusted project. No shell interpretation. `~` is **not** expanded; write absolute paths, also for script *arguments*. |
+| `command` | yes | argv array; element 0 is a bare program name (resolved via PATH) or an absolute path; a relative path such as `./x` or `bin/x` is rejected, because the working directory is the untrusted project. No shell interpretation. A leading `~/` in any element (program or argument) is expanded to your home directory (`$HOME`, `%USERPROFILE%` on Windows) before the path check; `~user` and `~` alone are left as is. If there is no home directory the entry is reported as an error. Other paths must be absolute. |
 | `match` | no | All keys optional, all given keys must match. `path`: the project path starts with this prefix. `remote`: the fetch URL of the default remote contains this substring. No `match` = applies to every project. |
 | `triggers` | no | Default all four: `activate` (tab became active or project changed), `turn_end` (streaming went true→false), `branch` (branch chip changed), `manual` (refresh button). `manual` is always allowed even if omitted. |
 | `timeoutMs` | no | Default 10000, clamped 1000..60000. |
@@ -179,9 +179,16 @@ The previous successful result stays visible (dimmed) while a run is in flight. 
 - The working directory is the project, which is untrusted (a cloned repo can contain any file). Run interpreters in isolated mode so project files are never imported: `python3 -I` (ignores the cwd, `PYTHON*` variables and user site-packages; `python3 -c` and `python3 -` otherwise put the cwd on `sys.path`, so a repo's `json.py` would run). Node only loads project-local code if your script requires relative paths. Give script *arguments* as absolute paths too. The bundled `git.sh` uses `python3 -I`; `hello.py` and `mcp-tool.py` are started with an absolute script path (`python3 -I <abs path>`, `uv run … <abs path>`), so the interpreter puts the script's own directory, not the cwd, on the path.
 - A plugin runs with your user's permissions and environment: only list programs you trust.
 
+## Where to keep your widgets
+
+Put them in `~/.omp-desktop/widgets/`, one executable per widget, and reference them as `~/.omp-desktop/widgets/<name>` in `widgets.json`.
+
+- Keep them out of project repos: the project is untrusted and widgets run with your permissions.
+- `chmod +x` each script and give it a shebang (or start it through an interpreter, e.g. `["python3", "-I", "~/.omp-desktop/widgets/x.py"]`).
+
 ## Examples
 
-`examples/widgets/` (`widgets.example.json` wires all four; replace `/ABSOLUTE/PATH` with this repository's path):
+`examples/widgets/` (`widgets.example.json` wires all four with `~/.omp-desktop/widgets/...` paths; copy the example scripts there first):
 
 - `git.sh`: branch, upstream, changed files, ahead/behind, unpushed commits (click `+` to insert `<sha> <subject>`). Needs `bash`, `git` and `python3` (for JSON escaping).
 - `hello.py`: Python 3, standard library only; echoes the context as key/value rows.
