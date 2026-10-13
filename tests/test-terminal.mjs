@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Regression script for src/app/terminal.js — the terminal panel's pure
 // parts: per-tab view state (open / created / Rust's status / start error),
-// which chords the global keymap still gets while xterm has focus, the
-// shell label and the panel height clamp.
+// which chords the global keymap still gets while xterm has focus (decided
+// from the resolved keymap), the copy / paste chords, the shell label and
+// the panel height clamp.
 // Run: node tests/test-terminal.mjs
 
 import assert from "node:assert/strict";
@@ -12,12 +13,20 @@ import { dirname, join } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const win = {};
-// keymap.js must load first — terminal.js calls window.OMP_KEYMAP.chordFromEvent
+// keymap.js must load first — terminal.js reads window.OMP_KEYMAP (chords,
+// the resolved bindings, platform detection)
 // eslint-disable-next-line no-new-func
 new Function("window", readFileSync(join(root, "src/app/keymap.js"), "utf8"))(win);
 // eslint-disable-next-line no-new-func
 new Function("window", readFileSync(join(root, "src/app/terminal.js"), "utf8"))(win);
 const T = win.OMP_TERMINAL;
+const K = win.OMP_KEYMAP;
+
+/** Resolve the keymap with `config` (action id → chords) for `fn`, then restore the defaults. */
+function withBindings(config, fn) {
+  K.setResolved(K.resolve(K.KEYMAP_ACTIONS, config));
+  try { fn(); } finally { K.setResolved(K.resolve(K.KEYMAP_ACTIONS, {})); }
+}
 
 let passed = 0;
 function check(label, fn) {
@@ -210,53 +219,120 @@ const ev = (key, mods = "") => ({
   isComposing: false,
 });
 
-check("super+t/w/k/h/b// bypass the terminal", () => {
+// Explicit platform per assertion: the result must not depend on the host.
+const LINUX = false;
+const MAC = true;
+const bypass = (e, isMac = LINUX) => T.keymapShouldBypass(e, isMac);
+
+check("bound super chords bypass on every platform", () => {
   for (const k of ["t", "w", "k", "h", "b", "/", "`"]) {
-    assert.equal(T.keymapShouldBypass(ev(k, "m")), true, `super+${k}`);
+    assert.equal(bypass(ev(k, "m"), LINUX), true, `super+${k}`);
+    assert.equal(bypass(ev(k, "m"), MAC), true, `super+${k} (mac)`);
   }
-  assert.equal(T.keymapShouldBypass(ev("T", "m")), true, "caps lock → super+t");
+  assert.equal(bypass(ev("T", "m")), true, "caps lock → super+t");
 });
 
-check("ctrl+` and ctrl+tab chords bypass", () => {
-  assert.equal(T.keymapShouldBypass(ev("`", "c")), true);
-  assert.equal(T.keymapShouldBypass(ev("Tab", "c")), true);
-  assert.equal(T.keymapShouldBypass(ev("Tab", "cs")), true);
+check("toggle and next/previous tab bypass whatever their modifiers", () => {
+  for (const isMac of [LINUX, MAC]) {
+    assert.equal(bypass(ev("`", "c"), isMac), true, "ctrl+` (toggle)");
+    assert.equal(bypass(ev("Tab", "c"), isMac), true, "ctrl+tab (next tab)");
+    assert.equal(bypass(ev("Tab", "cs"), isMac), true, "ctrl+shift+tab (previous tab)");
+  }
 });
 
-check("shifted variants of bypass keys still bypass (chordFromEvent normalisation)", () => {
+check("a rebound toggle bypasses; its old default stays the shell's", () => {
+  withBindings({ "desktop.terminal.toggle": ["ctrl+j"] }, () => {
+    assert.equal(bypass(ev("j", "c")), true, "ctrl+j is the toggle now");
+    assert.equal(bypass(ev("`", "c")), false, "ctrl+` is unbound now");
+    assert.equal(bypass(ev("`", "m")), false, "super+` is unbound now");
+  });
+  withBindings({ "desktop.terminal.toggle": ["alt+t"] }, () => {
+    assert.equal(bypass(ev("t", "a")), true, "an alt chord still reaches the toggle");
+  });
+});
+
+check("an unbound default no longer steals its chord", () => {
+  withBindings({ "desktop.terminal.toggle": [] }, () => {
+    assert.equal(bypass(ev("`", "c")), false, "ctrl+`");
+  });
+  withBindings({ "desktop.tab.new": [] }, () => {
+    assert.equal(bypass(ev("t", "m")), false, "super+t");
+  });
+});
+
+check("bound ctrl+shift chords bypass off macOS only", () => {
+  assert.equal(bypass(ev("p", "cs"), LINUX), true, "ctrl+shift+p (model backward)");
+  assert.equal(bypass(ev("PageUp", "cs"), LINUX), true, "ctrl+shift+pageup (move tab)");
+  assert.equal(bypass(ev("p", "cs"), MAC), false, "ctrl+shift+p on macOS");
+  withBindings({ "desktop.commands.open": ["ctrl+shift+k"] }, () => {
+    assert.equal(bypass(ev("k", "cs"), LINUX), true, "a rebound ctrl+shift chord");
+    assert.equal(bypass(ev("k", "c"), LINUX), false, "its old ctrl+k default is unbound");
+  });
+});
+
+check("bound plain ctrl and alt chords stay the shell's", () => {
+  for (const isMac of [LINUX, MAC]) {
+    assert.equal(bypass(ev("w", "c"), isMac), false, "ctrl+w kills a word");
+    assert.equal(bypass(ev("t", "c"), isMac), false, "ctrl+t");
+    assert.equal(bypass(ev("k", "c"), isMac), false, "ctrl+k");
+    assert.equal(bypass(ev("p", "c"), isMac), false, "ctrl+p is shell history");
+    assert.equal(bypass(ev("m", "a"), isMac), false, "alt+m");
+    assert.equal(bypass(ev("p", "as"), isMac), false, "shift+alt+p");
+  }
+});
+
+check("unbound chords and plain keys stay the shell's", () => {
+  assert.equal(bypass(ev("Escape")), false, "escape (bound to interrupt, no modifier)");
+  assert.equal(bypass(ev("c", "c")), false, "ctrl+c");
+  assert.equal(bypass(ev("Tab")), false, "plain Tab completes");
+  assert.equal(bypass(ev("Tab", "s")), false, "shift+Tab");
+  assert.equal(bypass(ev("a")), false);
+  assert.equal(bypass(ev("Enter")), false);
+  assert.equal(bypass(ev("t", "ms")), false, "super+shift+t");
+  assert.equal(bypass(ev("t", "ma")), false, "super+alt+t");
+  assert.equal(bypass(ev("x", "cs")), false, "ctrl+shift+x");
+  assert.equal(bypass(ev("~", "m")), false, "super+~ (shifted backtick) is not bound");
+});
+
+check("shifted variants match the bound chord (chordFromEvent normalisation)", () => {
   // German Cmd+Shift+7 → key "/" with shiftKey — shift cleared for non-alpha
-  assert.equal(T.keymapShouldBypass({ key: "/", metaKey: true, shiftKey: true, ctrlKey: false, altKey: false, isComposing: false }), true);
-  // Shifted backtick → "~" — shift cleared, "super+~" in BYPASS
-  assert.equal(T.keymapShouldBypass(ev("~", "m")), true, "super+~ (shifted backtick)");
+  assert.equal(bypass({ key: "/", metaKey: true, shiftKey: true, ctrlKey: false, altKey: false, isComposing: false }), true);
 });
 
-check("shifted letter does not bypass", () => {
-  assert.equal(T.keymapShouldBypass({ key: "T", metaKey: true, shiftKey: true, ctrlKey: false, altKey: false, isComposing: false }), false, "super+shift+t");
+check("a composer-scope action never bypasses", () => {
+  withBindings({ "app.message.followUp": ["super+j"] }, () => {
+    assert.equal(bypass(ev("j", "m")), false);
+  });
 });
 
-check("keys the shell owns do not bypass", () => {
-  assert.equal(T.keymapShouldBypass(ev("Escape")), false);
-  assert.equal(T.keymapShouldBypass(ev("c", "c")), false, "ctrl+c");
-  assert.equal(T.keymapShouldBypass(ev("w", "c")), false, "ctrl+w kills a word in the shell");
-  assert.equal(T.keymapShouldBypass(ev("t", "c")), false, "ctrl+t");
-  assert.equal(T.keymapShouldBypass(ev("Tab")), false, "plain Tab completes");
-  assert.equal(T.keymapShouldBypass(ev("Tab", "s")), false, "shift+Tab");
-  assert.equal(T.keymapShouldBypass(ev("a")), false);
-  assert.equal(T.keymapShouldBypass(ev("t")), false);
-  assert.equal(T.keymapShouldBypass(ev("Enter")), false);
-});
-
-check("copy/paste and extra modifiers do not bypass", () => {
-  assert.equal(T.keymapShouldBypass(ev("c", "m")), false, "super+c copies");
-  assert.equal(T.keymapShouldBypass(ev("v", "m")), false, "super+v pastes");
-  assert.equal(T.keymapShouldBypass(ev("t", "ms")), false, "super+shift+t");
-  assert.equal(T.keymapShouldBypass(ev("t", "ma")), false, "super+alt+t");
-  assert.equal(T.keymapShouldBypass(ev("`", "ca")), false);
-  assert.equal(T.keymapShouldBypass(ev("Tab", "ca")), false);
+check("copy/paste chords never bypass, even when bound", () => {
+  withBindings({ "desktop.commands.open": ["ctrl+shift+c", "ctrl+shift+v", "super+c", "super+v"] }, () => {
+    assert.equal(bypass(ev("C", "cs"), LINUX), false, "ctrl+shift+c copies");
+    assert.equal(bypass(ev("V", "cs"), LINUX), false, "ctrl+shift+v pastes");
+    assert.equal(bypass(ev("c", "m"), MAC), false, "⌘C copies");
+    assert.equal(bypass(ev("v", "m"), MAC), false, "⌘V pastes");
+  });
+  assert.equal(bypass(ev("c", "m")), false, "super+c unbound");
 });
 
 check("a composing event never bypasses", () => {
-  assert.equal(T.keymapShouldBypass({ ...ev("t", "m"), isComposing: true }), false);
+  assert.equal(bypass({ ...ev("t", "m"), isComposing: true }), false);
+});
+
+// ---- clipboard chords -----------------------------------------------------
+
+check("clipboardAction: ctrl+shift+c / v off macOS", () => {
+  assert.equal(T.clipboardAction(ev("C", "cs"), LINUX), "copy");
+  assert.equal(T.clipboardAction(ev("V", "cs"), LINUX), "paste");
+  assert.equal(T.clipboardAction(ev("c", "c"), LINUX), null, "ctrl+c is the shell's interrupt");
+  assert.equal(T.clipboardAction(ev("v", "c"), LINUX), null, "ctrl+v is the shell's");
+  assert.equal(T.clipboardAction(ev("C", "csa"), LINUX), null, "ctrl+shift+alt+c");
+  assert.equal(T.clipboardAction({ ...ev("V", "cs"), isComposing: true }, LINUX), null, "composing");
+});
+
+check("clipboardAction: none on macOS (native ⌘C / ⌘V)", () => {
+  assert.equal(T.clipboardAction(ev("C", "cs"), MAC), null);
+  assert.equal(T.clipboardAction(ev("c", "m"), MAC), null);
 });
 
 // ---- shellLabel / clampHeight ---------------------------------------------

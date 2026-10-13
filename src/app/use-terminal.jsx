@@ -31,7 +31,7 @@ const {
   EMPTY: _UT_EMPTY, DEFAULT_HEIGHT: _UT_DEFAULT_HEIGHT, openPanel: _UT_open, closePanel: _UT_close, togglePanel: _UT_toggle,
   applyStatus: _UT_applyStatus, applyExit: _UT_applyExit, spawnFailed: _UT_spawnFailed,
   needsSpawn: _UT_needsSpawn, isExited: _UT_isExited, prune: _UT_prune, entryOf: _UT_entryOf,
-  keymapShouldBypass: _UT_bypass,
+  keymapShouldBypass: _UT_bypass, clipboardAction: _UT_clipboardAction,
 } = window.OMP_TERMINAL;
 
 const _UT_FONT_PX = 13;
@@ -51,6 +51,30 @@ function _UT_theme() {
 function _UT_exitLine(code) {
   const label = code == null ? "" : ` (code ${code})`;
   return `\r\n\x1b[2mshell exited${label} \u2014 press Enter to restart\x1b[0m\r\n`;
+}
+
+/**
+ * Rust's `TerminalStatus.windowsPty` (`{ backend: "conpty", buildNumber }`
+ * on Windows, null elsewhere) tells xterm how ConPTY reflows wrapped lines.
+ * Set only when it differs, so a repeated status changes no option.
+ */
+function _UT_applyWindowsPty(term, status) {
+  const pty = status?.windowsPty;
+  if (!pty) return;
+  const cur = term.options.windowsPty;
+  if (cur?.backend === pty.backend && cur?.buildNumber === pty.buildNumber) return;
+  term.options.windowsPty = { backend: pty.backend, buildNumber: pty.buildNumber };
+}
+
+/** ctrl+shift+v (Linux, Windows): the clipboard's text into the shell. */
+async function _UT_paste(term) {
+  if (!navigator.clipboard?.readText) return;
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text) term.paste(text);
+  } catch (err) {
+    console.warn("[terminal] clipboard read failed:", err);
+  }
 }
 
 function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) {
@@ -86,11 +110,17 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
     } catch { /* hidden or detached: refit on reveal */ }
   }, []);
 
+  /** Rust reported the tab's shell: panel state, and xterm's ConPTY mode. */
+  const noteStatus = React.useCallback((sid, status) => {
+    const rec = recs.current.get(sid);
+    if (rec && !rec.disposed) _UT_applyWindowsPty(rec.term, status);
+    setState((s) => _UT_applyStatus(s, sid, status));
+  }, []);
+
   /** Ask Rust for the tab's status (a shell we have not been told about). */
   const refreshStatus = React.useCallback(async (sid) => {
-    const status = await bridge.terminalStatus(sid);
-    setState((s) => _UT_applyStatus(s, sid, status));
-  }, [bridge]);
+    noteStatus(sid, await bridge.terminalStatus(sid));
+  }, [bridge, noteStatus]);
 
   // Event handling and replays reference each other (a gap replays, a
   // replay flushes queued events): plain functions over refs, rebuilt with
@@ -177,7 +207,7 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
         if (rec.disposed) return;
         const status = await bridge.terminalStatus(sid);
         if (rec.disposed) return;
-        setState((s) => _UT_applyStatus(s, sid, status));
+        noteStatus(sid, status);
         if (!status) return;
         rec.instance = status.instance;
         rec.lastSeq = 0;
@@ -210,7 +240,7 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
         return;
       }
       const { status } = res;
-      setState((s) => _UT_applyStatus(s, sid, status));
+      noteStatus(sid, status);
       if (status.instance < rec.instance) return;
       if (status.instance > rec.instance) {
         rec.instance = status.instance;
@@ -220,7 +250,7 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
     }
 
     return { attach, spawn };
-  }, [bridge, refreshStatus]);
+  }, [bridge, noteStatus, refreshStatus]);
 
   const spawn = React.useCallback((sid) => ops.current.spawn(sid), []);
 
@@ -243,11 +273,20 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
     const fitAddon = new window.FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     // `false` hands the key back to the page (the global keymap); keyup/press
-    // stay xterm's. Enter in an exited shell restarts it.
+    // stay xterm's. Enter in an exited shell restarts it. ctrl+shift+c / v
+    // (Linux, Windows) copy and paste; preventDefault keeps the keymap and
+    // the WebView's own paste out of it. macOS keeps native ⌘C / ⌘V.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
       if (e.key === "Enter" && _UT_isExited(_UT_entryOf(stateRef.current, sid))) {
         respawn(sid);
+        return false;
+      }
+      const clip = _UT_clipboardAction(e);
+      if (clip) {
+        e.preventDefault();
+        if (clip === "paste") void _UT_paste(term);
+        else if (term.hasSelection()) window.copyText(term.getSelection());
         return false;
       }
       return !_UT_bypass(e);

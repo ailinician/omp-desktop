@@ -2,8 +2,8 @@
 // tab's shell — when it spawns, in which folder, with which program, its
 // output ring and its status (`terminal_*` commands, `terminal://data|exit/
 // {id}` events). This file holds only view state: whether a tab's panel is
-// shown, what Rust last said about its shell, and which keystrokes xterm
-// must hand back to the global keymap.
+// shown, what Rust last said about its shell, which keystrokes xterm must
+// hand back to the global keymap and which are its copy / paste chords.
 //
 // Panel state is `{ [sessionId]: { open, created, status, error } }`,
 // immutable: every transition returns a new object, or the same one when
@@ -113,26 +113,62 @@
     return next;
   }
 
-  /**
-   * True for the chords the global keymap must still handle while the
-   * terminal has focus (xterm's `attachCustomKeyEventHandler` returns false
-   * for them, so they bubble). Everything else — Escape, ctrl+c, ctrl+w (the
-   * shell's kill-word), plain keys, super+c/v (copy/paste) — stays xterm's.
-   * Normalises chords exactly like the global keymap (via OMP_KEYMAP.chordFromEvent)
-   * so shifted variants of the same physical key (e.g. Cmd+Shift+7 → "/" on
-   * German layouts) still bypass.
-   * @param {Pick<KeyboardEvent, "key"|"ctrlKey"|"shiftKey"|"altKey"|"metaKey"|"isComposing">} e
-   */
-  const BYPASS = new Set([
-    "super+t", "super+w", "super+k", "super+h", "super+b", "super+/", "super+`",
-    "super+~", // shifted backtick variant
-    "ctrl+tab", "ctrl+shift+tab",
-    "ctrl+`",
-  ]);
+  // While xterm has focus, a keydown either goes to the shell or is handed
+  // back to the page, where the global keymap (use-keymap.jsx) handles it.
+  // The decision follows the *resolved* keymap, so rebinding an action in
+  // Settings → Keyboard changes what the terminal lets through.
+  const IS_MAC = window.OMP_KEYMAP.detectMac();
 
-  function keymapShouldBypass(e) {
+  /** Handed to the app whatever their chord (switching tabs, leaving the shell). */
+  const ALWAYS = new Set(["desktop.terminal.toggle", "desktop.tab.next", "desktop.tab.prev"]);
+
+  /**
+   * The terminal's copy / paste chord for this keydown: `"copy"`,
+   * `"paste"`, or null. Linux and Windows use ctrl+shift+c / ctrl+shift+v
+   * (plain ctrl+c / ctrl+v belong to the shell); macOS has ⌘C / ⌘V, which
+   * xterm and the WebView already handle natively, so this returns null
+   * there.
+   * @param {Pick<KeyboardEvent, "key"|"code"|"ctrlKey"|"shiftKey"|"altKey"|"metaKey"|"isComposing">} e
+   * @param {boolean} [isMac]
+   */
+  function clipboardAction(e, isMac = IS_MAC) {
+    if (isMac) return null;
     const chord = window.OMP_KEYMAP.chordFromEvent(e);
-    return chord !== null && BYPASS.has(chord);
+    if (chord === "ctrl+shift+c") return "copy";
+    if (chord === "ctrl+shift+v") return "paste";
+    return null;
+  }
+
+  /** The platform's copy / paste chords: always the terminal's. */
+  const RESERVED_MAC = new Set(["super+c", "super+v"]);
+  const RESERVED_OTHER = new Set(["ctrl+shift+c", "ctrl+shift+v"]);
+
+  /**
+   * True when xterm must hand this keydown back to the global keymap
+   * (`attachCustomKeyEventHandler` returns false for it, so it bubbles).
+   * A chord goes to the app iff it resolves (`OMP_KEYMAP.lookup`) to a
+   * global-scope action and that action is in `ALWAYS`, or the chord has
+   * the `super` modifier, or — off macOS — both `ctrl` and `shift`. Plain
+   * `ctrl+<key>` and `alt+<key>` stay the shell's (ctrl+w kills a word,
+   * ctrl+p is history), as do unbound chords and the platform's copy /
+   * paste chords. Chords are normalised exactly like the global keymap
+   * (`OMP_KEYMAP.chordFromEvent`), so shifted variants of the same
+   * physical key (e.g. Cmd+Shift+7 → "/" on German layouts) match too.
+   * @param {Pick<KeyboardEvent, "key"|"code"|"ctrlKey"|"shiftKey"|"altKey"|"metaKey"|"isComposing">} e
+   * @param {boolean} [isMac]
+   */
+  function keymapShouldBypass(e, isMac = IS_MAC) {
+    const keymap = window.OMP_KEYMAP;
+    const chord = keymap.chordFromEvent(e);
+    if (chord === null || (isMac ? RESERVED_MAC : RESERVED_OTHER).has(chord)) return false;
+    const id = keymap.lookup(chord);
+    if (id === null) return false;
+    const action = keymap.KEYMAP_ACTIONS.find((a) => a.id === id);
+    if (!action || action.scope !== "global") return false;
+    if (ALWAYS.has(id)) return true;
+    const mods = chord.split("+").slice(0, -1);
+    if (mods.includes("super")) return true;
+    return !isMac && mods.includes("ctrl") && mods.includes("shift");
   }
 
   /** `/bin/zsh` -> `zsh`; `C:\\Windows\\System32\\cmd.exe` -> `cmd`. */
@@ -168,6 +204,7 @@
     prune,
     entryOf,
     keymapShouldBypass,
+    clipboardAction,
     shellLabel,
     clampHeight,
   };

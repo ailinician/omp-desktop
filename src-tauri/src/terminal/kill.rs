@@ -15,6 +15,11 @@
 //! while the zombie exists the pid, hence the session id, cannot be reissued
 //! and every `kill` by it is safe.
 //!
+//! **Hang-up first.** Closing a terminal (not the waiter's cleanup after an
+//! exit) first sends SIGHUP to the leader's process group
+//! ([`TreeKiller::hang_up`]) and gives the shell a short grace to exit — it
+//! saves its history and hangs up its own jobs — before the SIGKILL passes.
+//!
 //! **Windows:** the shell is assigned to a terminal-owned Job Object with
 //! `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (the pattern of
 //! `agent/supervisor.rs`), so closing the job handle kills the shell and every
@@ -81,6 +86,28 @@ impl TreeKiller {
             #[cfg(test)]
             hold_cleanup: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Hang the terminal up: SIGHUP the session leader's process group (the
+    /// shell, a group leader, and whatever runs in its group), as a closing
+    /// terminal emulator does, so the shell can save its history and hang up
+    /// its jobs before [`TreeKiller::kill`]. Safe for the same reason as
+    /// `kill`: while the id is stored the leader is unreaped, so no other
+    /// group can carry its id. Returns whether a signal went out (`false`
+    /// once killed, or without a session id).
+    pub fn hang_up(&self) -> bool {
+        let sid = self.sid.lock().unwrap_or_else(PoisonError::into_inner);
+        if *sid == 0 {
+            return false;
+        }
+        // SAFETY: plain-integer FFI call, no pointers involved. `*sid > 1`
+        // is the unreaped leader's pid, so `-*sid` names only its process
+        // group; a failure (`ESRCH`, the group is empty) is not actionable.
+        unsafe { libc::kill(-*sid, libc::SIGHUP) };
+        #[cfg(test)]
+        self.signals.fetch_add(1, Ordering::AcqRel);
+        drop(sid);
+        true
     }
 
     /// SIGKILL every process of the session and forget its id. Later calls

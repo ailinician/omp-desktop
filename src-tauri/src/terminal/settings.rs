@@ -93,8 +93,8 @@ impl SettingsStore {
         self.cached().clone()
     }
 
-    /// The stored shell and what the default resolves to. May look up the
-    /// account's login shell (a subprocess): call off the IPC thread.
+    /// The stored shell and what the default resolves to. The default may
+    /// query the user database (`getpwuid`): call off the IPC thread.
     pub fn settings(&self) -> TerminalSettings {
         TerminalSettings {
             shell: self.shell(),

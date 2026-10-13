@@ -1,0 +1,162 @@
+//! Terminal manager tests on Windows: the default shell (`%ComSpec%`, i.e.
+//! `cmd.exe`) on a pseudo console, observed through a collecting [`Emit`].
+//! The `sh` tests in `tests.rs` are unix-only; these run on the Windows CI
+//! leg. Every wait polls with a generous timeout: no timing is asserted.
+
+use super::{Emit, TerminalManager, TerminalState};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const SLOW: Duration = Duration::from_secs(30);
+
+/// Everything the manager emitted.
+#[derive(Default)]
+struct Collector {
+    data: Mutex<Vec<u8>>,
+    exits: Mutex<Vec<Option<i32>>>,
+}
+
+impl Emit for Collector {
+    fn data(&self, _id: &str, _instance: u64, _seq: u64, bytes: &[u8]) {
+        self.data.lock().unwrap().extend_from_slice(bytes);
+    }
+
+    fn exit(&self, _id: &str, _instance: u64, code: Option<i32>) {
+        self.exits.lock().unwrap().push(code);
+    }
+}
+
+impl Collector {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.data.lock().unwrap()).into_owned()
+    }
+
+    fn exit_codes(&self) -> Vec<Option<i32>> {
+        self.exits.lock().unwrap().clone()
+    }
+}
+
+fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if condition() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// `id` registered with the temp dir as its folder, its default shell
+/// opened.
+fn open(id: &str) -> (TerminalManager, Arc<Collector>) {
+    let manager = TerminalManager::new(None);
+    manager.register_tab(id, Some(std::env::temp_dir().as_path()));
+    let out = Arc::new(Collector::default());
+    manager
+        .open(Arc::clone(&out), id, 80, 24)
+        .expect("open terminal");
+    (manager, out)
+}
+
+/// Whether a `ping` whose command line contains `marker` is running.
+fn ping_running(marker: &str) -> bool {
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_Process -Filter \"Name='PING.EXE'\" \
+             | ForEach-Object { $_.CommandLine }",
+        ])
+        .output()
+        .expect("run powershell");
+    String::from_utf8_lossy(&out.stdout).contains(marker)
+}
+
+#[test]
+fn the_shells_exit_code_is_reported() {
+    let (manager, out) = open("win-exit");
+    manager.write("win-exit", "exit 3\r\n").unwrap();
+
+    assert!(
+        wait_until(SLOW, || !out.exit_codes().is_empty()),
+        "no exit event; output: {:?}",
+        out.text()
+    );
+    assert_eq!(out.exit_codes(), [Some(3)]);
+    let status = manager.status("win-exit").unwrap();
+    assert_eq!(
+        (status.state, status.exit_code),
+        (TerminalState::Exited, Some(3))
+    );
+}
+
+#[test]
+fn replay_returns_the_shells_output() {
+    let (manager, out) = open("win-replay");
+    // The caret keeps the echoed input from containing the output.
+    manager.write("win-replay", "echo RE^PLAYED\r\n").unwrap();
+    assert!(
+        wait_until(SLOW, || out.text().contains("REPLAYED")),
+        "output: {:?}",
+        out.text()
+    );
+
+    let status = manager.status("win-replay").unwrap();
+    let replay = manager.replay("win-replay", status.instance, 0).unwrap();
+    assert_eq!(replay.instance, status.instance);
+    assert!(replay.head_seq >= 1, "no event held");
+    let bytes = STANDARD.decode(&replay.b64).unwrap();
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("REPLAYED"),
+        "replay: {:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+    manager.close_tab("win-replay");
+}
+
+/// A job the shell started in the background belongs to the terminal's job
+/// object: closing the tab ends it too.
+#[test]
+fn close_tab_ends_a_background_job() {
+    // A count no other `ping` on the machine is likely to use.
+    let count = 1000 + std::process::id() % 1000;
+    let marker = format!("-n {count} 127.0.0.1");
+    let (manager, _out) = open("win-job");
+    manager
+        .write("win-job", format!("start /b ping {marker} > nul\r\n"))
+        .unwrap();
+    assert!(
+        wait_until(SLOW, || ping_running(&marker)),
+        "the background ping never started"
+    );
+
+    manager.close_tab("win-job");
+
+    assert!(
+        wait_until(SLOW, || !ping_running(&marker)),
+        "the background ping survived close_tab"
+    );
+    assert!(manager.tab_ids().is_empty(), "tab kept");
+}
+
+/// The status tells the renderer which pseudo console it talks to.
+#[test]
+fn the_status_describes_the_pseudo_console() {
+    let (manager, _out) = open("win-pty");
+    let status = manager.status("win-pty").unwrap();
+    let pty = status.windows_pty.expect("windowsPty on Windows");
+    assert_eq!(pty.backend, "conpty");
+    // ConPTY exists since Windows 10 1809 (build 17763).
+    assert!(pty.build_number >= 17763, "build {}", pty.build_number);
+
+    let wire = serde_json::to_value(&status).unwrap();
+    assert_eq!(wire["windowsPty"]["backend"], "conpty");
+    assert_eq!(wire["windowsPty"]["buildNumber"], pty.build_number);
+    manager.close_tab("win-pty");
+}

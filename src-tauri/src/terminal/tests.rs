@@ -1,7 +1,7 @@
 //! Terminal manager tests: they spawn a real `sh` on a pseudo-terminal and
 //! observe it through a collecting [`Emit`].
 
-use super::pty::{resolve_shell_with, DEFAULT_SHELL};
+use super::pty::{resolve_shell_with, HANGUP_GRACE};
 use super::{Emit, Slot, TerminalManager, TerminalState, TerminalStatus};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -311,6 +311,86 @@ fn close_tab_kills_background_jobs() {
     assert!(!out.exited());
 }
 
+/// Closing hangs the shell up before the kill: its `HUP` trap runs (a real
+/// shell saves its history there).
+#[test]
+fn close_tab_hangs_up_the_shell_before_killing_it() {
+    let marker = temp_dir().join(format!("omp-terminal-hup-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let (manager, out) = open("hup");
+    // Line editing off: bash (`/bin/sh` on some systems) at a readline
+    // prompt answers a hang-up by saving its history and exiting, without
+    // running the trap this test observes.
+    manager
+        .write("hup", "set +o emacs +o vi 2>/dev/null\n")
+        .unwrap();
+    manager
+        .write(
+            "hup",
+            format!(
+                "trap 'echo hung > {}; exit' HUP; echo TR\"\"APPED\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+    assert!(wait_until(SLOW, || out.text().contains("TRAPPED")));
+
+    manager.close_tab("hup");
+
+    assert!(
+        wait_until(Duration::from_secs(3), || std::fs::read_to_string(&marker)
+            .is_ok_and(|text| text == "hung\n")),
+        "the HUP trap did not run"
+    );
+    std::fs::remove_file(&marker).unwrap();
+}
+
+/// `shutdown_all` hangs every shell up first and waits one shared grace,
+/// then kills: shells that ignore the hang-up cost one grace, not one each.
+#[test]
+fn shutdown_all_waits_one_hangup_grace_for_every_shell() {
+    const SHELLS: u32 = 5;
+    let _quiet = LOAD_SENSITIVE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let manager = manager_with(&PLAIN_SHELL);
+    let out = Arc::new(Collector::default());
+    for n in 0..SHELLS {
+        let id = format!("grace{n}");
+        manager.register_tab(&id, None);
+        manager.open(Arc::clone(&out), &id, 80, 24).unwrap();
+        manager
+            .write(&id, format!("trap '' HUP; echo IGNORING{n}=$$\n"))
+            .unwrap();
+    }
+    let marker = |n: u32| format!("IGNORING{n}=");
+    assert!(
+        wait_until(SLOW, || (0..SHELLS)
+            .all(|n| out.number_after(&marker(n)).is_some())),
+        "output: {:?}",
+        out.text()
+    );
+    let shells: Vec<i32> = (0..SHELLS)
+        .map(|n| out.number_after(&marker(n)).unwrap())
+        .collect();
+
+    let started = Instant::now();
+    manager.shutdown_all();
+    let took = started.elapsed();
+
+    assert!(took >= HANGUP_GRACE, "no grace for the hang-up: {took:?}");
+    assert!(
+        took < HANGUP_GRACE * (SHELLS - 1),
+        "one grace per shell: {took:?}"
+    );
+    for shell in shells {
+        assert!(
+            wait_until(Duration::from_secs(3), || !process_alive(shell)),
+            "shell {shell} survived shutdown_all"
+        );
+    }
+}
+
 #[test]
 fn ctrl_c_reaches_the_foreground_process() {
     let (manager, out) = open("ctrlc");
@@ -407,6 +487,7 @@ fn status_goes_from_starting_to_running_to_exited() {
         shell: "/bin/pending".to_owned(),
         state: TerminalState::Starting,
         exit_code: None,
+        windows_pty: None,
     };
     manager.tabs().get_mut("states").unwrap().slot = Slot::Spawning {
         instance: 999,
@@ -426,6 +507,12 @@ fn status_goes_from_starting_to_running_to_exited() {
     assert_eq!(running.shell, *PLAIN_SHELL);
     assert_eq!(running.exit_code, None);
     assert_eq!(manager.status("states").as_ref(), Some(&running));
+    let wire = serde_json::to_value(&running).unwrap();
+    assert_eq!(wire["state"], "running");
+    assert!(
+        wire["windowsPty"].is_null(),
+        "no pseudo console off Windows"
+    );
 
     manager.write("states", "exit 4\n").unwrap();
     assert!(wait_until(SLOW, || out.exited()), "no exit event");
@@ -984,77 +1071,30 @@ fn overlapping_opens_start_one_shell() {
     }
 }
 
+/// The setting must name an executable file; anything else is refused, not
+/// silently replaced by the default. Empty means the default, which a POSIX
+/// shell's name gets `-l -i` for like any other.
 #[test]
-fn resolve_shell_prefers_setting_then_env_then_account_then_default() {
-    let sh = PathBuf::from("/bin/sh");
+fn resolve_shell_takes_the_setting_or_else_the_default() {
     let login = vec!["-l".to_owned(), "-i".to_owned()];
-    let missing = "/definitely/not/a/shell";
-    let not_executable = "/etc/hosts";
-    // A stand-in for the account's shell that exists on every unix runner.
-    let dir = temp_dir().join(format!("omp-acct-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let zsh_path = dir.join("zsh");
-    std::fs::write(&zsh_path, "#!/bin/sh\n").unwrap();
-    std::fs::set_permissions(&zsh_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let zsh = zsh_path.to_str().unwrap();
-    // (preference, $SHELL, account shell, expected program); every case is a
-    // POSIX shell, so every case gets `-l -i`.
-    let ok = [
-        (Some("/bin/sh"), Some(zsh), None, "/bin/sh"),
-        (None, Some("/bin/sh"), Some(zsh), "/bin/sh"),
-        (Some(""), Some("/bin/sh"), None, "/bin/sh"),
-        (Some("  "), None, None, DEFAULT_SHELL),
-        (None, Some(missing), None, DEFAULT_SHELL),
-        (None, Some("sh"), None, DEFAULT_SHELL),
-        (None, None, None, DEFAULT_SHELL),
-        // $SHELL unset or unusable → the account's login shell.
-        (None, None, Some(zsh), zsh),
-        (None, Some(missing), Some(zsh), zsh),
-        (None, None, Some(missing), DEFAULT_SHELL),
-    ];
-    for (pref, env, account, program) in ok {
-        let (got, got_args) = resolve_shell_with(pref, env, account).unwrap();
-        assert_eq!(
-            got,
-            PathBuf::from(program),
-            "pref {pref:?} env {env:?} account {account:?}"
-        );
-        assert_eq!(
-            got_args, login,
-            "pref {pref:?} env {env:?} account {account:?}"
-        );
-    }
-    assert_eq!(resolve_shell_with(None, None, None).unwrap().0, sh);
-
-    for pref in [missing, not_executable, "sh", "./sh", "/bin"] {
+    let sh = || PathBuf::from("/bin/sh");
+    assert_eq!(
+        resolve_shell_with(Some("/bin/sh"), || PathBuf::from("/bin/zsh")).unwrap(),
+        (sh(), login.clone())
+    );
+    assert_eq!(resolve_shell_with(Some(""), sh).unwrap(), (sh(), login));
+    for pref in [
+        "/definitely/not/a/shell",
+        "/etc/hosts",
+        "sh",
+        "./sh",
+        "/bin",
+    ] {
         assert!(
-            resolve_shell_with(Some(pref), Some("/bin/sh"), None).is_err(),
+            resolve_shell_with(Some(pref), sh).is_err(),
             "{pref} must be rejected"
         );
     }
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
-fn account_shell_output_is_parsed() {
-    use crate::terminal::pty::parse_account_shell;
-    assert_eq!(
-        parse_account_shell("UserShell: /opt/homebrew/bin/fish\n").as_deref(),
-        Some("/opt/homebrew/bin/fish")
-    );
-    assert_eq!(
-        parse_account_shell("me:x:1000:1000:Me,,,:/home/me:/usr/bin/zsh\n").as_deref(),
-        Some("/usr/bin/zsh")
-    );
-    assert_eq!(parse_account_shell(""), None);
-    assert_eq!(parse_account_shell("No such key: UserShell"), None);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn account_shell_lookup_finds_an_absolute_shell() {
-    let shell = super::pty::account_shell().expect("dscl lookup");
-    assert!(shell.starts_with('/'), "{shell}");
 }
 
 #[test]
@@ -1066,7 +1106,7 @@ fn only_posix_shells_get_login_interactive_args() {
         let path = dir.join(name);
         std::fs::write(&path, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let (_, shell_args) = resolve_shell_with(path.to_str(), None, None).unwrap();
+        let (_, shell_args) = resolve_shell_with(path.to_str(), || unreachable!()).unwrap();
         seen.push((name, shell_args.len()));
     }
     std::fs::remove_dir_all(&dir).unwrap();

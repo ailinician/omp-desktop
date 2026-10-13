@@ -33,11 +33,14 @@ mod ring;
 mod settings;
 #[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, windows))]
+mod tests_windows;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -97,6 +100,49 @@ pub struct TerminalStatus {
     pub state: TerminalState,
     /// Set once exited; `None` there = killed by a signal.
     pub exit_code: Option<i32>,
+    /// The pseudo console xterm.js has to adapt to (Windows only, `null`
+    /// elsewhere): see [`WindowsPty`].
+    pub windows_pty: Option<WindowsPty>,
+}
+
+/// What xterm.js's `windowsPty` option wants to know: the pseudo console
+/// rewrites the screen itself and its behaviour (reflow, wrapped-line
+/// handling) changed across Windows builds, so the renderer adjusts by build
+/// number.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsPty {
+    /// Always `"conpty"` (`portable-pty` has no winpty backend).
+    pub backend: &'static str,
+    /// The OS build (`CurrentBuildNumber`), e.g. 22631.
+    pub build_number: u32,
+}
+
+/// The pseudo console of this system: read once from the registry
+/// (`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\CurrentBuildNumber`)
+/// and cached. `None` when the build number cannot be read.
+#[cfg(windows)]
+static WINDOWS_PTY: std::sync::LazyLock<Option<WindowsPty>> = std::sync::LazyLock::new(|| {
+    let build = windows_registry::LOCAL_MACHINE
+        .open(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+        .ok()?
+        .get_string("CurrentBuildNumber")
+        .ok()?;
+    Some(WindowsPty {
+        backend: "conpty",
+        build_number: build.trim().parse().ok()?,
+    })
+});
+
+#[cfg(windows)]
+fn windows_pty() -> Option<WindowsPty> {
+    *WINDOWS_PTY
+}
+
+/// No pseudo console to describe off Windows.
+#[cfg(not(windows))]
+const fn windows_pty() -> Option<WindowsPty> {
+    None
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +190,7 @@ impl Slot {
                 shell: shell.display().to_string(),
                 state: TerminalState::Starting,
                 exit_code: None,
+                windows_pty: windows_pty(),
             }),
             Self::Live(pty) => Some(live_status(pty)),
         }
@@ -172,6 +219,7 @@ fn live_status(pty: &Pty) -> TerminalStatus {
         shell: pty.shell().display().to_string(),
         state,
         exit_code,
+        windows_pty: windows_pty(),
     }
 }
 
@@ -247,8 +295,8 @@ impl TerminalManager {
             drop(tabs);
             folder
         };
-        // Both may touch the disk (and the account lookup runs a
-        // subprocess): before taking the map again.
+        // Both may touch the disk (and the default shell may query the user
+        // database): before taking the map again.
         let preference = self.settings.shell();
         let (program, shell_args) = pty::resolve_shell(Some(preference.as_str()))?;
         let cwd = tab_cwd(folder.as_deref())?;
@@ -270,9 +318,9 @@ impl TerminalManager {
             drop(tabs);
             (instance, replaced)
         };
-        // The exited shell's leftovers, killed outside the lock.
+        // The exited shell's leftovers, hung up and killed outside the lock.
         if let Slot::Live(old) = replaced {
-            old.kill();
+            old.close();
         }
 
         let spawned = pty::spawn(
@@ -309,7 +357,7 @@ impl TerminalManager {
                 _ => spawned?,
             }
         };
-        orphan.kill();
+        orphan.close();
         Err("tab closed".to_owned())
     }
 
@@ -369,10 +417,11 @@ impl TerminalManager {
         }
     }
 
-    /// End the tab: forget it and kill its shell and everything it started.
-    /// Silent (no exit event). Unknown tabs are ignored. An `open` spawning
-    /// for it meanwhile kills its own shell. Blocks briefly: call off the
-    /// IPC thread.
+    /// End the tab: forget it, hang its shell up, and kill what is left of
+    /// it and everything it started after [`pty::HANGUP_GRACE`] at most
+    /// (see [`Pty::close`]). Silent (no exit event). Unknown tabs are
+    /// ignored. An `open` spawning for it meanwhile closes its own shell.
+    /// Blocks up to the grace: call off the IPC thread.
     pub fn close_tab(&self, id: &str) {
         let removed = self.tabs().remove(id);
         if let Some(Tab {
@@ -380,12 +429,14 @@ impl TerminalManager {
             ..
         }) = removed
         {
-            pty.kill();
+            pty.close();
         }
     }
 
     /// End every tab, synchronously — for the paths where the process ends
-    /// without running destructors (app exit, an update's relaunch). The
+    /// without running destructors (app exit, an update's relaunch). Every
+    /// shell is hung up first and they share one [`pty::HANGUP_GRACE`]
+    /// before the kills, so exiting takes one grace, not one per tab. The
     /// manager stays usable.
     pub fn shutdown_all(&self) {
         let shells: Vec<Arc<Pty>> = self
@@ -396,13 +447,19 @@ impl TerminalManager {
                 Slot::Idle | Slot::Spawning { .. } => None,
             })
             .collect();
+        let hung_up: Vec<&Arc<Pty>> = shells.iter().filter(|pty| pty.hang_up()).collect();
+        let deadline = Instant::now() + pty::HANGUP_GRACE;
+        for pty in hung_up {
+            pty.wait_exit_until(deadline);
+        }
         for pty in shells {
             pty.kill();
         }
     }
 
-    /// The shell setting and its default. May run the account lookup: call
-    /// off the IPC thread.
+    /// The shell setting and its default. The default may query the user
+    /// database (`getpwuid`, possibly a directory service): call off the IPC
+    /// thread.
     pub fn settings(&self) -> TerminalSettings {
         self.settings.settings()
     }

@@ -426,7 +426,8 @@ fn terminal_resize(
 }
 
 /// The shell setting and what an empty one runs. `spawn_blocking`: the
-/// default may come from the account database (a subprocess).
+/// default may come from the user database (`getpwuid`, possibly a
+/// directory service).
 #[tauri::command]
 async fn terminal_settings(
     terminal: State<'_, Arc<terminal::TerminalManager>>,

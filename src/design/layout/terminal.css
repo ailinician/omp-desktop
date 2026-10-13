@@ -41,7 +41,10 @@
 .term-head-exited ~ .term-head-close { margin-left: 0; }
 .term-head-close:hover { background: var(--bg-hover); color: var(--fg); }
 
-.term-body { flex: 1; min-height: 0; padding: 4px 6px; overflow: hidden; }
+.term-body { flex: 1; min-height: 0; overflow: hidden; }
+/* The inset sits on xterm's own element: FitAddon subtracts that padding
+   from the body's size, so the last row and column are never clipped. */
+.term-body .xterm { padding: 4px 6px; }
 
 /* Tweaks → Terminal shell: Rust refused the path (app-live.jsx). */
 .term-shell-error { color: var(--rose); font-size: var(--d-text-xs); overflow-wrap: anywhere; }

@@ -32,9 +32,9 @@ enum Slot { Idle, Spawning { instance: u64, shell: PathBuf }, Live(Arc<Pty>) }
   3. resolve the shell from the cached setting (`pty::resolve_shell`) with no lock held;
   4. under the lock re-check and set `Spawning { instance, shell }`;
   5. spawn with no lock held;
-  6. re-lock: if the tab still exists and its slot is still this `Spawning { instance }`, store `Live(pty)`; otherwise the tab was closed (or replaced) meanwhile: unlock, `kill` the fresh shell and return `tab closed`. A spawn error resets the slot to `Idle` if it is still ours and returns the error.
+  6. re-lock: if the tab still exists and its slot is still this `Spawning { instance }`, store `Live(pty)`; otherwise the tab was closed (or replaced) meanwhile: unlock, close the fresh shell (see Kill model) and return `tab closed`. A spawn error resets the slot to `Idle` if it is still ours and returns the error.
 
-  An exited `Live` shell is replaced by a new spawn; the old `Pty` is killed after unlocking (its leftovers, see Kill model). `close_tab` during a pending spawn just removes the tab; the opener's re-check in step 6 kills what it spawned, so no shell is orphaned.
+  An exited `Live` shell is replaced by a new spawn; the old `Pty` is closed after unlocking (its leftovers, see Kill model). `close_tab` during a pending spawn just removes the tab; the opener's re-check in step 6 closes what it spawned, so no shell is orphaned.
 
 ## Working directory and shell: Rust's
 
@@ -43,13 +43,15 @@ The webview never sends a path. The shell starts in the tab's registered folder 
 `pty::resolve_shell`, first hit wins:
 
 1. The shell set under Tweaks → Terminal, stored in `<app config>/terminal.json` (see Settings). It is an absolute path to an executable file; since it was set on purpose, a shell that has become unusable makes `open` fail instead of falling through.
-2. `$SHELL`, if it is an executable file.
-3. The account's login shell from the user database: `dscl . -read /Users/<user> UserShell` on macOS, `getent passwd <user>` elsewhere on unix (7th field). Looked up only when step 2 yielded nothing, since it spawns a process.
-4. `/bin/sh` (`cmd.exe` on Windows, where step 3 does not exist).
+2. `pty::default_shell()`, which Tweaks shows as the placeholder: `portable-pty`'s own choice (`CommandBuilder::new_default_prog().get_shell()`), resolved in-process without spawning anything:
+   - unix: `$SHELL` if it is executable, else the account's login shell from the user database (`getpwuid`), else `/bin/sh`;
+   - Windows: `%ComSpec%`, else `cmd.exe`.
 
-Steps 2–4 are `pty::default_shell()`, which Tweaks shows as the placeholder. Step 3 exists because the app's environment may lack `$SHELL` (a launch from a script, some GUI launch paths). Falling straight to `/bin/sh` there starts a different shell than the user's, and a `~/.profile` that launches the real shell would stack two shells, so `exit` would land in the outer one.
+The user database matters because the app's environment may lack `$SHELL` (a launch from a script, some GUI launch paths). Falling straight to `/bin/sh` there starts a different shell than the user's, and a `~/.profile` that launches the real shell would stack two shells, so `exit` would land in the outer one. `getpwuid` may still query a directory service, so `terminal_settings` runs off the IPC thread.
 
-`-l -i` is passed only to sh-family shells (file name `sh`, `bash`, `zsh`, `fish`, `dash`, `ksh`); any other shell gets no arguments. Environment: the app's own, plus `TERM=xterm-256color`, `COLORTERM=truecolor`, `OMP_DESKTOP=1`, `OMP_DESKTOP_SESSION=<id>` and the extended `PATH` from `child_path::child_path()` (the same one the omp child gets; the MSI relaunch has a machine-only PATH).
+`-l -i` is passed only to sh-family shells (file name `sh`, `bash`, `zsh`, `fish`, `dash`, `ksh`); any other shell gets no arguments.
+
+**Environment.** The app's own, plus `TERM=xterm-256color`, `COLORTERM=truecolor`, `OMP_DESKTOP=1`, `OMP_DESKTOP_SESSION=<id>` and the extended `PATH` from `child_path::child_path()` (the same one the omp child gets; the MSI relaunch has a machine-only PATH). On macOS, when none of `LANG`, `LC_ALL`, `LC_CTYPE` is set (or all are empty) in the app's environment, the shell gets `LANG=en_US.UTF-8`: an app launched from Finder or the Dock has no locale (Terminal.app and iTerm2 set one themselves), and a shell in the C locale mangles non-ASCII file names and input. The value is fixed rather than derived from the system region (`defaults read -g AppleLocale` is a subprocess and need not name an installed locale); a variable the user did set is never overridden.
 
 ## Settings (`terminal.json`)
 
@@ -67,18 +69,19 @@ All args are camelCase.
 |`terminal_ack`|`sessionId, instance, bytes`|—|Sync. Pays off flow-control debt; ignored for another instance.|
 |`terminal_write`|`sessionId, data`|—|Sync. `data` is xterm's `onData` string, written verbatim as UTF-8. Errors: `no tab {id}`, `no terminal for tab {id}` (no shell yet), `terminal input backlog`.|
 |`terminal_resize`|`sessionId, cols, rows`|—|Sync. One ioctl on the master. Errors as for write, plus the size check.|
-|`terminal_settings`|—|`TerminalSettings`|`async` + blocking: `defaultShell` may look up the account's login shell (a subprocess).|
+|`terminal_settings`|—|`TerminalSettings`|`async` + blocking: `defaultShell` may query the user database (`getpwuid`).|
 |`terminal_set_shell`|`shell`|`TerminalSettings`|`async` + blocking store write. Validates and persists.|
-|`close_tab`|`sessionId`|—|`async` + `spawn_blocking`. Ends a tab: stops its omp and session grants (`AgentBridge::stop_session`), tells the widget host (`session_closed`), stops its git watcher, removes its terminal tab and kills the shell tree (`TerminalManager::close_tab`). Unknown ids are fine.|
+|`close_tab`|`sessionId`|—|`async` + `spawn_blocking`. Ends a tab: stops its omp and session grants (`AgentBridge::stop_session`), tells the widget host (`session_closed`), stops its git watcher, removes its terminal tab and closes the shell (`TerminalManager::close_tab`: hang-up, up to 200 ms grace, tree kill; see Kill model). Unknown ids are fine.|
 |`close_all_tabs`|—|—|`async` + `spawn_blocking`. `close_tab` for every id in `AgentBridge::session_ids()` ∪ `TerminalManager::tab_ids()`, so it ends omp processes as well as shells. Called once at webview boot.|
 
 ```text
-TerminalStatus   { instance, shell, state: "starting" | "running" | "exited", exitCode: number | null }
+TerminalStatus   { instance, shell, state: "starting" | "running" | "exited", exitCode: number | null,
+                   windowsPty: { backend: "conpty", buildNumber: number } | null }
 ReplayWire       { instance, b64, headSeq, dropped }
 TerminalSettings { shell, defaultShell }     // shell "" = default; defaultShell = what "" resolves to
 ```
 
-`shell` in `TerminalStatus` is the program path actually running (the panel head shows its file name). `exitCode` is `null` while running and for a signal death.
+`shell` in `TerminalStatus` is the program path actually running (the panel head shows its file name). `exitCode` is `null` while running and for a signal death. `windowsPty` is `null` off Windows; on Windows it carries the OS build (`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\CurrentBuildNumber`, read once and cached, `null` if unreadable) for xterm's `windowsPty` option (see Per-tab xterm instances).
 
 |Event|Payload|
 |---|---|
@@ -105,15 +108,17 @@ IPC glue only, no lifecycle policy:
 - **Profile switch.** `stop_session` + `start_session` under the same id: omp restarts, `register_tab` updates the folder, the shell keeps running.
 - **Close tab.** `closeSession` → `close_tab`; the hook drops that tab's state and disposes its xterm.
 - **Webview reload.** The webview's state is gone, but Rust still holds the previous document's tabs, their omp processes and their shells. Tab ids are never reused across a reload (`session-<ms>`), so anything registered at boot belongs to the previous document: live.js invokes `close_all_tabs` before restoring tabs, which ends those omp processes and shells instead of orphaning them. The restored tabs get fresh shells.
-- **App exit and relaunch after an update.** Both skip `Drop` and go through `lib.rs::kill_child_processes`, which calls `TerminalManager::shutdown_all` next to `AgentBridge::shutdown_all` and the widget kill: the relaunch ends in `process::exit`, and the shells (session leaders, not children in our process group) would be orphaned. `shutdown_all` removes every tab and kills every shell; the manager stays usable (an opener still in flight finds its tab gone and kills its shell).
+- **App exit and relaunch after an update.** Both skip `Drop` and go through `lib.rs::kill_child_processes`, which calls `TerminalManager::shutdown_all` next to `AgentBridge::shutdown_all` and the widget kill: the relaunch ends in `process::exit`, and the shells (session leaders, not children in our process group) would be orphaned. `shutdown_all` removes every tab, hangs every shell up, waits **one** shared grace (200 ms at most, however many tabs) and then kills every shell tree; the manager stays usable (an opener still in flight finds its tab gone and closes its shell).
 
 ## Kill model
 
 A shell's whole tree is killed on `close_tab`, replace, `shutdown_all` and shell exit.
 
+- **Hang-up first (closing).** `close_tab`, replacing an exited shell, an opener that lost its tab, and `shutdown_all` do what closing a terminal window does before they kill: `Pty::close` silences the stream (no exit event follows), sends `SIGHUP` to the leader's process group (`kill(-sid, SIGHUP)`, `TreeKiller::hang_up`), waits up to `HANGUP_GRACE` (200 ms) for the leader to exit (it polls the exit the waiter records), then runs the `SIGKILL` passes below. A shell gets to save its history and hang up its own jobs (bash at a prompt does exactly that); one that ignores `SIGHUP` costs the full grace. `shutdown_all` hangs every shell up first and waits for all of them against one deadline, so it costs one grace, not one per tab. Signalling by `-sid` is safe for the reason the kill is: while the session id is stored the leader is an unreaped zombie or alive, so no other process group can carry that id. The waiter's cleanup after a shell exited on its own stays `SIGKILL`-only, and a dropped `Pty` (`Drop`) only kills. On Windows there is no hang-up: the job close below ends the tree at once.
 - **Unix: by pty session id.** `portable-pty` makes the shell a session leader (`setsid` before exec), so every process started from the terminal, including background jobs that outlived the shell and were reparented to init, has `getsid(pid) == shell pid`, unless it calls `setsid` itself. Walking the process tree from the shell would miss exactly those reparented jobs. `kill.rs` lists pids (`/proc` on Linux, one `ps` run elsewhere) and `SIGKILL`s every one in the session, repeating (up to 8 passes) until a pass finds none it has not signalled, since a job may fork between listing and signalling. This blocks a few milliseconds, which is why `close_tab`, `open` (when replacing) and `shutdown_all` run off the IPC thread.
 - **At shell exit: the leader is held as a zombie.** The session id is the leader's pid, and a pid the system may reissue after the reap is no safe key for a `SIGKILL`: during the 250 ms grace or at a later close or respawn it could belong to an unrelated session. So the waiter never reaps to learn of the exit: `kill::wait_exit` calls `waitid(P_PID, pid, WEXITED | WNOWAIT)` (retrying on `EINTR`), which returns at the exit but leaves the shell an unreaped zombie, and takes the code from `siginfo` (`CLD_EXITED` gives `si_status`, `CLD_KILLED`/`CLD_DUMPED` give none). While the zombie exists no other process can get that pid, so the session id stays valid; a zombie ignores signals, so a `kill` by it reaches only the session's members. The waiter stores the exit code (read by `Pty::exit_code`, hence `terminal_status`), sends the exit to the pump, sleeps the 250 ms grace (the reader's, so a job's last output is still delivered), calls `TreeKiller::kill` (members only; background jobs of an exited shell die with it) and only then reaps with `child.wait()`. `kill` holds the id's lock for its whole run and clears it, so a racing close or respawn either does the kill itself or waits for the one in progress, and signals nothing afterwards; whichever it is, the waiter alone reaps, and only after `kill` has returned, so no kill ever runs against a reissued pid. If `waitid` fails (the child is not ours, or already reaped) the shell is reaped through `child.wait()` and the session id is forgotten unsignalled. The zombie is visible in `ps` (`Z`) for about the grace period after each shell exit. Tests in `terminal/tests.rs` cover the background job dying with its exited shell, an exited shell never being signalled again by close or respawn, the zombie staying until cleanup, a close during the grace period, and the exit code being read without reaping.
-- **Windows: Job Object.** The shell is assigned to a terminal-owned Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (the pattern of `agent/supervisor.rs`), so closing the handle kills the shell and all descendants. If the job cannot be set up it falls back to killing the shell alone. **Unverified at runtime.** Only macOS was verified at runtime; the Windows compile (via `portable-pty`) and the Linux runtime are pending CI.
+- **Windows: Job Object.** The shell is assigned to a terminal-owned Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (the pattern of `agent/supervisor.rs`), so closing the handle kills the shell and all descendants. If the job cannot be set up it falls back to killing the shell alone. `terminal/tests_windows.rs` (run on the Windows CI leg) spawns `cmd.exe` through the manager and checks the exit code, replay, the `windowsPty` status, and that a `start /b ping` job is gone after `close_tab`.
+- **ConPTY drain.** The reader keeps reading the master until EOF even after the pump is gone (closed, or done waiting for it); it just stops forwarding. On Windows builds before 11 24H2, `ClosePseudoConsole` (run when the `Pty`, holding the master, is dropped) blocks until the console's output pipe is drained, so a reader that stopped early could hang the close.
 
 `ProcessSupervisor` is not used: `portable-pty` spawns through its own `CommandBuilder`, not `std::process::Command`.
 
@@ -142,7 +147,7 @@ Pure, `window.OMP_TERMINAL`, covered by `test-terminal.mjs`. State `{ [sid]: { o
 - `applyExit(s, sid, instance, code)`: applied only for the instance shown.
 - `spawnFailed(s, sid, error)`: a failed start, shown like an exited shell.
 - `needsSpawn(entry)` (`open && created && status === null && error === null`, so a failed start is not retried in a loop), `isExited(entry)` (`error !== null` or state `exited`).
-- `keymapShouldBypass`, `shellLabel`, `clampHeight`.
+- `keymapShouldBypass(e, isMac?)`, `clipboardAction(e, isMac?)` (see Key handling), `shellLabel`, `clampHeight`.
 
 ### Sync (`app/use-terminal.jsx`)
 
@@ -156,24 +161,31 @@ Per tab a record `{ term, fit, instance, lastSeq, syncing, pending, … }`. Repl
 
 ### Per-tab xterm instances
 
-One xterm `Terminal` per tab lives in a ref map in `use-terminal.jsx`, created the first time that tab's panel node mounts. `app-live.jsx` renders a `TerminalPanel` for every tab that has ever opened its panel (`created`, also while its first spawn is pending or has failed) and marks the inactive or collapsed ones `hidden` (they stay mounted until the tab goes), so a hidden tab's instance keeps receiving and acking `terminal://data` and the output is there on return. Un-hiding refits (`FitAddon`) and repaints (`refresh`), since output written while hidden is parsed but not painted. Memory is bounded by the 5 000-line scrollback; renderer is the default DOM one. A closed tab has its listeners stopped, its observer disconnected and its xterm disposed. A `ResizeObserver` on every panel body refits (debounced 50 ms) after any size change of the body: window, sidebar, tree, subagent pane; `onResize` forwards the new size to `terminal_resize`. Right-click on a selection copies it (`copySelection`); without a selection the default applies.
+One xterm `Terminal` per tab lives in a ref map in `use-terminal.jsx`, created the first time that tab's panel node mounts. `app-live.jsx` renders a `TerminalPanel` for every tab that has ever opened its panel (`created`, also while its first spawn is pending or has failed) and marks the inactive or collapsed ones `hidden` (they stay mounted until the tab goes), so a hidden tab's instance keeps receiving and acking `terminal://data` and the output is there on return. Un-hiding refits (`FitAddon`) and repaints (`refresh`), since output written while hidden is parsed but not painted. Memory is bounded by the 5 000-line scrollback; renderer is the default DOM one. A closed tab has its listeners stopped, its observer disconnected and its xterm disposed. A `ResizeObserver` on every panel body refits (debounced 50 ms) after any size change of the body: window, sidebar, tree, subagent pane; `onResize` forwards the new size to `terminal_resize`. The inset around the text is padding on xterm's own `.xterm` element, not on `.term-body`: `FitAddon` measures the parent and subtracts the element's padding, so padding on the parent would make it propose rows and columns that are then clipped. Right-click on a selection copies it (`copySelection`); without a selection the default applies.
 
-The panel head shows `shellLabel(status.shell)`, the shell actually running. Tweaks → Terminal's shell field reads `terminalSettings()` (placeholder `default (<defaultShell>)`) and saves on blur or Enter through `setTerminalShell`, showing Rust's refusal inline (`.term-shell-error`). Colours follow the active theme's CSS variables; font size is 13 px × the chat font-size tweak. Panel height is the shared tweak `terminalHeight` (default 240 px, clamped to 120 px … 70 % of the session column by `clampHeight`); open/closed state is per tab and not persisted. `terminalAutoOpen` opens the panel for each new tab.
+**ConPTY.** Every status from Rust (create, spawn, refetch) goes through `noteStatus`, which also sets `term.options.windowsPty` from `status.windowsPty` (`{ backend: "conpty", buildNumber }`, the Windows build Rust read from the registry; `null` elsewhere, which leaves the option unset). xterm then applies its ConPTY wrapping heuristics on builds that need them (< 21376). The option is written only when it differs from the current one.
+
+The panel head shows `shellLabel(status.shell)`, the shell actually running. Tweaks → Terminal's shell field reads `terminalSettings()` (placeholder `default (<defaultShell>)`) and saves on blur or Enter through `setTerminalShell`, showing Rust's refusal inline (`.term-shell-error`). Colours follow the active theme's CSS variables; font size is 13 px × the chat font-size tweak. Panel height is the shared tweak `terminalHeight` (default 240 px, clamped to 120 px … 70 % of the session column by `clampHeight`); open/closed state is per tab and not persisted. Dragging the panel's top edge captures the pointer (`setPointerCapture` on the handle) and resizes the panel from `TerminalPanel`'s local state; the tweak is written once, on `pointerup` / `pointercancel` / lost capture, and only when the height changed — not once per `pointermove` (every tweak write re-renders the app and persists). The body's `ResizeObserver` refits during the drag. `terminalAutoOpen` opens the panel for each new tab.
 
 ## Key handling
 
-xterm's focus target is a hidden `<textarea>`, and the global keymap listens on `window` and ignores events with `defaultPrevented`. xterm consumes (and prevents) the keys it handles, so those never reach the keymap; `attachCustomKeyEventHandler` returns `false` for the chords in `BYPASS` (`app/terminal.js`, `keymapShouldBypass`, which normalises with `OMP_KEYMAP.chordFromEvent` like the keymap itself), which hands them back to the page:
+xterm's focus target is a hidden `<textarea>`, and the global keymap listens on `window` and ignores events with `defaultPrevented`. xterm consumes (and prevents) the keys it handles, so those never reach the keymap; `attachCustomKeyEventHandler` returns `false` for a keydown that `keymapShouldBypass` (`app/terminal.js`) accepts, which hands it back to the page. The decision follows the **resolved keymap**, not a fixed list: the chord is normalised with `OMP_KEYMAP.chordFromEvent` like the keymap itself and looked up with `OMP_KEYMAP.lookup`, so a rebinding in the shortcuts screen applies inside the terminal too. A chord goes to the app iff it resolves to a `global`-scope action and
 
-- `` ctrl+` `` (and `` super+` ``, `super+~`): toggle terminal, so the chord that opened the panel also closes it.
-- `super+t`, `super+w`, `super+k`, `super+h`, `super+b`, `super+/`: the macOS ⌘ variants of new/close tab, command bridge, history, sidebar, shortcuts.
-- `ctrl+tab`, `ctrl+shift+tab`: next/previous tab (no shell meaning).
+- the action is in `ALWAYS`: `desktop.terminal.toggle` (the chord that opened the panel also closes it, whatever it is bound to) and `desktop.tab.next` / `desktop.tab.prev`; or
+- the chord has the `super` modifier (the macOS ⌘ forms of new/close tab, command bridge, history, sidebar, shortcuts, toggle); or
+- off macOS, it has both `ctrl` and `shift` (`ctrl+shift+p`, `ctrl+shift+pageup`, … — no shell binds these).
 
 Everything else stays with the shell, notably:
 
-- `ctrl+t` and `ctrl+w` are readline's transpose and kill-word; stealing them for new/close tab would make the shell unusable. The `super+` forms cover the same actions on macOS; elsewhere use the tab bar or hide the panel first. (The original spec listed them as tab actions; this is the ruling that replaced it.)
-- `ctrl+c` is the shell's interrupt. Copy is `super+c` / `ctrl+shift+c`, paste `super+v` / `ctrl+shift+v` (xterm).
-- `Esc` belongs to the shell and TUIs (vim). xterm consumes it, so it does **not** interrupt the agent turn while the terminal has focus; click out of the terminal first.
-- `ctrl+k`, `ctrl+h`, `ctrl+b`, `ctrl+/` and the other `ctrl+` chords the keymap binds likewise reach the shell (kill-line, backspace, back-char, undo).
+- Unbound chords. Unbinding the toggle (or rebinding it elsewhere) frees `` ctrl+` `` for the shell.
+- Plain `ctrl+<key>` and `alt+<key>`, even when the keymap binds them: `ctrl+t` and `ctrl+w` are readline's transpose and kill-word, `ctrl+k`, `ctrl+h`, `ctrl+b`, `ctrl+/`, `ctrl+p` are kill-line, backspace, back-char, undo, history. The `super+` forms cover the tab actions on macOS; elsewhere use the tab bar or hide the panel first. (The original spec listed them as tab actions; this is the ruling that replaced it.)
+- Composer-scope actions (`app.message.followUp`): they only act in the prompt box.
+- `ctrl+c` is the shell's interrupt, and `Esc` belongs to the shell and TUIs (vim). xterm consumes `Esc`, so it does **not** interrupt the agent turn while the terminal has focus; click out of the terminal first.
+- The platform's copy / paste chords, even when bound: `ctrl+shift+c` / `ctrl+shift+v` off macOS, `super+c` / `super+v` on macOS.
+
+**Copy / paste.** On Linux and Windows the key handler handles `ctrl+shift+c` / `ctrl+shift+v` itself (`clipboardAction`): copy puts xterm's selection on the clipboard through `window.copyText` (nothing happens without a selection), paste reads `navigator.clipboard.readText()` and hands the text to `term.paste` (bracketed paste when the program asked for it). Both call `preventDefault` and return `false`, so neither the keymap nor the WebView's own paste sees the event. On macOS ⌘C / ⌘V stay native (xterm and the WebView). Right-click on a selection copies it everywhere (`copySelection`).
+
+The platform comes from `OMP_KEYMAP.detectMac()`, read once at load; both functions take an optional `isMac` so `test-terminal.mjs` checks both platforms (rebound and unbound toggle, super, ctrl+shift, plain ctrl/alt, composer scope, copy/paste chords).
 
 ## Vendored xterm
 
@@ -187,4 +199,4 @@ The trust boundary is the integrity of the webview's JavaScript, as for tool app
 
 ## Not covered
 
-One shell per tab, no splits; no WebGL renderer; a webview reload ends every shell (`close_all_tabs`) rather than reattaching; runtime verification is macOS only, the Windows compile and ConPTY behaviour and the Linux runtime are pending CI (see Kill model).
+One shell per tab, no splits; no WebGL renderer; a webview reload ends every shell (`close_all_tabs`) rather than reattaching; runtime verification is macOS and Linux (the unix tests); the Windows tests (`tests_windows.rs`) compile here and run on the Windows CI leg only.
