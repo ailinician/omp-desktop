@@ -455,6 +455,45 @@ async fn terminal_set_shell(
     with_blocking(&terminal, move |t| t.set_shell(&shell)).await
 }
 
+/// "other…" in the shell menu: pick a program with the native file dialog
+/// and store it as `terminal_set_shell` would. `None` when the dialog was
+/// cancelled. The path comes from the OS dialog, never from the webview.
+/// Callback-based `pick_file` for the reason `open_project` gives. Parented
+/// to the calling window, which makes it modal on Windows and macOS (the
+/// Tweaks panel cannot change under a pick, no second dialog); rfd's GTK3
+/// backend ignores the parent, so on Linux the window stays usable.
+#[tauri::command]
+async fn terminal_pick_shell(
+    window: tauri::WebviewWindow,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Result<Option<terminal::TerminalSettings>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dialog = window
+        .dialog()
+        .file()
+        .set_title("Choose a Shell")
+        .set_parent(&window);
+    #[cfg(windows)]
+    let dialog = dialog.add_filter("Programs", &["exe"]);
+    dialog.pick_file(move |result| {
+        let _ = tx.send(result);
+    });
+    with_blocking(&terminal, move |t| {
+        let Some(picked) = rx.recv().map_err(|e| format!("channel error: {e}"))? else {
+            return Ok(None);
+        };
+        let path = picked
+            .into_path()
+            .map_err(|e| format!("invalid picked path: {e}"))?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| format!("{} is not a UTF-8 path", path.display()))?;
+        t.set_shell(path).map(Some)
+    })
+    .await
+}
+
 /// Query a session's last error. Returns `None` if the session is
 /// running (or has never been started under this id), `Some(reason)`
 /// if its last `start_session` attempt failed.
@@ -1188,6 +1227,7 @@ pub fn run() {
             terminal_resize,
             terminal_settings,
             terminal_set_shell,
+            terminal_pick_shell,
             close_tab,
             close_all_tabs,
             session_status,

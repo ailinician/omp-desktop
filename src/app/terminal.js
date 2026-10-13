@@ -189,6 +189,39 @@
     return window.OMP_PROJECT_NAV.basename(path).replace(/\.exe$/i, "") || "shell";
   }
 
+  /** A Windows drive path (`C:\…`, `C:/…`). */
+  const DRIVE_PATH = /^[A-Za-z]:[\\/]/;
+  const windowsKey = (p) => p.replace(/\//g, "\\").toLowerCase();
+
+  /** Same program path: exact, or for two Windows drive paths ignoring case
+   *  and `/` vs `\` (a 0.7.0 setting typed as `C:\Windows\…` or `C:/Windows/…`
+   *  names the listed `C:\WINDOWS\…`). */
+  function samePath(a, b) {
+    return a === b || (DRIVE_PATH.test(a) && DRIVE_PATH.test(b) && windowsKey(a) === windowsKey(b));
+  }
+
+  /**
+   * Tweaks → Terminal's shell button and menu for Rust's `TerminalSettings`
+   * (`{ shell, defaultShell, shells }`): `{ label, rows }`. `label` names the
+   * shell new terminals run (the stored one, else the default). `rows` are
+   * `{ name, hint, path, value, checked }`: `default` (value "", `hint` the
+   * default shell's name, so a row says what it runs), each installed shell,
+   * and the stored shell when it is none of them (set before, or picked with
+   * "other…"; `hint` "other", so it stands apart from a listed shell of the
+   * same name), so the menu always shows what is in use. `path` is the full
+   * program, for a tooltip. `value` is what `setTerminalShell` stores;
+   * exactly one row is checked.
+   */
+  function shellMenu(settings) {
+    const shell = settings?.shell ?? "";
+    const defaultShell = settings?.defaultShell ?? "";
+    const row = (name, path, value, hint = "") => ({ name, hint, path, value, checked: samePath(value, shell) });
+    const rows = [row("default", defaultShell, "", defaultShell ? shellLabel(defaultShell) : "")];
+    for (const s of settings?.shells ?? []) rows.push(row(s.name, s.path, s.path));
+    if (shell && !rows.some((r) => r.checked)) rows.push(row(shellLabel(shell), shell, shell, "other"));
+    return { label: shellLabel(shell || defaultShell), rows };
+  }
+
   /**
    * A dragged panel height (finite px) for a session column `columnHeight`
    * px tall: rounded to whole pixels, at least MIN_HEIGHT (120) and at most
@@ -217,6 +250,7 @@
     keymapShouldBypass,
     clipboardAction,
     shellLabel,
+    shellMenu,
     clampHeight,
   };
 })();

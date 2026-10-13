@@ -9,7 +9,7 @@ use crate::child_path;
 
 /// Shells that take `-l -i` (login, interactive), by file name (Windows:
 /// file stem of an `.exe`, any case).
-const LOGIN_SHELLS: [&str; 7] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "nu"];
+pub(super) const LOGIN_SHELLS: [&str; 7] = ["sh", "bash", "zsh", "fish", "dash", "ksh", "nu"];
 /// What the shell gets as `LANG` on macOS when the app has no locale (see
 /// [`fallback_lang`]).
 #[cfg(any(target_os = "macos", test))]
@@ -92,7 +92,9 @@ pub fn default_shell() -> PathBuf {
     PathBuf::from(CommandBuilder::new_default_prog().get_shell())
 }
 
-fn is_executable_file(path: &Path) -> bool {
+/// An absolute path to an executable file (unix: any execute bit; Windows:
+/// any file). What a shell setting must be.
+pub(super) fn is_executable_file(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

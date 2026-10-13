@@ -32,6 +32,7 @@ mod pump;
 mod ring;
 mod settings;
 mod shell;
+mod shells;
 mod stream;
 #[cfg(test)]
 mod test_support;
@@ -359,9 +360,9 @@ impl TerminalManager {
         close_shells(&shells);
     }
 
-    /// The shell setting and its default. The default may query the user
-    /// database (`getpwuid`, possibly a directory service): call off the IPC
-    /// thread.
+    /// The shell setting, its default and the installed shells. The default
+    /// may query the user database (`getpwuid`, possibly a directory
+    /// service) and the list checks files: call off the IPC thread.
     pub fn settings(&self) -> TerminalSettings {
         self.settings.settings()
     }

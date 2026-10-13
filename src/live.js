@@ -3437,8 +3437,9 @@
         p => cb({ instance: p.instance, code: p.code ?? null }));
     },
 
-    /** The saved shell setting: `{ shell, defaultShell }` (`shell` "" = the
-     *  default, `defaultShell` = what that runs); `null` without Tauri or
+    /** The saved shell setting: `{ shell, defaultShell, shells }` (`shell`
+     *  "" = the default, `defaultShell` = what that runs, `shells` = the
+     *  installed `{ name, path }` the menu offers); `null` without Tauri or
      *  when Rust refused. */
     terminalSettings() {
       return _invokeSafe("terminal_settings", {}, null);
@@ -3449,6 +3450,14 @@
     async setTerminalShell(shell) {
       const res = await _invokeResult("terminal_set_shell", { shell: typeof shell === "string" ? shell : "" });
       return res.ok ? { ok: true, settings: res.value } : res;
+    },
+
+    /** "other…": Rust opens the native file dialog and stores the program
+     *  picked. `{ ok: true, settings }` (`settings` null = cancelled) or
+     *  `{ ok: false, error }`. */
+    async pickTerminalShell() {
+      const res = await _invokeResult("terminal_pick_shell", {});
+      return res.ok ? { ok: true, settings: res.value ?? null } : res;
     },
 
     /** Usage statistics for the active tab's profile — see usage_stats in

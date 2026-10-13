@@ -376,6 +376,60 @@ check("shellLabel is the basename without .exe", () => {
   assert.equal(T.shellLabel(undefined), "shell");
 });
 
+// ---- shellMenu --------------------------------------------------------------
+
+const SHELLS = [
+  { name: "cmd", path: "C:\\WINDOWS\\System32\\cmd.exe" },
+  { name: "pwsh", path: "C:\\Program Files\\PowerShell\\7\\pwsh.exe" },
+];
+const menu = (shell) => T.shellMenu({ shell, defaultShell: "C:\\WINDOWS\\system32\\cmd.exe", shells: SHELLS });
+const checkedOf = (m) => m.rows.filter((r) => r.checked).map((r) => r.name);
+
+check("shellMenu: an empty setting checks default and names the default shell", () => {
+  const m = menu("");
+  assert.equal(m.label, "cmd");
+  assert.deepEqual(m.rows.map((r) => [r.name, r.hint, r.value]), [
+    ["default", "cmd", ""], ["cmd", "", SHELLS[0].path], ["pwsh", "", SHELLS[1].path],
+  ]);
+  assert.deepEqual(checkedOf(m), ["default"]);
+});
+
+check("shellMenu: an installed shell is checked by its path, not as default", () => {
+  const m = menu(SHELLS[1].path);
+  assert.equal(m.label, "pwsh");
+  assert.deepEqual(checkedOf(m), ["pwsh"]);
+  assert.equal(m.rows.length, 3, "no extra row");
+});
+
+check("shellMenu: a Windows path in another case or with / checks the listed row", () => {
+  for (const stored of ["c:\\Windows\\system32\\CMD.EXE", "C:/Windows/System32/cmd.exe"]) {
+    const m = menu(stored);
+    assert.deepEqual(checkedOf(m), ["cmd"], stored);
+    assert.equal(m.rows.length, 3, `no duplicate cmd row for ${stored}`);
+  }
+});
+
+check("shellMenu: a unix path differing only in case is another program", () => {
+  const m = T.shellMenu({ shell: "/usr/bin/Bash", defaultShell: "/bin/zsh", shells: [{ name: "bash", path: "/usr/bin/bash" }] });
+  assert.deepEqual(m.rows.map((r) => [r.name, r.hint, r.checked]), [
+    ["default", "zsh", false], ["bash", "", false], ["Bash", "other", true],
+  ]);
+});
+
+check("shellMenu: a stored shell outside the list gets its own checked row, marked other", () => {
+  const custom = "D:\\tools\\nu\\nu.exe";
+  const m = menu(custom);
+  assert.equal(m.label, "nu");
+  assert.deepEqual(m.rows.at(-1), { name: "nu", hint: "other", path: custom, value: custom, checked: true });
+  assert.deepEqual(checkedOf(m), ["nu"]);
+});
+
+check("shellMenu: settings not loaded yet still give one checked default row", () => {
+  const m = T.shellMenu(null);
+  assert.equal(m.label, "shell");
+  assert.deepEqual(m.rows, [{ name: "default", hint: "", path: "", value: "", checked: true }]);
+});
+
 check("clampHeight stays within [120, 70% of column]", () => {
   assert.equal(T.clampHeight(240, 1000), 240);
   assert.equal(T.clampHeight(50, 1000), 120, "raised to MIN_HEIGHT");

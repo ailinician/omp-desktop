@@ -103,6 +103,20 @@ const __TWEAKS_STYLE = `
   .twk-btn.secondary{background:var(--bg-hover);color:var(--fg-2);border:1px solid var(--line)}
   .twk-btn.secondary:hover{background:var(--bg-active);color:var(--fg)}
 
+  .twk-pick{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 8px 0 10px;
+    font-family:var(--font-mono,ui-monospace,monospace);font-weight:500}
+  .twk-menu{display:flex;flex-direction:column;gap:1px;padding:3px;
+    border:1px solid var(--line);border-radius:var(--r-1,7px);background:var(--bg-input)}
+  .twk-menu-item{appearance:none;border:0;background:transparent;color:var(--fg-2);font:inherit;
+    display:flex;align-items:baseline;gap:8px;min-width:0;padding:4px 6px;
+    border-radius:5px;text-align:left;cursor:default}
+  .twk-menu-item:hover{background:var(--bg-hover);color:var(--fg)}
+  .twk-menu-item:focus-visible{outline:2px solid var(--accent);outline-offset:-1px}
+  .twk-menu-item[aria-checked="true"]{color:var(--fg)}
+  .twk-menu-mark{width:10px;flex:none;align-self:center;display:inline-flex}
+  .twk-menu-name{flex:none;font-family:var(--font-mono,ui-monospace,monospace)}
+  .twk-menu-hint{color:var(--fg-4);font-family:var(--font-mono,ui-monospace,monospace)}
+
   .twk-swatch{appearance:none;-webkit-appearance:none;width:56px;height:22px;
     border:1px solid var(--line);border-radius:var(--r-1,6px);padding:0;cursor:default;
     background:transparent;flex-shrink:0}

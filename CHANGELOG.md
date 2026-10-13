@@ -6,9 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Tweaks → Terminal: the shell is picked from a menu instead of typed as a path. The button shows the shell new terminals start (`cmd`, `pwsh`, `zsh`, …) and opens a list of `default` and the shells installed on this computer — on Windows `cmd`, `powershell`, `pwsh`, Git Bash (`bash`) and `nu`; on Linux and macOS `sh`, `bash`, `zsh`, `fish`, `dash`, `ksh` and `nu` — each only when it is installed. "other…" picks any other program with a file dialog.
+
 ### Fixed
 
-- Tweaks: a long path no longer runs off the panel. The `plugins` row under Rail shows the full path to `widgets.json` on its own line, wrapped, and the empty shell field under Terminal shows the default shell's path itself instead of a cut-off `default (…)`.
+- Tweaks: a long path no longer runs off the panel. The `plugins` row under Rail shows the full path to `widgets.json` on its own line, wrapped.
 
 ## [0.7.0] - 2026-10-13
 

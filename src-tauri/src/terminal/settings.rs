@@ -19,6 +19,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use serde::{Deserialize, Serialize};
 
 use super::shell;
+use super::shells::{self, ShellChoice};
 use crate::json_store;
 
 /// The on-disk shape. Unknown keys are dropped on the next write; add a
@@ -35,8 +36,10 @@ struct SettingsFile {
 pub struct TerminalSettings {
     /// The stored setting; empty = the default shell.
     pub shell: String,
-    /// The program an empty setting runs (the Tweaks field's placeholder).
+    /// The program an empty setting runs (the menu's `default` row).
     pub default_shell: String,
+    /// The installed shells the menu offers.
+    pub shells: Vec<ShellChoice>,
 }
 
 /// `terminal.json` plus its in-memory copy.
@@ -91,12 +94,14 @@ impl SettingsStore {
         self.cached().clone()
     }
 
-    /// The stored shell and what the default resolves to. The default may
-    /// query the user database (`getpwuid`): call off the IPC thread.
+    /// The stored shell, what the default resolves to and the installed
+    /// shells. The default may query the user database (`getpwuid`) and the
+    /// list checks files: call off the IPC thread.
     pub fn settings(&self) -> TerminalSettings {
         TerminalSettings {
             shell: self.shell(),
             default_shell: shell::default_shell().display().to_string(),
+            shells: shells::available(),
         }
     }
 
