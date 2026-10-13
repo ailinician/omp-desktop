@@ -342,12 +342,15 @@ fn cap_error() -> String {
     format!("stdout exceeds {} KiB", STDOUT_CAP_BYTES / 1024)
 }
 
+/// Last [`ERR_TAIL_CHARS`] of a failing run's output, with credential
+/// shapes masked first (`redact::redact_secrets`) so a CLI that echoes an
+/// `Authorization` header never shows it in the rail.
 fn tail(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
-    let s = s.trim();
+    let s = crate::widgets::redact::redact_secrets(s.trim());
     let count = s.chars().count();
     if count <= ERR_TAIL_CHARS {
-        s.to_string()
+        s.into_owned()
     } else {
         s.chars().skip(count - ERR_TAIL_CHARS).collect()
     }
@@ -410,6 +413,25 @@ mod tests {
             serde_json::from_str(r.stdout.as_deref().unwrap_or("")).expect("json on stdin");
         assert_eq!(v["session"], "s1");
         assert_eq!(v["version"], 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failure_tail_redacts_credentials() {
+        let r = run_plugin(
+            &entry(
+                &[
+                    "sh",
+                    "-c",
+                    "echo 'Authorization: Bearer SYNTHETIC123' >&2; exit 2",
+                ],
+                5_000,
+            ),
+            &ctx(),
+        );
+        let e = r.error.expect("error");
+        assert!(e.contains("Bearer [REDACTED]"), "{e}");
+        assert!(!e.contains("SYNTHETIC123"), "{e}");
     }
 
     #[cfg(unix)]

@@ -5,6 +5,7 @@
 //! one implementation and one regression test.
 
 pub mod config;
+pub mod redact;
 pub mod run;
 
 pub use config::{load, validate_widget_args, WidgetConfig};

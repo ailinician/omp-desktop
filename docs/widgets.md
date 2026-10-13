@@ -141,7 +141,7 @@ Blocks:
 
 | Failure | Card shows |
 |---|---|
-| Exit ≠ 0 | last 300 chars of stderr (stdout if stderr is empty) |
+| Exit ≠ 0 | last 300 chars of stderr (stdout if stderr is empty); common credential shapes (`Bearer …`, `token=…`, `ghp_…`, URL userinfo) are masked as `[REDACTED]`, other diagnostics are shown as printed |
 | Timeout | `timed out after N ms` |
 | stdout over the cap | `stdout exceeds 256 KiB` |
 | Non-JSON stdout | `stdout is not JSON: <first 120 chars>` |
