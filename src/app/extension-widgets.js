@@ -6,9 +6,12 @@
 //   cards(ext) / toggles(ext)
 //                          WidgetCard models and Tweaks → Rail rows
 // State is `{ statuses: [{key, text}], widgets: [{key, lines, more}] }`, keys
-// in the order they first appeared (a replaced key keeps its place, as in
-// omp's TUI). The same bounds as src-tauri/src/agent/ext_ui.rs, so a snapshot
-// and the live frames give the same cards.
+// in the order they first appeared: a replaced key keeps its place, so a card
+// never jumps in the rail (omp's TUI sorts statuses and moves a replaced
+// widget to the end). Key and line bounds match src-tauri/src/agent/ext_ui.rs;
+// the backend keeps up to 4 KiB of raw text per line (escapes included) and
+// this module strips, then shows 500 characters, so a snapshot and the live
+// frames give the same cards for any line under that memory bound.
 (function () {
   const LIMITS = { keys: 32, lines: 50, text: 500, keyBytes: 200 };
   const EMPTY = Object.freeze({ statuses: Object.freeze([]), widgets: Object.freeze([]) });
@@ -21,8 +24,9 @@
   // Terminal styling never reaches the rail: CSI (SGR colours, cursor moves),
   // OSC (OSC 8 hyperlinks keep their text, titles go), C1 CSI, any other
   // ESC sequence (charset designations too), then every remaining control
-  // but tab and newline.
-  const VT = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|\u009b[0-?]*[ -/]*[@-~]|\u001b[ -/]*[0-~]?/g;
+  // but tab and newline. A CSI may also end at the end of the text, where
+  // the backend's byte cap can cut one off.
+  const VT = /\u001b\[[0-?]*[ -/]*(?:[@-~]|$)|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|\u009b[0-?]*[ -/]*(?:[@-~]|$)|\u001b[ -/]*[0-~]?/g;
   const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
   function clean(text) {
     const s = text.replace(VT, "").replace(CONTROL, "");

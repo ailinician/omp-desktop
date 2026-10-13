@@ -28,28 +28,30 @@ omp's RPC UI context (`packages/coding-agent/src/modes/rpc/rpc-mode.ts`) writes 
 - Statuses and widgets are separate key spaces.
 - A widget built as a component factory is not forwarded at all, so a key that switches from lines to a factory keeps its last lines.
 - `widgetPlacement` is a TUI layout hint; the rail ignores it.
-- Lines are usually plain (chalk is level 0 when stdout is not a TTY) but may carry SGR and OSC 8; `extension-widgets.js` strips CSI, OSC, other ESC sequences and C0/C1 controls except tab and newline.
+- Lines often carry escapes: `ctx.ui.theme.fg` always emits its truecolor or 256-colour SGR code plus `ESC[39m`, whatever the TTY, and OSC 8 links carry their whole URL. `extension-widgets.js` strips CSI (also one cut off at the end of the text), OSC, other ESC sequences and C0/C1 controls except tab and newline.
 - `select`, `confirm`, `input`, `editor` and `ask` are the awaited methods. Any method the desktop has no UI for still gets `{cancelled: true}` unless `isFireAndForget` names it: a reply to a fire-and-forget id is noise omp ignores.
 - In the TUI since v0.31 (`setStatus`) / v0.34 (`setWidget`), under `extension_ui_request` since v0.35: no `MIN_OMP_VERSION` change.
 
 ## State and bounds
 
-`{ statuses: [{key, text}], widgets: [{key, lines, more}] }`, keys in first-appearance order; replacing a key keeps its place (omp's TUI uses a `Map`). Same bounds on both sides, so a snapshot and the live frames give the same cards:
+`{ statuses: [{key, text}], widgets: [{key, lines, more}], seq }`, keys in first-appearance order; replacing a key keeps its place, so a card never jumps in the rail. That is the desktop's choice: omp's TUI sorts statuses by key and moves a replaced widget to the end.
 
 | Bound | Rust (`ext_ui.rs`) | JS (`extension-widgets.js`) |
 |---|---|---|
 | keys per kind | 32, further keys ignored until one is removed | same |
 | key length | 200 UTF-8 bytes, longer ignored | same (counted in UTF-8) |
 | lines per widget | 50; `more` counts the string lines past it | same; `fromSnapshot` adds the backend's `more` |
-| text per status / line | 2000 bytes, cut on a char boundary | 500 chars after stripping, `…` |
+| text per status / line | 4 KiB raw (escapes included), cut on a char boundary: a memory bound | 500 chars after stripping, `…` |
 
-Non-string lines are skipped; a non-array `widgetLines` is a removal.
+Non-string lines are skipped; a non-array `widgetLines` is a removal. Key and line bounds are identical, and `fromSnapshot` runs the same stripping and 500-character cap as live frames, so a snapshot and the live frames give the same cards for every line up to 4 KiB raw. A longer line (rare: mostly escape bytes, e.g. many long OSC 8 URLs) can end earlier in a snapshot than live.
 
 ## Why a copy in Rust
 
 The frontend processes only the active tab's frames; a background tab's lines wait in its event journal (`agent/journal.rs`, 256 lines / 8 MiB) until activation replays them. One streamed turn overflows that ring, and omp has no command to query its current widgets. Without the backend copy, every `setStatus`/`setWidget` among the evicted lines would be lost, and a tab would come back after a background turn with stale or missing cards.
 
-So the stdout reader applies each `extension_ui_request` frame to the session's `ExtUiState` (a type check on the frame it already parsed; other frames cost nothing more), before pushing the line to the journal. On activation (`_switchToSession`), when `replay_events` reports `dropped`, the frontend replaces `state.extWidgets` with `fromSnapshot(extension_ui_state)` and then drains the live lines buffered since its listener attached. The snapshot is at least as new as any buffered line, and set/remove per key is idempotent, so re-applying those lines in order converges on the backend's state. Without `dropped`, the replay alone is complete and no snapshot is fetched.
+So the stdout reader applies each `extension_ui_request` frame to the session's `ExtUiState` right after pushing the line to the journal, stamping `seq` with that line's journal seq (a type check on the frame it already parsed; other frames cost nothing more). Applied or ignored, every such frame advances `seq`.
+
+On activation (`_switchToSession`), when `replay_events` reports `dropped`, the frontend fetches `extension_ui_state` **before** dispatching the replay, replaces `state.extWidgets` with `fromSnapshot(...)` and sets `extSnapshotSeq` to the snapshot's `seq`. The `setStatus`/`setWidget` handler then skips every replayed or buffered frame whose journal seq is at or below `extSnapshotSeq` and applies the newer ones on top: the same frames, in the same order, on the same state as the backend, so the result is the backend's exactly, the key bound included. A frame pushed but not yet recorded when the snapshot was taken has a higher seq than the snapshot names, so it is applied from the replay. Fetching before the dispatch matters for a newer tab switch during the await: it saves this tab with its old `lastSeq`, so the next visit replays (and fetches) again instead of keeping a cursor past frames that never reached `state.extWidgets`. Without `dropped`, the replay alone is complete and no snapshot is fetched.
 
 The backend sees whole lines only: a frame omp splits into protocol-v2 chunks (over 1 MiB, far beyond the bounds above) reaches the frontend live but not `ExtUiState`.
 
@@ -58,7 +60,7 @@ The backend sees whole lines only: a frame omp splits into protocol-v2 chunks (o
 omp never sends a clear or re-send on a session change, and its TUI keeps extension widgets through a user's `/new`, `/resume`, branch and fork (`clearHookWidgets` runs only around an extension-initiated `newSession`/`switchSession`; statuses always persist). The desktop matches the user-initiated case:
 
 - `_reloadConversation` (`new_session`, branch, fork) carries `state.extWidgets` across its `_resetSessionVars`.
-- `_endDeadProcessState` (exit, startup death) clears it. The Rust copy lives on the session's `BridgeInner`, which a process exit, `stop_session` or a respawn under the same id (profile switch) removes or replaces, so `extension_ui_state` is empty for it.
+- `_endDeadProcessState` (exit, startup death) clears it. A background tab's process can end with no exit listener attached and no cached reason (a clean exit, a crash after startup); on its next activation `replay_events` fails with `not found`, which runs `_endDeadProcessState` as well. The Rust copy lives on the session's `BridgeInner`, which a process exit, `stop_session` or a respawn under the same id (profile switch) removes or replaces, so `extension_ui_state` is empty for it.
 - Tab switches save and restore it with the rest of the per-tab state.
 
 ## Rendering

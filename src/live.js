@@ -105,6 +105,10 @@
   let lastSeq         = 0;   // highest journal seq processed for the active session — see _dispatchEnvelope
   let lastTurnOk      = true; // last assistant message_end was not error/aborted — a failed first exchange must not spend the one-shot
   let _replayBuffer   = null; // null = live dispatch; [] = buffering during a replay (see _switchToSession)
+  // Journal seq the active tab's extension snapshot reflects (`extension_ui_state`
+  // after a dropped replay): replayed and buffered setStatus / setWidget
+  // frames at or below it are already in `state.extWidgets`. 0 = none.
+  let extSnapshotSeq  = 0;
   // The user's `abort` is in flight — set by `abort()`, cleared by its
   // id-less response. omp pauses an active goal on abort, and that pause is
   // labelled as the user's stop (app/goal.js `fromFrame`).
@@ -706,6 +710,7 @@
     turnStartTime   = null;
     activityLog     = [];
     lastSeq         = 0;
+    extSnapshotSeq  = 0;
     userAbortInFlight = false;
   }
 
@@ -843,6 +848,7 @@
     // arrives between listener-attach and the replay fetch below is queued
     // (never lost, never double-processed) — drained once replay is applied.
     _replayBuffer = [];
+    extSnapshotSeq = 0;
 
     const { listen } = window.__TAURI__.event;
     const ulLine = await listen(`agent://line/${id}`, ev => handleLine(ev.payload));
@@ -888,6 +894,21 @@
       if (replay.dropped) {
         console.warn(`[live] session '${id}' replay desynced — recovered ${replay.events.length} event(s); earlier ones fell outside the journal window`);
       }
+      // Extension status lines / widgets: the evicted lines may have set or
+      // cleared some. The backend applied every frame and names the last one
+      // (`seq`); its copy replaces ours before the replay runs, and the
+      // setStatus / setWidget handler skips frames at or below that seq, so
+      // only newer ones apply on top — the backend's own result. Fetched
+      // before dispatching, so a newer tab switch during the await saves
+      // this tab with its old `lastSeq` and the next visit fetches again.
+      if (replay.dropped) {
+        const ext = await _invokeSafe("extension_ui_state", { sessionId: id }, null);
+        if (_switchGen !== myGen) return; // superseded by a newer switch
+        if (ext) {
+          state.extWidgets = EXT.fromSnapshot(ext);
+          extSnapshotSeq = Number.isInteger(ext.seq) ? ext.seq : 0;
+        }
+      }
       for (const ev of replay.events) _dispatchEnvelope(ev);
       // A pending auto-`/rename` whose outcome note fell out of the ring
       // will never be swallowed, and nothing else would release the flag:
@@ -900,17 +921,12 @@
       }
       // Same for an abort: its response may be among the evicted events.
       if (replay.dropped) userAbortInFlight = false;
-      // And for extension status lines / widgets: the evicted lines may have
-      // set or cleared some. The backend applied every frame, so its copy
-      // replaces ours; the buffered live frames drained below are applied on
-      // top in order, and a set or clear per key is idempotent.
-      if (replay.dropped) {
-        const ext = await window.__TAURI__.core.invoke("extension_ui_state", { sessionId: id });
-        if (_switchGen !== myGen) return; // superseded by a newer switch
-        state.extWidgets = EXT.fromSnapshot(ext);
-      }
     } catch (e) {
       console.warn(`[live] replay_events failed for '${id}':`, e);
+      // The backend no longer has the session: its process ended while the
+      // tab was in the background, with no exit listener attached and no
+      // reason worth caching (a clean exit, a crash after startup).
+      if (/not found/.test(String(e))) _endDeadProcessState();
     }
     if (_switchGen !== myGen) return; // superseded by a newer switch
 
@@ -1911,6 +1927,9 @@
       // `set_editor_text`, which the desktop does not show: omp waits for no
       // reply to any of them, so none is sent.
       if (ev.method === "setStatus" || ev.method === "setWidget") {
+        // Already in the snapshot a dropped replay loaded (see
+        // `extSnapshotSeq`); `lastSeq` is this frame's journal seq here.
+        if (lastSeq <= extSnapshotSeq) return;
         const next = EXT.apply(state.extWidgets, ev);
         if (next !== state.extWidgets) {
           state.extWidgets = next;

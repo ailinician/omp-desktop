@@ -559,12 +559,7 @@ fn cap_diff_text(text: &str) -> (String, bool) {
         let remaining = DIFF_MAX_BYTES.saturating_sub(out.len());
         if end > remaining {
             // Back off to the last char boundary that fits in the budget.
-            end = line
-                .char_indices()
-                .map(|(i, _)| i)
-                .take_while(|&i| i <= remaining)
-                .last()
-                .unwrap_or(0);
+            end = crate::text::prefix_within(line, remaining).len();
             out.push_str(&line[..end]);
             truncated = true;
             break;

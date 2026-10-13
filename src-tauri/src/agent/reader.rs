@@ -271,13 +271,14 @@ pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
                         .as_ref()
                         .and_then(|frame| frame.get("type"))
                         .and_then(serde_json::Value::as_str);
-                    // Before the journal push, so the state is never behind a
-                    // line a replay could hand out.
-                    ext_ui::record(&ext_ui, frame_type, parsed.as_ref());
                     // One allocation for the line, shared with the journal
                     // by refcount rather than copied into it.
                     let shared: std::sync::Arc<str> = std::sync::Arc::from(text);
                     let seq = journal.lock().map_or(0, |mut j| j.push(shared.clone()));
+                    // After the push, stamped with its seq: a snapshot taken
+                    // in between names an older seq, so the frontend still
+                    // applies this frame from the replay.
+                    ext_ui::record(&ext_ui, seq, frame_type, parsed.as_ref());
                     if should_emit(&alive) {
                         let _ = app.emit(&line_event, LineEvent { seq, text: &shared });
                         // Rail widgets with a `turn_end` trigger rerun after

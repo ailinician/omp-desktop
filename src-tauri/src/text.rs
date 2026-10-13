@@ -1,7 +1,8 @@
 //! Byte-bounded text, shared by every path that caps a string before it
 //! reaches the UI or a child process: the stderr tail of a dead omp
-//! (`agent::reader`), extension status lines and widgets (`agent::ext_ui`)
-//! and a widget plugin's context fields (`widgets::context`).
+//! (`agent::reader`), extension status lines and widgets (`agent::ext_ui`),
+//! a widget plugin's context fields (`widgets::context`) and the Changes
+//! panel's diff (`workspace`).
 
 /// The longest prefix of `text` that fits in `max_bytes` without splitting a
 /// char: slicing or `String::truncate` at a non-boundary panics, and none of

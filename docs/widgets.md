@@ -353,7 +353,7 @@ omp extensions show their own UI through `ctx.ui.setStatus(key, text)` and `ctx.
 
 Both cards carry an `extension` chip and the accent border. They have no refresh button: the extension pushes every update, and `setStatus(key, undefined)` / `setWidget(key, undefined)` removes the row or card. Terminal styling is stripped (colours from `ctx.ui.theme.fg`, OSC 8 hyperlinks keep their text), and everything is shown as text. A widget an extension builds as a component (a factory instead of a `string[]`) never reaches the desktop: omp only forwards line arrays.
 
-**Per tab.** Each tab shows what its own omp process published, including what a background tab published while you were elsewhere. A tab's statuses and widgets stay through `/new`, branch and fork, as in omp's terminal UI (extensions that care refresh them on `session_switch`), and go away when its omp process ends or is restarted (profile switch).
+**Per tab.** Each tab shows what its own omp process published, including what a background tab published while you were elsewhere. A tab's statuses and widgets stay through `/new`, branch and fork, as in omp's terminal UI (extensions that care refresh them on `session_switch`, and on `session_branch` for a branch), and go away when its omp process ends or is restarted (profile switch).
 
 **Hiding.** Tweaks → Rail lists `extension: status lines` and `extension: <key>` for what the active tab has published, stored as `widget:ext-status` and `widget:ext:<key>` next to the plugins' `widget:plugin:<id>`. A hidden card's updates are still kept, so it comes back current.
 

@@ -64,7 +64,7 @@ Regression files are mostly named after the `src/app/<name>.js` module they cove
 |`src-tauri/src/{approval,model_usage,updater,external_open,child_path,navigation_guard}.rs`|tool-approval rules, model MRU, updater, OS folder opens, child PATH, webview navigation guard|
 |`src-tauri/src/widgets/`|rail widget plugins: `config.rs` (`widgets.json` load/validate, matching), `schedule.rs` (pure trigger/run scheduler), `trust.rs` (fingerprint, `widget-approvals.json`), `host.rs` (`WidgetHost`: scheduler thread, run registry, emits), `run.rs` (spawn, timeout, stdout cap, process-tree kill), `context.rs` (git context), `redact.rs`|
 |`src-tauri/src/redaction.rs`|credential key list + placeholder shared by `agent/reader.rs` and `widgets/redact.rs`|
-|`src-tauri/src/text.rs`|`prefix_within`: byte-bounded, char-safe prefix — the one helper for capping text (`agent/reader.rs` stderr tail, `agent/ext_ui.rs`, `widgets/context.rs`)|
+|`src-tauri/src/text.rs`|`prefix_within`: byte-bounded, char-safe prefix — the one helper for capping text by bytes (`agent/reader.rs` stderr tail, `agent/ext_ui.rs`, `widgets/context.rs`, `workspace.rs` diff cap)|
 |`src/app/widgets.js`, `src/app/use-widgets.jsx`, `src/design/widgets/`|widget output parser + limits (`widgets.js`), thin hook (snapshot + `widgets://` events → cards, view state → Rust), card/approval/error/block renderers|
 |`examples/widgets/`|bundled widget plugins + `widgets.example.json` (`docs/widgets.md`)|
 |`src-tauri/packaging/`|Info.plist, Linux `.desktop`, Windows folder verb (`.nsh` + `.wxs`)|

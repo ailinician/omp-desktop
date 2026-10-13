@@ -8,9 +8,12 @@
 //! event journal, whose 256-line ring one streamed turn overflows. The stdout
 //! reader therefore applies every frame here as well, and a reactivated tab
 //! whose replay came back `dropped` loads this state instead
-//! (`extension_ui_state` command). It lives on the session's map entry, so it
-//! ends with the process: an exit, a `stop_session` or a respawn under the
-//! same id (profile switch) all start from nothing.
+//! (`extension_ui_state` command). `seq` names the last frame applied, so the
+//! frontend skips replayed and buffered frames the state already holds and
+//! applies only newer ones — on top of the same state, that gives the same
+//! result as here. It lives on the session's map entry, so it ends with the
+//! process: an exit, a `stop_session` or a respawn under the same id
+//! (profile switch) all start from nothing.
 //!
 //! Only whole frames are seen here: a frame omp splits into protocol-v2
 //! chunks (over 1 MiB, far beyond the bounds below) reaches the frontend
@@ -23,8 +26,12 @@ use serde_json::Value;
 pub const MAX_KEYS: usize = 32;
 /// Lines kept per widget; the frontend shows as many.
 pub const MAX_LINES: usize = 50;
-/// Bytes kept per status text or widget line, cut on a char boundary.
-pub const MAX_TEXT_BYTES: usize = 2000;
+/// Bytes kept per status text or widget line, cut on a char boundary: a
+/// memory bound on raw text, escape sequences included (`theme.fg` colours
+/// and OSC 8 link URLs can make up most of a line). The frontend strips
+/// those first and then shows at most 500 characters, so any line it can
+/// show in full fits.
+pub const MAX_TEXT_BYTES: usize = 4096;
 /// Longer keys are ignored: a key is a card title and a Tweaks key.
 pub const MAX_KEY_BYTES: usize = 200;
 
@@ -44,11 +51,15 @@ pub struct ExtWidget {
 }
 
 /// Statuses and widgets in the order their keys first appeared; replacing a
-/// key keeps its place, as omp's TUI does.
+/// key keeps its place, so a card never jumps in the rail (omp's TUI instead
+/// sorts statuses by key and moves a replaced widget to the end).
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExtUiState {
     pub statuses: Vec<ExtStatus>,
     pub widgets: Vec<ExtWidget>,
+    /// Journal `seq` of the last `extension_ui_request` frame recorded
+    /// (applied or ignored), 0 for none.
+    pub seq: u64,
 }
 
 impl ExtUiState {
@@ -110,11 +121,13 @@ fn valid_key(value: Option<&Value>) -> Option<&str> {
         .filter(|k| !k.is_empty() && k.len() <= MAX_KEY_BYTES)
 }
 
-/// The stdout reader's per-line hook: apply `frame` to `state` when it is an
-/// `extension_ui_request` (`frame_type` is the type the reader already read).
-/// A poisoned lock leaves the state as it is.
+/// The stdout reader's per-line hook, after the line's journal push: apply
+/// `frame` (journal `seq`) to `state` when it is an `extension_ui_request`
+/// (`frame_type` is the type the reader already read). A poisoned lock
+/// leaves the state as it is.
 pub(super) fn record(
     state: &std::sync::Mutex<ExtUiState>,
+    seq: u64,
     frame_type: Option<&str>,
     frame: Option<&Value>,
 ) {
@@ -123,6 +136,7 @@ pub(super) fn record(
     }
     if let (Some(frame), Ok(mut state)) = (frame, state.lock()) {
         state.apply(frame);
+        state.seq = seq;
     }
 }
 
@@ -196,6 +210,22 @@ mod tests {
         assert_eq!(s.widgets[0].more, 0);
         s.apply(&widget("todos", None));
         assert!(s.widgets.is_empty(), "absent widgetLines removes");
+    }
+
+    #[test]
+    fn record_stamps_the_seq_of_every_extension_frame_and_ignores_others() {
+        let state = std::sync::Mutex::new(ExtUiState::default());
+        let f = status("s", Some("v"));
+        record(&state, 7, Some("extension_ui_request"), Some(&f));
+        let agent_end = json!({ "type": "agent_end" });
+        record(&state, 8, Some("agent_end"), Some(&agent_end));
+        assert_eq!(state.lock().unwrap().seq, 7, "other frames leave seq alone");
+        // A frame that changes nothing still advances seq, so the frontend
+        // never re-applies it on a state where it would change something.
+        let notify = json!({ "type": "extension_ui_request", "method": "notify" });
+        record(&state, 9, Some("extension_ui_request"), Some(&notify));
+        let s = state.lock().unwrap();
+        assert_eq!((s.seq, s.statuses.len()), (9, 1));
     }
 
     #[test]

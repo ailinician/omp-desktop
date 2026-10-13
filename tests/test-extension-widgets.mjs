@@ -62,6 +62,7 @@ check("terminal escapes are stripped: SGR, OSC 8 links keep their text, cursor m
   assert.deepEqual(run(widget("w", [sgr, link, linkBel, misc])).widgets[0].lines,
     ["☑ done", "see the docs now", "here", "abcde" + "f\tg"]);
   assert.equal(run(status("s", "\u001b[33m⏸ plan\u001b[39m")).statuses[0].text, "⏸ plan");
+  assert.equal(run(status("s", "xx\u001b[38;2;105;95;")).statuses[0].text, "xx", "a CSI cut off at the end leaves no parameters");
 });
 check("lines, line length and keys are bounded; non-string lines skipped", () => {
   const ext = run(widget("w", Array.from({ length: 70 }, (_, i) => `l${i}`)));
