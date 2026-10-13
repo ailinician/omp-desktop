@@ -263,6 +263,15 @@ impl AgentBridge {
         Ok(())
     }
 
+    /// Every session with a running (or not yet reaped) omp process — for
+    /// `close_all_tabs`, which ends tabs a previous document left behind.
+    pub fn session_ids(&self) -> Vec<String> {
+        self.sessions.lock().map_or_else(
+            |_| Vec::new(),
+            |sessions| sessions.keys().cloned().collect(),
+        )
+    }
+
     /// Kills the session's process tree and drops its session-scoped
     /// approval grants (`rule_book.clear_session`) — those must not
     /// silently apply to whatever process later reuses this session id.

@@ -15,7 +15,7 @@ Feature internals (RPC frames, state machines, measured omp behaviour) live in `
 |`ask-dialog.md`|omp's ask tool dialog, tool-approval prompts, auto-approval rows|`app/ask-dialog.js`, `chat/ask-dialog.jsx`, `app/approval.js`, `chat/approval-row.jsx`, `approval.rs`|
 |`turn-status.md`|run state, failed requests, auto-retry rows, job rows|`app/turn-status.js`|
 |`chat-collapse.md`|collapsible tool cards and thinking, auto-collapse, per-tab toggles|`app/chat-collapse.js`, `ui/collapse-toggle.jsx`, `chat/chat-view.jsx`|
-|`terminal.md`|per-tab shell panel: pty, shell resolution, tree kill, output frames, key routing, security note|`terminal/`, `app/terminal.js`, `app/use-terminal.jsx`, `design/terminal-panel.jsx`|
+|`terminal.md`|per-tab shell panel: Rust tab registry and spawn slots, cwd/shell ownership, `terminal.json`, `terminal_*`/`close_tab`/`close_all_tabs` commands, seq/instance events, output ring + replay, ack flow control, tree kill, reload behaviour, key routing, security note|`terminal/`, `app/terminal.js`, `app/use-terminal.jsx`, `design/terminal-panel.jsx`|
 |`subagents.md`|subagent manager|`app/subagents.js`, `design/subagents/`|
 |`conversation-tree.md`|conversation tree + prompt-cache model, branch/fork|`conversation_tree/`, `app/conversation-tree*.js`|
 |`goal-mode.md`|goal mode, auto-continue|`app/goal.js`, `goal_config.rs`|
@@ -68,14 +68,14 @@ Regression files are mostly named after the `src/app/<name>.js` module they cove
 |`src-tauri/src/text.rs`|`prefix_within`: byte-bounded, char-safe prefix — the one helper for capping text by bytes (`agent/reader.rs` stderr tail, `agent/ext_ui.rs`, `widgets/context.rs`, `workspace.rs` diff cap)|
 |`src/app/widgets.js`, `src/app/use-widgets.jsx`, `src/design/widgets/`|widget output parser + limits (`widgets.js`), thin hook (snapshot + `widgets://` events → cards, view state → Rust), card/approval/error/block renderers|
 |`examples/widgets/`|bundled widget plugins + `widgets.example.json` (`docs/widgets.md`)|
-|`src-tauri/src/terminal/`|`TerminalManager` (`mod.rs`: map, lifecycle lock, `terminal_*` backend), `pty.rs` (shell resolution, spawn, reader/waiter/writer threads), `pump.rs` (coalesced base64 `terminal://data`/`exit` events), `kill.rs` (tree kill: pty session id on unix, Job Object on Windows)|
+|`src-tauri/src/terminal/`|`TerminalManager` (`mod.rs`: tab registry `id → { folder, Idle/Spawning/Live slot }`, cwd choice, `terminal_*` backend, `TauriEmit`), `settings.rs` (`terminal.json` shell setting), `pty.rs` (shell resolution/validation, spawn, reader/waiter/writer threads), `pump.rs` (coalesced, seq-numbered base64 `terminal://data`/`exit` events, ack flow control), `ring.rs` (per-shell output ring for `terminal_replay`), `kill.rs` (tree kill: pty session id on unix, Job Object on Windows)|
 |`src-tauri/packaging/`|Info.plist, Linux `.desktop`, Windows folder verb (`.nsh` + `.wxs`)|
 |`src/live.js`|the bridge: per-session live state, `sessionRegistry`, `window.OMP_BRIDGE`|
 |`src/adapter.js`|pure RPC ↔ UI shape transforms|
 |`src/app/*.js`|pure logic modules (`window.OMP_*`), each with a regression test|
 |`src/app/use-*.jsx`|React hooks wiring bridge state to UI|
-|`src/app/terminal.js`|pure terminal-panel state, key bypass list, base64 decode (`window.OMP_TERMINAL`)|
-|`src/app/use-terminal.jsx`|per-tab xterm instances, pty event listeners, spawn/fit (the hook, not pure)|
+|`src/app/terminal.js`|pure terminal-panel state over Rust's `TerminalStatus`, key bypass list, shell label, height clamp (`window.OMP_TERMINAL`)|
+|`src/app/use-terminal.jsx`|per-tab xterm instances, data/exit listeners, seq/replay sync and acks, spawn/fit (the hook, not pure)|
 |`src/app-live.jsx`|sole React root|
 |`src/design/`|UI components: `chat/`, `subagents/`, `ui/` (primitives, markdown), `tweaks/`, `layout/` (CSS partials via `_index.css`)|
 |`src/design/terminal-panel.jsx`|terminal panel chrome (head, drag handle, xterm mount node)|
@@ -101,12 +101,14 @@ One tab = one omp process (`--profile <id>`; `default` = no flag). `lib.rs::setu
 - A new RPC command sent from `live.js` must be added to `ALLOWED_COMMAND_TYPES` (`src-tauri/src/agent/mod.rs`), or `send_command` rejects it. A Rust test scans `live.js` for the literal `{ type: "…"` form.
 - `OMP_BRIDGE.abort()` must stay **id-less**: a pending-id match returns from `_handleResponse` before the `abort` branch (auto-rename and goal-mode bookkeeping depend on it).
 - A desktop-made transcript entry must never carry a `ts` (the get_messages merge matches by omp message `ts`).
-- Any new child process that must resolve a user-installed binary goes through `child_path::apply_child_path` (as `spawn::omp_command` and `workspace::git` do) — the MSI relaunch has a machine-only PATH.
+- Any new child process that must resolve a user-installed binary goes through `child_path` (`child_path::apply_child_path` for a `std::process::Command`, as `spawn::omp_command` and `workspace::git` do; `child_path::child_path()` for a builder that is not one, as the terminal's `portable-pty` `CommandBuilder` in `terminal/pty.rs` does) — the MSI relaunch has a machine-only PATH.
 - `omp --profile <unknown>` silently creates that profile's directory: resolve a profile through `profiles::resolve_owned` before any `omp --profile` run. Agent dir per profile: `profiles::agent_dir_for`.
 - omp's `agent.db` (WAL): open read-only, never `immutable=1`, never `SQLITE_OPEN_CREATE`, short `busy_timeout`, one connection per query.
 - Paths reaching the frontend from the OS are canonicalised in Rust (`external_open::canonical_folder`); tab paths and recent entries must stay in that form.
 - `bundle.createUpdaterArtifacts` lives only in `src-tauri/tauri.release.conf.json`. The updater signing key lives only in the `TAURI_SIGNING_PRIVATE_KEY` repo secret and is **never** committed; rotating it strands every installed copy.
-- Relaunch after update skips `Drop` (so does `RunEvent::Exit`): both go through `lib.rs::kill_child_processes`, where `AgentBridge::shutdown_all` kills omp children first and `WidgetHost::kill_all` the running widget plugins next. Don't override the updater plugin's `on_before_exit`.
+- Relaunch after update skips `Drop` (so does `RunEvent::Exit`): both go through `lib.rs::kill_child_processes`, where `AgentBridge::shutdown_all` kills omp children first, `WidgetHost::kill_all` the running widget plugins next and `TerminalManager::shutdown_all` every terminal shell tree. Don't override the updater plugin's `on_before_exit`.
+- `close_tab` (`live.js` `_closeTab`, behind `closeSession`, a failed start's rollback and a respawn whose tab was closed meanwhile) is the **only** path that ends a tab: it stops omp, the tab's widgets, its git watcher and its terminal together. `close_all_tabs` runs it for every registered id and is invoked once at webview boot, before `_restoreOpenTabs` (tab ids are never reused across a reload, so anything registered then is an orphan of the previous document). `stop_session` is for profile switches only and must **not** touch the terminal: the tab keeps its shell while omp restarts under the same id. `start_session` registers the terminal tab (`TerminalManager::register_tab`) before it spawns omp.
+- Terminal policy lives in Rust (`docs/architecture/terminal.md`): the webview sends only a tab id, keystrokes, sizes, acks and replay cursors — never a cwd or shell path for a spawn. The shell setting is `<app config>/terminal.json`, written only through `terminal_set_shell` (validated, `json_store`); no `localStorage` copy.
 
 ## Frontend load order (`src/index.html`)
 

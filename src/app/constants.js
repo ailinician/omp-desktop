@@ -31,7 +31,6 @@
     "updateCheck": true,
     "skippedUpdate": null,
     "sidebar": true,
-    "terminalShell": "",
     "terminalAutoOpen": false,
     "terminalHeight": 240
   }/*EDITMODE-END*/;

@@ -1,37 +1,40 @@
 // Terminal panel: pure helpers behind the per-tab shell panel. Rust owns the
-// pty (terminal_open/write/resize/close, `terminal://data|exit/{id}` events);
-// this file decides the panel's state, which keystrokes xterm must hand back
-// to the global keymap, and decodes the base64 pty frames.
+// tab's shell — when it spawns, in which folder, with which program, its
+// output ring and its status (`terminal_*` commands, `terminal://data|exit/
+// {id}` events). This file holds only view state: whether a tab's panel is
+// shown, what Rust last said about its shell, and which keystrokes xterm
+// must hand back to the global keymap.
 //
-// Panel state is `{ [sessionId]: { open, created, spawned, exited, exitCode,
-// exitGen } }`, immutable: every transition returns a new object, or the same
-// one when nothing changes. `open` is only visibility — collapsing keeps the
-// shell (`spawned` stays true). `created` is set the first time the panel is
-// opened and stays: from then on the tab owns an xterm instance, which the
-// view keeps mounted (hidden) until the tab goes, so even a panel hidden
-// while its first spawn was pending or failed comes back intact. `exited`
-// stays set across close/reopen until `markSpawned` records the respawn, so
-// reopening an exited panel shows the "shell exited" banner instead of
-// silently starting a new shell.
+// Panel state is `{ [sessionId]: { open, created, status, error } }`,
+// immutable: every transition returns a new object, or the same one when
+// nothing changes. `open` is only visibility — collapsing keeps the shell.
+// `created` is set the first time the panel is opened and stays: from then
+// on the tab owns an xterm instance, which the view keeps mounted (hidden)
+// until the tab goes. `status` is Rust's `TerminalStatus` (`{ instance,
+// shell, state: "starting"|"running"|"exited", exitCode }`) or null while
+// the tab has no shell; `error` is why the last `terminal_open` failed.
+// Neither an exit nor a failed start respawns by itself: the user presses
+// Enter (`isExited`), and only a tab with no shell at all spawns on show
+// (`needsSpawn`).
 //
-// Spawn generations: every spawn attempt has a number (the hook counts
-// them). `exitGen` is the generation an exit was seen in. A shell that dies
-// at once can emit its exit before `terminal_open` resolves; `markSpawned`
-// of the same generation must then keep that exit instead of clearing it,
-// while a later generation (the respawn) does clear it.
+// Ordering: each spawn has a global, increasing `instance`. A status or
+// exit of an older instance than the one shown is stale and ignored, and
+// within one instance the state only moves forward (starting → running →
+// exited), so a late `terminal_open` reply never hides an exit that
+// already arrived.
 //
 // Exposes `window.OMP_TERMINAL`; dependency-free IIFE (AGENTS.md "IIFE
 // rule"). design/terminal-panel.jsx and app/use-terminal.jsx destructure it
 // at top level, so it must load before them.
 (function () {
   const EMPTY = Object.freeze({});
-  const CLOSED = Object.freeze({
-    open: false, created: false, spawned: false, exited: false, exitCode: null, exitGen: null,
-  });
+  const CLOSED = Object.freeze({ open: false, created: false, status: null, error: null });
 
   const DEFAULT_HEIGHT = 240;
   const MIN_HEIGHT = 120;
   const MAX_HEIGHT_RATIO = 0.7;
+
+  const STATE_RANK = { starting: 0, running: 1, exited: 2 };
 
   function entryOf(s, sid) {
     return (s && s[sid]) || CLOSED;
@@ -51,26 +54,53 @@
     entryOf(s, sid).open ? closePanel(s, sid) : openPanel(s, sid);
 
   /**
-   * The shell of spawn generation `gen` is running. Any earlier exit is
-   * history — unless it is this generation's own (the shell died before the
-   * spawn call returned): then the exit stands.
+   * Rust reported the tab's shell (`terminal_open`, `terminal_status`).
+   * Ignored for a tab with no entry (closed meanwhile), for `null` (no
+   * news), for an older instance than the one shown, and for an earlier
+   * state of the same instance. Clears a previous start error.
    */
-  function markSpawned(s, sid, gen) {
-    const prev = entryOf(s, sid);
-    if (prev.exited && gen != null && prev.exitGen === gen) {
-      return patch(s, sid, { spawned: true });
+  function applyStatus(s, sid, status) {
+    if (!s || !s[sid] || !status) return s;
+    const cur = s[sid].status;
+    if (cur) {
+      if (status.instance < cur.instance) return s;
+      if (status.instance === cur.instance
+        && (STATE_RANK[status.state] ?? 0) < (STATE_RANK[cur.state] ?? 0)) return s;
+      if (status.instance === cur.instance && status.state === cur.state
+        && status.shell === cur.shell && status.exitCode === cur.exitCode) {
+        return patch(s, sid, { error: null });
+      }
     }
-    return patch(s, sid, { spawned: true, exited: false, exitCode: null, exitGen: null });
+    return patch(s, sid, { status, error: null });
   }
 
-  /** The shell of generation `gen` exited. A tab with no entry (closed meanwhile) is ignored. */
-  function markExited(s, sid, code, gen) {
+  /**
+   * Shell `instance` exited with `code` (null = killed by a signal). Only
+   * the instance shown counts; any other is stale or not known yet (the
+   * hook asks Rust for the status of a newer one).
+   */
+  function applyExit(s, sid, instance, code) {
+    const cur = s && s[sid] && s[sid].status;
+    if (!cur || cur.instance !== instance) return s;
+    const exitCode = Number.isInteger(code) ? code : null;
+    if (cur.state === "exited" && cur.exitCode === exitCode) return s;
+    return patch(s, sid, { status: { ...cur, state: "exited", exitCode } });
+  }
+
+  /** `terminal_open` failed with `error`: shown like an exited shell. */
+  function spawnFailed(s, sid, error) {
     if (!s || !s[sid]) return s;
-    return patch(s, sid, {
-      exited: true,
-      exitCode: Number.isInteger(code) ? code : null,
-      exitGen: gen ?? null,
-    });
+    return patch(s, sid, { error: String(error || "unknown error") });
+  }
+
+  /** The panel is shown, its xterm exists, and the tab has never had a shell. */
+  function needsSpawn(entry) {
+    return Boolean(entry.open && entry.created && entry.status === null && entry.error === null);
+  }
+
+  /** The shell is gone (exited, or never started): Enter starts a new one. */
+  function isExited(entry) {
+    return entry.error !== null || entry.status?.state === "exited";
   }
 
   /** Drop entries of sessions that no longer exist. */
@@ -105,32 +135,6 @@
     return chord !== null && BYPASS.has(chord);
   }
 
-  const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  const B64_INDEX = new Map([...B64].map((c, i) => [c, i]));
-
-  /** Standard base64 (RFC 4648, padded or not) -> bytes. Throws on bad input. */
-  function decodeB64(str) {
-    if (typeof str !== "string") throw new TypeError("decodeB64: string expected");
-    const body = str.replace(/=+$/, "");
-    if (body.length % 4 === 1) throw new Error("decodeB64: invalid length");
-    const out = new Uint8Array(Math.floor((body.length * 3) / 4));
-    let acc = 0;
-    let bits = 0;
-    let at = 0;
-    for (const c of body) {
-      const v = B64_INDEX.get(c);
-      if (v === undefined) throw new Error(`decodeB64: invalid character ${JSON.stringify(c)}`);
-      acc = (acc << 6) | v;
-      bits += 6;
-      if (bits >= 8) {
-        bits -= 8;
-        out[at++] = (acc >> bits) & 0xff;
-        acc &= (1 << bits) - 1;
-      }
-    }
-    return out;
-  }
-
   /** `/bin/zsh` -> `zsh`; `C:\\Windows\\System32\\cmd.exe` -> `cmd`. */
   function shellLabel(path) {
     if (typeof path !== "string") return "shell";
@@ -156,12 +160,14 @@
     openPanel,
     closePanel,
     togglePanel,
-    markSpawned,
-    markExited,
+    applyStatus,
+    applyExit,
+    spawnFailed,
+    needsSpawn,
+    isExited,
     prune,
     entryOf,
     keymapShouldBypass,
-    decodeB64,
     shellLabel,
     clampHeight,
   };

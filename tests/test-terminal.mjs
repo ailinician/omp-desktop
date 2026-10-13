@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Regression script for src/app/terminal.js — the terminal panel's pure
-// parts: per-tab panel state (open / spawned / exited), which chords the
-// global keymap still gets while xterm has focus, the base64 decoder for
-// pty output frames, the shell label and the panel height clamp.
+// parts: per-tab view state (open / created / Rust's status / start error),
+// which chords the global keymap still gets while xterm has focus, the
+// shell label and the panel height clamp.
 // Run: node tests/test-terminal.mjs
 
 import assert from "node:assert/strict";
@@ -33,35 +33,39 @@ function check(label, fn) {
 // ---- panel state ----------------------------------------------------------
 
 /** An entry as the reducer shapes it, with `over` applied. */
-const E = (over) => ({
-  open: false, created: false, spawned: false, exited: false, exitCode: null, exitGen: null, ...over,
-});
+const E = (over) => ({ open: false, created: false, status: null, error: null, ...over });
 
-check("unknown session reads as closed, unspawned", () => {
+/** A `TerminalStatus` as Rust sends it. */
+const St = (instance, state = "running", exitCode = null, shell = "/bin/zsh") =>
+  ({ instance, shell, state, exitCode });
+
+const opened = (sid = "a") => T.openPanel(T.EMPTY, sid);
+
+check("unknown session reads as closed, with no shell", () => {
   assert.deepEqual(T.entryOf(T.EMPTY, "a"), E({}));
   assert.deepEqual(T.entryOf(undefined, "a"), E({}));
 });
 
 check("openPanel opens one tab and leaves the others alone", () => {
-  const s = T.openPanel(T.openPanel(T.EMPTY, "a"), "b");
+  const s = T.openPanel(opened("a"), "b");
   assert.equal(T.entryOf(s, "a").open, true);
   assert.equal(T.entryOf(s, "b").open, true);
   assert.equal(T.entryOf(s, "c").open, false);
   assert.equal(T.entryOf(T.EMPTY, "a").open, false, "EMPTY is never mutated");
 });
 
-check("closePanel hides but keeps the shell (spawned survives)", () => {
-  const s = T.closePanel(T.markSpawned(T.openPanel(T.EMPTY, "a"), "a", 1), "a");
-  assert.deepEqual(T.entryOf(s, "a"), E({ created: true, spawned: true }));
+check("closePanel hides but keeps the shell's status", () => {
+  const s = T.closePanel(T.applyStatus(opened(), "a", St(1)), "a");
+  assert.deepEqual(T.entryOf(s, "a"), E({ created: true, status: St(1) }));
 });
 
 check("a panel that was opened stays created when hidden, even before any spawn", () => {
   // The view keeps `created` panels mounted: a hide during the first (still
   // pending or failed) spawn must not drop the xterm.
-  const s = T.closePanel(T.openPanel(T.EMPTY, "a"), "a");
+  const s = T.closePanel(opened(), "a");
   assert.equal(T.entryOf(s, "a").created, true);
   assert.equal(T.entryOf(s, "a").open, false);
-  assert.equal(T.entryOf(s, "a").spawned, false);
+  assert.equal(T.entryOf(s, "a").status, null);
   assert.equal(T.entryOf(T.EMPTY, "a").created, false, "never opened: no instance");
 });
 
@@ -74,83 +78,125 @@ check("togglePanel flips open", () => {
   assert.equal(T.entryOf(s2, "a").created, true);
 });
 
-check("markSpawned records the spawn", () => {
-  const s = T.markSpawned(T.openPanel(T.EMPTY, "a"), "a", 1);
-  assert.deepEqual(T.entryOf(s, "a"), E({ open: true, created: true, spawned: true }));
+// ---- Rust status / exit ---------------------------------------------------
+
+check("applyStatus records Rust's status", () => {
+  const s = T.applyStatus(opened(), "a", St(3));
+  assert.deepEqual(T.entryOf(s, "a"), E({ open: true, created: true, status: St(3) }));
 });
 
-check("markExited keeps spawned (no auto respawn) and stores the code", () => {
-  const s = T.markExited(T.markSpawned(T.openPanel(T.EMPTY, "a"), "a", 1), "a", 130, 1);
-  assert.deepEqual(
-    T.entryOf(s, "a"),
-    E({ open: true, created: true, spawned: true, exited: true, exitCode: 130, exitGen: 1 }),
-  );
+check("applyStatus ignores null, a tab with no entry, and an older instance", () => {
+  const s = T.applyStatus(opened(), "a", St(5));
+  assert.equal(T.applyStatus(s, "a", null), s, "null = no news");
+  assert.equal(T.applyStatus(T.EMPTY, "gone", St(1)), T.EMPTY, "closed tab");
+  assert.equal(T.applyStatus(s, "a", St(4, "running")), s, "stale instance");
+  assert.equal(T.applyStatus(s, "a", St(4, "exited", 0)), s, "stale exit report");
 });
 
-check("markExited on an exit with no code keeps exitCode null", () => {
-  const s = T.markExited(T.markSpawned(T.EMPTY, "a", 1), "a", undefined, 1);
-  assert.equal(T.entryOf(s, "a").exited, true);
-  assert.equal(T.entryOf(s, "a").exitCode, null);
+check("a late status of the same instance never hides its exit", () => {
+  // terminal_open's reply (running) can arrive after the exit event.
+  let s = T.applyStatus(opened(), "a", St(2, "starting"));
+  s = T.applyExit(s, "a", 2, 1);
+  assert.equal(T.applyStatus(s, "a", St(2, "running")), s);
+  assert.equal(T.applyStatus(s, "a", St(2, "starting")), s);
+  assert.deepEqual(T.entryOf(s, "a").status, St(2, "exited", 1));
 });
 
-check("markExited for a session with no entry is ignored", () => {
-  assert.equal(T.markExited(T.EMPTY, "gone", 0, 1), T.EMPTY);
+check("applyStatus moves forward within an instance and to a newer one", () => {
+  let s = T.applyStatus(opened(), "a", St(2, "starting"));
+  s = T.applyStatus(s, "a", St(2, "running"));
+  assert.equal(T.entryOf(s, "a").status.state, "running");
+  s = T.applyStatus(s, "a", St(2, "exited", 0));
+  s = T.applyStatus(s, "a", St(7, "running", null, "/bin/bash"));
+  assert.deepEqual(T.entryOf(s, "a").status, St(7, "running", null, "/bin/bash"));
 });
 
-check("respawn: markSpawned of the next generation clears exited and the code", () => {
-  let s = T.markExited(T.markSpawned(T.openPanel(T.EMPTY, "a"), "a", 1), "a", 1, 1);
-  s = T.markSpawned(s, "a", 2);
-  assert.deepEqual(T.entryOf(s, "a"), E({ open: true, created: true, spawned: true }));
+check("applyExit marks only the current instance exited, with its code", () => {
+  const s = T.applyStatus(opened(), "a", St(4));
+  assert.equal(T.applyExit(s, "a", 3, 0), s, "older instance ignored");
+  assert.equal(T.applyExit(s, "a", 5, 0), s, "unknown newer instance ignored");
+  const ex = T.applyExit(s, "a", 4, 130);
+  assert.deepEqual(T.entryOf(ex, "a").status, St(4, "exited", 130));
 });
 
-check("an exit that beats terminal_open's reply survives that generation's markSpawned", () => {
-  // Spawn generation 1 starts; the shell dies at once and its exit event
-  // arrives before `terminal_open` resolves; only then markSpawned runs.
-  let s = T.openPanel(T.EMPTY, "a");
-  s = T.markExited(s, "a", 0, 1);
-  s = T.markSpawned(s, "a", 1);
-  assert.deepEqual(
-    T.entryOf(s, "a"),
-    E({ open: true, created: true, spawned: true, exited: true, exitCode: 0, exitGen: 1 }),
-  );
+check("applyExit without a shown shell or entry is ignored", () => {
+  const s = opened();
+  assert.equal(T.applyExit(s, "a", 1, 0), s, "no status yet");
+  assert.equal(T.applyExit(T.EMPTY, "gone", 1, 0), T.EMPTY, "no entry");
 });
 
-check("an earlier generation's exit does not survive a later generation's markSpawned", () => {
-  // gen 1 exited normally; the respawn (gen 2) reports its spawn: exited cleared.
-  let s = T.markExited(T.markSpawned(T.openPanel(T.EMPTY, "a"), "a", 1), "a", 7, 1);
-  s = T.markSpawned(s, "a", 2);
-  assert.equal(T.entryOf(s, "a").exited, false);
-  assert.equal(T.entryOf(s, "a").exitCode, null);
-  // And a gen-2 exit that races its own markSpawned survives again.
-  s = T.markExited(s, "a", 9, 2);
-  s = T.markSpawned(s, "a", 2);
-  assert.equal(T.entryOf(s, "a").exited, true);
-  assert.equal(T.entryOf(s, "a").exitCode, 9);
+check("an exit killed by a signal (or a bad code) has exitCode null", () => {
+  const s = T.applyStatus(opened(), "a", St(1));
+  assert.equal(T.entryOf(T.applyExit(s, "a", 1, null), "a").status.exitCode, null);
+  assert.equal(T.entryOf(T.applyExit(s, "a", 1, "9"), "a").status.exitCode, null);
+});
+
+check("a repeated exit is a no-op", () => {
+  const s = T.applyExit(T.applyStatus(opened(), "a", St(1)), "a", 1, 0);
+  assert.equal(T.applyExit(s, "a", 1, 0), s);
+});
+
+check("spawnFailed records the error; a later status clears it", () => {
+  let s = T.spawnFailed(opened(), "a", "no such file");
+  assert.equal(T.entryOf(s, "a").error, "no such file");
+  assert.equal(T.spawnFailed(T.EMPTY, "gone", "x"), T.EMPTY, "closed tab");
+  s = T.applyStatus(s, "a", St(1));
+  assert.equal(T.entryOf(s, "a").error, null);
+});
+
+// ---- needsSpawn / isExited ------------------------------------------------
+
+check("needsSpawn: only a shown, created panel whose tab never had a shell", () => {
+  assert.equal(T.needsSpawn(T.entryOf(T.EMPTY, "a")), false, "never opened");
+  const s = opened();
+  assert.equal(T.needsSpawn(T.entryOf(s, "a")), true, "opened, no shell");
+  assert.equal(T.needsSpawn(T.entryOf(T.closePanel(s, "a"), "a")), false, "hidden");
+  const live = T.applyStatus(s, "a", St(1, "starting"));
+  assert.equal(T.needsSpawn(T.entryOf(live, "a")), false, "starting");
+  const exited = T.applyExit(T.applyStatus(s, "a", St(1)), "a", 1, 0);
+  assert.equal(T.needsSpawn(T.entryOf(exited, "a")), false, "exited: no auto respawn");
+  const failed = T.spawnFailed(s, "a", "boom");
+  assert.equal(T.needsSpawn(T.entryOf(failed, "a")), false, "failed start: no retry loop");
+});
+
+check("isExited: an exited shell or a failed start; not starting/running/none", () => {
+  const s = opened();
+  assert.equal(T.isExited(T.entryOf(s, "a")), false, "no shell yet");
+  assert.equal(T.isExited(T.entryOf(T.applyStatus(s, "a", St(1, "starting")), "a")), false);
+  assert.equal(T.isExited(T.entryOf(T.applyStatus(s, "a", St(1)), "a")), false);
+  assert.equal(T.isExited(T.entryOf(T.applyStatus(s, "a", St(1, "exited", 0)), "a")), true);
+  assert.equal(T.isExited(T.entryOf(T.spawnFailed(s, "a", "boom"), "a")), true);
+});
+
+check("respawn: the next instance's status ends the exited state", () => {
+  let s = T.applyExit(T.applyStatus(opened(), "a", St(1)), "a", 1, 2);
+  s = T.applyStatus(s, "a", St(2));
+  assert.equal(T.isExited(T.entryOf(s, "a")), false);
+  assert.equal(T.applyExit(s, "a", 1, 0), s, "the old shell's late exit is stale");
 });
 
 check("closing then reopening an exited panel keeps the exit state", () => {
-  let s = T.markExited(T.markSpawned(T.openPanel(T.EMPTY, "a"), "a", 1), "a", 0, 1);
+  let s = T.applyExit(T.applyStatus(opened(), "a", St(1)), "a", 1, 0);
   s = T.openPanel(T.closePanel(s, "a"), "a");
-  assert.deepEqual(
-    T.entryOf(s, "a"),
-    E({ open: true, created: true, spawned: true, exited: true, exitCode: 0, exitGen: 1 }),
-  );
+  assert.equal(T.isExited(T.entryOf(s, "a")), true);
+  assert.equal(T.needsSpawn(T.entryOf(s, "a")), false);
 });
 
 check("no-op transitions return the same object", () => {
-  const s = T.markSpawned(T.openPanel(T.EMPTY, "a"), "a", 1);
+  const s = T.applyStatus(opened(), "a", St(1));
   assert.equal(T.openPanel(s, "a"), s);
-  assert.equal(T.markSpawned(s, "a", 1), s);
+  assert.equal(T.applyStatus(s, "a", St(1)), s, "same status again");
   assert.equal(T.closePanel(T.EMPTY, "a"), T.EMPTY);
   assert.equal(T.prune(s, ["a", "b"]), s);
 });
 
 check("prune drops entries of sessions that no longer exist", () => {
-  let s = T.markSpawned(T.openPanel(T.openPanel(T.EMPTY, "a"), "b"), "b", 1);
+  let s = T.applyStatus(T.openPanel(opened("a"), "b"), "b", St(1));
   s = T.prune(s, ["a"]);
   assert.equal(T.entryOf(s, "a").open, true);
   assert.deepEqual(T.entryOf(s, "b"), E({}));
   assert.deepEqual(Object.keys(s), ["a"]);
+  assert.equal(T.applyExit(s, "b", 1, 0), s, "a pruned tab's late exit is ignored");
 });
 
 // ---- key bypass -----------------------------------------------------------
@@ -211,33 +257,6 @@ check("copy/paste and extra modifiers do not bypass", () => {
 
 check("a composing event never bypasses", () => {
   assert.equal(T.keymapShouldBypass({ ...ev("t", "m"), isComposing: true }), false);
-});
-
-// ---- base64 ---------------------------------------------------------------
-
-const b64 = (bytes) => Buffer.from(bytes).toString("base64");
-
-check("decodeB64 round-trips every length mod 3 (padding)", () => {
-  for (const n of [0, 1, 2, 3, 4, 5, 6, 255]) {
-    const bytes = Uint8Array.from({ length: n }, (_, i) => (i * 37 + 11) & 0xff);
-    const out = T.decodeB64(b64(bytes));
-    assert.ok(out instanceof Uint8Array);
-    assert.deepEqual([...out], [...bytes], `len ${n}`);
-  }
-});
-
-check("decodeB64 keeps multibyte UTF-8 and binary bytes intact", () => {
-  const text = "größe ✓ 日本語 🚀 \x1b[31mred\x1b[0m";
-  const out = T.decodeB64(b64(Buffer.from(text, "utf8")));
-  assert.equal(Buffer.from(out).toString("utf8"), text);
-  const all = Uint8Array.from({ length: 256 }, (_, i) => i);
-  assert.deepEqual([...T.decodeB64(b64(all))], [...all]);
-});
-
-check("decodeB64 rejects garbage instead of returning wrong bytes", () => {
-  assert.throws(() => T.decodeB64("ab*d"));
-  assert.throws(() => T.decodeB64("abcde"), "length 1 mod 4 is impossible");
-  assert.throws(() => T.decodeB64(null));
 });
 
 // ---- shellLabel / clampHeight ---------------------------------------------

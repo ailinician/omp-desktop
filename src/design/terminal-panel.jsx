@@ -8,7 +8,7 @@
    ═════════════════════════════════════════════════════════════════════ */
 
 const { Icon: _TP_Icon } = window;
-const { clampHeight: _TP_clamp } = window.OMP_TERMINAL;
+const { clampHeight: _TP_clamp, isExited: _TP_isExited } = window.OMP_TERMINAL;
 
 function TerminalPanel({ entry, height, hidden, onHeight, onClose, mountRef, onContextMenu, shellLabel, cwd }) {
   const dragStart = (e) => {
@@ -35,9 +35,10 @@ function TerminalPanel({ entry, height, hidden, onHeight, onClose, mountRef, onC
         <_TP_Icon name="terminal" size={11} color="var(--fg-3)" />
         <span className="term-head-shell">{shellLabel}</span>
         {cwd && <span className="term-head-cwd" title={cwd}>{cwd}</span>}
-        {entry.exited && (
-          <span className="term-head-exited">
-            exited{entry.exitCode == null ? "" : ` (${entry.exitCode})`}
+        {_TP_isExited(entry) && (
+          <span className="term-head-exited" title={entry.error ?? undefined}>
+            {entry.error != null ? "failed to start"
+              : `exited${entry.status.exitCode == null ? "" : ` (${entry.status.exitCode})`}`}
           </span>
         )}
         <button type="button" className="term-head-close" title="hide terminal" onClick={onClose}>

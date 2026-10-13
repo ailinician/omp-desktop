@@ -1,10 +1,10 @@
-//! PTY manager tests: they spawn a real `sh` on a pseudo-terminal and
+//! Terminal manager tests: they spawn a real `sh` on a pseudo-terminal and
 //! observe it through a collecting [`Emit`].
 
 use super::pty::{resolve_shell_with, DEFAULT_SHELL};
-use super::{Emit, OpenArgs, TerminalManager};
+use super::{Emit, Slot, TerminalManager, TerminalState, TerminalStatus};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -25,34 +25,59 @@ const SLOW: Duration = Duration::from_secs(20);
 /// and process-table scans (the lifecycle races), so they never overlap.
 static LOAD_SENSITIVE: Mutex<()> = Mutex::new(());
 
+/// One data event.
+struct Event {
+    instance: u64,
+    seq: u64,
+    bytes: Vec<u8>,
+}
+
 /// Every event the manager emitted, in order.
 #[derive(Default)]
 struct Collector {
-    data: Mutex<Vec<Vec<u8>>>,
-    exits: Mutex<Vec<Option<i32>>>,
+    data: Mutex<Vec<Event>>,
+    /// `(instance, code)` per exit event.
+    exits: Mutex<Vec<(u64, Option<i32>)>>,
     /// The output emitted by the time the exit event arrived.
     text_at_exit: Mutex<Option<String>>,
+    /// How many data events [`Collector::ack_new`] acknowledged so far.
+    acked: Mutex<usize>,
 }
 
 impl Emit for Collector {
-    fn data(&self, _id: &str, bytes: &[u8]) {
-        self.data.lock().unwrap().push(bytes.to_vec());
+    fn data(&self, _id: &str, instance: u64, seq: u64, bytes: &[u8]) {
+        self.data.lock().unwrap().push(Event {
+            instance,
+            seq,
+            bytes: bytes.to_vec(),
+        });
     }
 
-    fn exit(&self, _id: &str, code: Option<i32>) {
+    fn exit(&self, _id: &str, instance: u64, code: Option<i32>) {
         *self.text_at_exit.lock().unwrap() = Some(self.text());
-        self.exits.lock().unwrap().push(code);
+        self.exits.lock().unwrap().push((instance, code));
     }
 }
 
 impl Collector {
     fn text(&self) -> String {
-        let data = self.data.lock().unwrap();
-        String::from_utf8_lossy(&data.concat()).into_owned()
+        let bytes: Vec<u8> = self
+            .data
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|e| e.bytes.iter().copied())
+            .collect();
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     fn total_bytes(&self) -> usize {
-        self.data.lock().unwrap().iter().map(Vec::len).sum()
+        self.data
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.bytes.len())
+            .sum()
     }
 
     fn events(&self) -> usize {
@@ -64,9 +89,19 @@ impl Collector {
             .lock()
             .unwrap()
             .iter()
-            .map(Vec::len)
+            .map(|e| e.bytes.len())
             .max()
             .unwrap_or(0)
+    }
+
+    /// `(instance, seq)` of every data event, in order.
+    fn seqs(&self) -> Vec<(u64, u64)> {
+        self.data
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| (e.instance, e.seq))
+            .collect()
     }
 
     fn exited(&self) -> bool {
@@ -74,7 +109,25 @@ impl Collector {
     }
 
     fn exit_codes(&self) -> Vec<Option<i32>> {
-        self.exits.lock().unwrap().clone()
+        self.exits.lock().unwrap().iter().map(|e| e.1).collect()
+    }
+
+    /// Acknowledge every event received since the last call, as the
+    /// webview does once it rendered them (flow control).
+    fn ack_new(&self, manager: &TerminalManager, id: &str) {
+        let fresh: Vec<(u64, usize)> = {
+            let data = self.data.lock().unwrap();
+            let mut acked = self.acked.lock().unwrap();
+            let fresh = data[*acked..]
+                .iter()
+                .map(|e| (e.instance, e.bytes.len()))
+                .collect();
+            *acked = data.len();
+            fresh
+        };
+        for (instance, len) in fresh {
+            manager.ack(id, instance, u64::try_from(len).unwrap());
+        }
     }
 
     /// The decimal number right after the first `marker` in the output that
@@ -105,15 +158,18 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
     }
 }
 
-fn args(session_id: &str) -> OpenArgs {
-    OpenArgs {
-        session_id: session_id.to_owned(),
-        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
-        // `OpenArgs` owns its strings; the static is shared by every test.
-        shell: Some(PLAIN_SHELL.clone()),
-        cols: 80,
-        rows: 24,
-    }
+/// [`wait_until`] while acknowledging the output as it arrives, for tests
+/// that produce more than the pump emits unacknowledged.
+fn wait_acking(
+    manager: &TerminalManager,
+    id: &str,
+    out: &Collector,
+    mut condition: impl FnMut() -> bool,
+) -> bool {
+    wait_until(SLOW, || {
+        out.ack_new(manager, id);
+        condition()
+    })
 }
 
 fn process_alive(pid: i32) -> bool {
@@ -121,11 +177,24 @@ fn process_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// A manager whose shell setting (kept in memory) is `shell`.
+fn manager_with(shell: &str) -> TerminalManager {
+    let manager = TerminalManager::new(None);
+    manager.set_shell(shell).expect("shell setting");
+    manager
+}
+
+fn temp_dir() -> PathBuf {
+    std::env::temp_dir()
+}
+
+/// `id` registered with the temp dir as its folder, its shell opened.
 fn open(id: &str) -> (TerminalManager, Arc<Collector>) {
-    let manager = TerminalManager::new();
+    let manager = manager_with(&PLAIN_SHELL);
+    manager.register_tab(id, Some(temp_dir().as_path()));
     let collector = Arc::new(Collector::default());
     manager
-        .open(Arc::clone(&collector), &args(id))
+        .open(Arc::clone(&collector), id, 80, 24)
         .expect("open terminal");
     (manager, collector)
 }
@@ -142,7 +211,7 @@ fn shell_output_and_exit_code_are_emitted() {
 }
 
 #[test]
-fn shell_gets_project_cwd_and_terminal_env() {
+fn shell_gets_the_registered_folder_and_terminal_env() {
     let (manager, out) = open("env");
     manager
         .write(
@@ -151,7 +220,7 @@ fn shell_gets_project_cwd_and_terminal_env() {
         )
         .unwrap();
 
-    let cwd = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let cwd = std::fs::canonicalize(temp_dir()).unwrap();
     let wanted = format!(
         "T=xterm-256color C=truecolor O=1 S=env\r\n{}",
         cwd.display()
@@ -161,6 +230,34 @@ fn shell_gets_project_cwd_and_terminal_env() {
         "output: {:?}",
         out.text()
     );
+}
+
+/// A tab without a usable folder (none, gone, relative) gets the home folder.
+#[test]
+fn a_missing_folder_falls_back_to_home() {
+    let home = crate::widgets::config::home_dir().expect("HOME is set");
+    let home = std::fs::canonicalize(home).unwrap();
+    let manager = manager_with(&PLAIN_SHELL);
+    let out = Arc::new(Collector::default());
+    let folders: [Option<&Path>; 3] = [
+        None,
+        Some(Path::new("/definitely/not/a/dir")),
+        Some(Path::new("relative/dir")),
+    ];
+    for (n, folder) in folders.into_iter().enumerate() {
+        let id = format!("home{n}");
+        manager.register_tab(&id, folder);
+        manager.open(Arc::clone(&out), &id, 80, 24).unwrap();
+        manager
+            .write(&id, format!("echo H{n}=$(pwd -P)\n"))
+            .unwrap();
+        let wanted = format!("H{n}={}\r\n", home.display());
+        assert!(
+            wait_until(SLOW, || out.text().contains(&wanted)),
+            "folder {folder:?}: {:?}",
+            out.text()
+        );
+    }
 }
 
 #[test]
@@ -173,7 +270,10 @@ fn burst_output_is_coalesced_into_few_capped_events() {
         .write("burst", "yes | head -c 2000000; exit\n")
         .unwrap();
 
-    assert!(wait_until(SLOW, || out.exited()), "no exit event");
+    assert!(
+        wait_acking(&manager, "burst", &out, || out.exited()),
+        "no exit event"
+    );
     assert!(
         out.total_bytes() >= 2_000_000,
         "bytes: {}",
@@ -188,7 +288,7 @@ fn burst_output_is_coalesced_into_few_capped_events() {
 }
 
 #[test]
-fn close_kills_background_jobs() {
+fn close_tab_kills_background_jobs() {
     let (manager, out) = open("jobs");
     manager.write("jobs", "sleep 1000 & echo JOB=$!\n").unwrap();
     assert!(
@@ -199,12 +299,13 @@ fn close_kills_background_jobs() {
     let job = out.number_after("JOB=").unwrap();
     assert!(process_alive(job), "background job did not start");
 
-    manager.close("jobs");
+    manager.close_tab("jobs");
 
     assert!(
         wait_until(Duration::from_secs(3), || !process_alive(job)),
-        "background job {job} survived close"
+        "background job {job} survived close_tab"
     );
+    assert!(manager.tab_ids().is_empty(), "tab kept");
     // Closing is silent: the tab is gone, nobody listens for the exit.
     std::thread::sleep(Duration::from_millis(300));
     assert!(!out.exited());
@@ -232,25 +333,148 @@ fn ctrl_c_reaches_the_foreground_process() {
     );
 }
 
+/// While the shell runs, `open` returns its status; after it exited, a new
+/// shell with a higher instance replaces it, numbering its events from 1.
 #[test]
 fn open_is_idempotent_while_alive_and_respawns_after_exit() {
     let (manager, out) = open("again");
+    let first = manager.status("again").expect("status");
     manager.write("again", "echo A=$$\n").unwrap();
     assert!(wait_until(SLOW, || out.number_after("A=").is_some()));
-    let first = out.number_after("A=").unwrap();
+    let first_pid = out.number_after("A=").unwrap();
 
-    manager.open(Arc::clone(&out), &args("again")).unwrap();
+    let second = manager.open(Arc::clone(&out), "again", 80, 24).unwrap();
+    assert_eq!(second.instance, first.instance, "second open respawned");
     manager.write("again", "echo B=$$\n").unwrap();
     assert!(wait_until(SLOW, || out.number_after("B=").is_some()));
-    assert_eq!(out.number_after("B="), Some(first), "second open respawned");
+    assert_eq!(
+        out.number_after("B="),
+        Some(first_pid),
+        "second open respawned"
+    );
 
     manager.write("again", "exit\n").unwrap();
     assert!(wait_until(SLOW, || out.exited()));
 
-    manager.open(Arc::clone(&out), &args("again")).unwrap();
+    let third = manager.open(Arc::clone(&out), "again", 80, 24).unwrap();
+    assert!(third.instance > first.instance, "{third:?} after {first:?}");
+    assert_eq!(third.state, TerminalState::Running);
     manager.write("again", "echo C=$$\n").unwrap();
     assert!(wait_until(SLOW, || out.number_after("C=").is_some()));
-    assert_ne!(out.number_after("C="), Some(first), "no new shell");
+    assert_ne!(out.number_after("C="), Some(first_pid), "no new shell");
+
+    let seqs = out.seqs();
+    for instance in [first.instance, third.instance] {
+        let mine: Vec<u64> = seqs
+            .iter()
+            .filter(|(i, _)| *i == instance)
+            .map(|(_, seq)| *seq)
+            .collect();
+        let expected: Vec<u64> = (1..=u64::try_from(mine.len()).unwrap()).collect();
+        assert_eq!(mine, expected, "instance {instance}");
+    }
+}
+
+/// `register_tab` for a tab that has a shell (a profile switch re-runs
+/// `start_session` under the same id) keeps that shell.
+#[test]
+fn re_registering_a_tab_keeps_its_shell() {
+    let (manager, out) = open("keep");
+    let before = manager.status("keep").unwrap();
+    manager.write("keep", "echo A=$$\n").unwrap();
+    assert!(wait_until(SLOW, || out.number_after("A=").is_some()));
+
+    manager.register_tab("keep", Some(Path::new("/")));
+    let after = manager.open(Arc::clone(&out), "keep", 80, 24).unwrap();
+
+    assert_eq!(after.instance, before.instance);
+    manager.write("keep", "echo B=$$\n").unwrap();
+    assert!(wait_until(SLOW, || out.number_after("B=").is_some()));
+    assert_eq!(out.number_after("B="), out.number_after("A="));
+}
+
+/// The status follows the slot: none, starting (a pending spawn, which a
+/// second `open` reports instead of spawning), running, exited with code.
+#[test]
+fn status_goes_from_starting_to_running_to_exited() {
+    let manager = manager_with(&PLAIN_SHELL);
+    let out = Arc::new(Collector::default());
+    manager.register_tab("states", Some(temp_dir().as_path()));
+    assert_eq!(manager.status("states"), None);
+
+    let pending = TerminalStatus {
+        instance: 999,
+        shell: "/bin/pending".to_owned(),
+        state: TerminalState::Starting,
+        exit_code: None,
+    };
+    manager.tabs().get_mut("states").unwrap().slot = Slot::Spawning {
+        instance: 999,
+        shell: PathBuf::from("/bin/pending"),
+    };
+    assert_eq!(manager.status("states").as_ref(), Some(&pending));
+    assert_eq!(
+        manager.open(Arc::clone(&out), "states", 80, 24),
+        Ok(pending),
+        "an open during a pending spawn must not spawn again"
+    );
+    assert!(manager.write("states", "x").is_err(), "no shell yet");
+
+    manager.tabs().get_mut("states").unwrap().slot = Slot::Idle;
+    let running = manager.open(Arc::clone(&out), "states", 80, 24).unwrap();
+    assert_eq!(running.state, TerminalState::Running);
+    assert_eq!(running.shell, *PLAIN_SHELL);
+    assert_eq!(running.exit_code, None);
+    assert_eq!(manager.status("states").as_ref(), Some(&running));
+
+    manager.write("states", "exit 4\n").unwrap();
+    assert!(wait_until(SLOW, || out.exited()), "no exit event");
+    let exited = manager.status("states").unwrap();
+    assert_eq!(exited.instance, running.instance);
+    assert_eq!(exited.state, TerminalState::Exited);
+    assert_eq!(exited.exit_code, Some(4));
+}
+
+/// `replay` returns what the shell emitted after a seq; a stale instance
+/// gets everything the current shell holds.
+#[test]
+fn replay_returns_the_held_output() {
+    let (manager, out) = open("replay");
+    let status = manager.status("replay").unwrap();
+    manager.write("replay", "echo RE\"\"PLAYED\n").unwrap();
+    assert!(wait_until(SLOW, || out.text().contains("REPLAYED")));
+    // Settle: no further output while comparing.
+    std::thread::sleep(Duration::from_millis(200));
+
+    let decode = |b64: &str| {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let all = manager.replay("replay", status.instance, 0).unwrap();
+    assert_eq!(all.instance, status.instance);
+    assert!(!all.dropped);
+    assert_eq!(decode(&all.b64), out.text());
+    assert_eq!(
+        Some(all.head_seq),
+        out.seqs().last().map(|(_, seq)| *seq),
+        "head is the last emitted seq"
+    );
+
+    let none_newer = manager
+        .replay("replay", status.instance, all.head_seq)
+        .unwrap();
+    assert_eq!(none_newer.b64, "", "nothing after the head");
+
+    let stale = manager
+        .replay("replay", status.instance + 100, all.head_seq)
+        .unwrap();
+    assert_eq!(stale.instance, status.instance);
+    assert_eq!(decode(&stale.b64), out.text(), "a stale instance gets all");
+
+    assert_eq!(manager.replay("nope", 1, 0), None);
 }
 
 #[test]
@@ -266,40 +490,112 @@ fn resize_changes_the_pty_size() {
     );
 }
 
+/// `shutdown_all` ends every tab and kills every shell; the manager stays
+/// usable for tabs registered afterwards.
 #[test]
-fn shutdown_all_kills_every_shell() {
-    let (manager, out) = open("down");
-    manager.write("down", "echo SH=$$\n").unwrap();
-    assert!(wait_until(SLOW, || out.number_after("SH=").is_some()));
-    let shell = out.number_after("SH=").unwrap();
+fn shutdown_all_kills_every_shell_and_leaves_the_manager_usable() {
+    let (manager, out) = open("down1");
+    manager.register_tab("down2", None);
+    manager.open(Arc::clone(&out), "down2", 80, 24).unwrap();
+    manager.write("down1", "echo SA=$$\n").unwrap();
+    manager.write("down2", "echo SB=$$\n").unwrap();
+    assert!(wait_until(SLOW, || out.number_after("SA=").is_some()
+        && out.number_after("SB=").is_some()));
+    let shells = [
+        out.number_after("SA=").unwrap(),
+        out.number_after("SB=").unwrap(),
+    ];
 
     manager.shutdown_all();
 
-    assert!(
-        wait_until(Duration::from_secs(3), || !process_alive(shell)),
-        "shell {shell} survived shutdown_all"
-    );
-    assert!(manager.write("down", "x").is_err(), "entry not removed");
+    for shell in shells {
+        assert!(
+            wait_until(Duration::from_secs(3), || !process_alive(shell)),
+            "shell {shell} survived shutdown_all"
+        );
+    }
+    assert!(manager.tab_ids().is_empty(), "tabs kept");
+    assert!(manager.write("down1", "x").is_err(), "entry not removed");
+
+    manager.register_tab("down1", None);
+    manager.open(Arc::clone(&out), "down1", 80, 24).unwrap();
+    manager.write("down1", "echo AG\"\"AIN\n").unwrap();
+    assert!(wait_until(SLOW, || out.text().contains("AGAIN")));
 }
 
 #[test]
 fn bad_requests_are_rejected() {
-    let manager = TerminalManager::new();
+    let manager = manager_with(&PLAIN_SHELL);
     let out = Arc::new(Collector::default());
-    let open = |edit: &dyn Fn(&mut OpenArgs)| {
-        let mut bad = args("bad");
-        edit(&mut bad);
-        manager.open(Arc::clone(&out), &bad)
-    };
+    manager.register_tab("bad", None);
 
-    assert!(open(&|a| a.cwd = "/definitely/not/a/dir".to_owned()).is_err());
-    assert!(open(&|a| a.cols = 0).is_err());
-    assert!(open(&|a| a.rows = 0).is_err());
-    assert!(open(&|a| a.session_id.clear()).is_err());
-    assert!(open(&|a| a.shell = Some("relative/sh".to_owned())).is_err());
-    assert!(manager.write("none", "x").is_err());
-    assert!(manager.resize("none", 80, 24).is_err());
-    manager.close("none"); // closing an unknown session is a no-op
+    assert_eq!(
+        manager.open(Arc::clone(&out), "unknown", 80, 24),
+        Err("no tab unknown".to_owned())
+    );
+    assert!(manager.open(Arc::clone(&out), "bad", 0, 24).is_err());
+    assert!(manager.open(Arc::clone(&out), "bad", 80, 0).is_err());
+    assert_eq!(manager.status("unknown"), None);
+    assert!(manager.write("unknown", "x").is_err());
+    assert!(manager.write("bad", "x").is_err(), "no shell yet");
+    assert!(manager.resize("unknown", 80, 24).is_err());
+    manager.ack("unknown", 1, 10); // ignored
+    manager.close_tab("unknown"); // closing an unknown tab is a no-op
+    assert_eq!(manager.tab_ids(), ["bad"]);
+}
+
+#[test]
+fn settings_are_validated_persisted_and_reloaded() {
+    let dir = temp_dir().join(format!("omp-terminal-settings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("terminal.json");
+    // A manager reading the file afresh (a restart).
+    let reopen = || TerminalManager::new(Some(dir.join("terminal.json")));
+
+    let manager = reopen();
+    let settings = manager.settings();
+    assert_eq!(settings.shell, "");
+    assert!(
+        Path::new(&settings.default_shell).is_absolute(),
+        "{settings:?}"
+    );
+
+    for bad in [
+        "sh",
+        "./sh",
+        "/definitely/not/a/shell",
+        "/etc/hosts",
+        "/bin",
+    ] {
+        assert!(manager.set_shell(bad).is_err(), "{bad} must be refused");
+    }
+    assert!(!path.exists(), "a refused setting was written");
+
+    let set = manager.set_shell(&format!("  {}  ", *PLAIN_SHELL)).unwrap();
+    assert_eq!(set.shell, *PLAIN_SHELL, "stored trimmed");
+    assert_eq!(manager.settings().shell, *PLAIN_SHELL);
+    let reloaded = reopen();
+    assert_eq!(reloaded.settings().shell, *PLAIN_SHELL);
+
+    // The setting is what the next shell runs.
+    reloaded.register_tab("set", None);
+    let status = reloaded
+        .open(Arc::new(Collector::default()), "set", 80, 24)
+        .unwrap();
+    assert_eq!(status.shell, *PLAIN_SHELL);
+    reloaded.close_tab("set");
+
+    assert_eq!(reloaded.set_shell("").unwrap().shell, "");
+    assert_eq!(reopen().settings().shell, "");
+
+    // A corrupt file reads as the default and is never overwritten.
+    std::fs::write(&path, "{ not json").unwrap();
+    let corrupt = reopen();
+    assert_eq!(corrupt.settings().shell, "");
+    assert!(corrupt.set_shell(&PLAIN_SHELL).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -309,7 +605,7 @@ fn a_background_job_dies_with_its_exited_shell_without_any_close() {
         .write("orphan", "sleep 1000 & echo JOB=$!\n")
         .unwrap();
     assert!(wait_until(SLOW, || out.number_after("JOB=").is_some()));
-    let pty = manager.get("orphan").unwrap();
+    let pty = manager.live("orphan").unwrap();
     manager.write("orphan", "exit\n").unwrap();
     assert!(
         wait_until(SLOW, || out.exited()),
@@ -332,12 +628,12 @@ fn a_background_job_dies_with_its_exited_shell_without_any_close() {
 }
 
 /// The reaped shell's pid can be reused by the system: nothing may signal
-/// that session id any more once the shell is gone — not a later `close`,
-/// not the respawn replacing the entry.
+/// that session id any more once the shell is gone — not a later
+/// `close_tab`, not the respawn replacing the slot.
 #[test]
 fn an_exited_shell_is_never_signalled_again_by_close_or_respawn() {
     let (manager, out) = open("reuse");
-    let pty = manager.get("reuse").unwrap();
+    let pty = manager.live("reuse").unwrap();
     assert!(pty.killer().sid() > 1, "no session id while the shell runs");
     manager.write("reuse", "exit\n").unwrap();
     assert!(wait_until(SLOW, || out.exited()), "no exit event");
@@ -347,10 +643,10 @@ fn an_exited_shell_is_never_signalled_again_by_close_or_respawn() {
     );
     let signals = pty.killer().signals();
 
-    // Respawn replaces (and kills) the exited entry; then close kills the
-    // new one. Neither touches the old session id.
-    manager.open(Arc::clone(&out), &args("reuse")).unwrap();
-    manager.close("reuse");
+    // Respawn replaces (and kills) the exited shell; then close_tab kills
+    // the new one. Neither touches the old session id.
+    manager.open(Arc::clone(&out), "reuse", 80, 24).unwrap();
+    manager.close_tab("reuse");
 
     assert_eq!(
         pty.killer().signals(),
@@ -391,6 +687,11 @@ fn the_exit_code_is_read_without_reaping_the_shell() {
     manager.write("signalled", "kill -9 $$\n").unwrap();
     assert!(wait_until(SLOW, || out.exited()), "no exit event");
     assert_eq!(out.exit_codes(), [None], "a signal has no exit code");
+    let status = manager.status("signalled").unwrap();
+    assert_eq!(
+        (status.state, status.exit_code),
+        (TerminalState::Exited, None)
+    );
     drop(manager);
 
     assert_eq!(super::kill::exit_code(libc::CLD_EXITED, 7), Some(7));
@@ -404,7 +705,7 @@ fn the_exit_code_is_read_without_reaping_the_shell() {
 #[test]
 fn the_exited_shell_stays_a_zombie_until_its_session_is_cleaned_up() {
     let (manager, out) = open("zombie");
-    let pty = manager.get("zombie").unwrap();
+    let pty = manager.live("zombie").unwrap();
     let pid = pty.killer().sid();
     assert!(pid > 1);
     pty.killer().hold_cleanup(true);
@@ -433,20 +734,20 @@ fn the_exited_shell_stays_a_zombie_until_its_session_is_cleaned_up() {
     assert_eq!(pty.killer().sid(), 0, "session id kept after the cleanup");
 }
 
-/// A `close` during the grace period kills by the still-reserved session id,
-/// but leaves the reaping to the waiter: the zombie survives the `close` and
-/// is reaped exactly once, after the cleanup.
+/// A `close_tab` during the grace period kills by the still-reserved
+/// session id, but leaves the reaping to the waiter: the zombie survives the
+/// close and is reaped exactly once, after the cleanup.
 #[test]
 fn a_close_during_the_grace_period_leaves_the_reaping_to_the_waiter() {
     let (manager, out) = open("zombie-close");
-    let pty = manager.get("zombie-close").unwrap();
+    let pty = manager.live("zombie-close").unwrap();
     let pid = pty.killer().sid();
     pty.killer().hold_cleanup(true);
     let _resume = ResumeCleanup(Arc::clone(&pty));
 
     manager.write("zombie-close", "exit\n").unwrap();
     assert!(wait_until(SLOW, || out.exited()), "no exit event");
-    manager.close("zombie-close");
+    manager.close_tab("zombie-close");
 
     assert_eq!(pty.killer().sid(), 0, "close did not clear the session id");
     assert!(
@@ -506,8 +807,11 @@ fn all_output_is_out_before_the_exit_event() {
         )
         .unwrap();
 
-    assert!(wait_until(SLOW, || out.exited()), "no exit event");
-    let seen = out.text_at_exit.lock().unwrap().clone().unwrap();
+    assert!(
+        wait_acking(&manager, "drain", &out, || out.exited()),
+        "no exit event"
+    );
+    let seen = out.text_at_exit.lock().unwrap().take().unwrap();
     assert!(seen.contains("A1"), "before exit: {seen:.200?}");
     assert!(
         seen.contains("END9"),
@@ -559,7 +863,7 @@ fn a_jobs_output_within_the_grace_period_is_delivered_before_the_exit() {
         wait_until(Duration::from_secs(2), || out.exited()),
         "exit event waited for the job"
     );
-    let seen = out.text_at_exit.lock().unwrap().clone().unwrap();
+    let seen = out.text_at_exit.lock().unwrap().take().unwrap();
     assert!(seen.contains("B2"), "job output after the exit: {seen:?}");
     assert_eq!(out.exit_codes(), [Some(0)]);
 }
@@ -567,7 +871,7 @@ fn a_jobs_output_within_the_grace_period_is_delivered_before_the_exit() {
 /// A shell that records its pid in `pidfile` (appending) before it becomes
 /// an interactive `sh`: lets a test see every shell a manager ever started.
 fn recording_shell(tag: &str) -> (String, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("omp-terminal-{tag}-{}", std::process::id()));
+    let dir = temp_dir().join(format!("omp-terminal-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let pidfile = dir.join("pids");
     let _ = std::fs::remove_file(&pidfile);
@@ -581,7 +885,7 @@ fn recording_shell(tag: &str) -> (String, PathBuf) {
     (path.to_string_lossy().into_owned(), pidfile)
 }
 
-fn recorded_pids(pidfile: &std::path::Path) -> Vec<i32> {
+fn recorded_pids(pidfile: &Path) -> Vec<i32> {
     std::fs::read_to_string(pidfile)
         .unwrap_or_default()
         .lines()
@@ -604,28 +908,36 @@ fn concurrently(first: impl FnOnce() + Send, second: impl FnOnce() + Send) {
     });
 }
 
+/// `close_tab` racing `open`: whichever wins, no shell survives and no tab
+/// is left. An open that lost the race (its tab closed while it spawned, or
+/// before it looked) is an error.
 #[test]
-fn open_racing_close_leaves_no_shell_and_no_entry_after_a_final_close() {
+fn close_tab_racing_open_leaves_no_shell_and_no_tab() {
     let _quiet = LOAD_SENSITIVE
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     let (shell, pidfile) = recording_shell("open-close");
-    let manager = TerminalManager::new();
+    let manager = manager_with(&shell);
     let out = Arc::new(Collector::default());
-    let open_args = OpenArgs {
-        shell: Some(shell),
-        ..args("race")
-    };
     for round in 0..20 {
+        manager.register_tab("race", Some(temp_dir().as_path()));
+        let result = Mutex::new(None);
         concurrently(
             || {
-                manager.open(Arc::clone(&out), &open_args).expect("open");
+                *result.lock().unwrap() = Some(manager.open(Arc::clone(&out), "race", 80, 24));
             },
-            || manager.close("race"),
+            || manager.close_tab("race"),
         );
-        manager.close("race");
+        match result.into_inner().unwrap().unwrap() {
+            // Opened before the close: the close killed it.
+            Ok(status) => assert_eq!(status.state, TerminalState::Running),
+            Err(e) => assert!(
+                e == "tab closed" || e == "no tab race",
+                "round {round}: {e}"
+            ),
+        }
 
-        assert!(manager.ptys().is_empty(), "round {round}: entry left");
+        assert!(manager.tab_ids().is_empty(), "round {round}: tab left");
         let pids = recorded_pids(&pidfile);
         assert!(
             wait_until(Duration::from_secs(2), || pids
@@ -642,25 +954,21 @@ fn overlapping_opens_start_one_shell() {
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     let (shell, pidfile) = recording_shell("open-open");
-    let manager = TerminalManager::new();
+    let manager = manager_with(&shell);
     let out = Arc::new(Collector::default());
-    let open_args = OpenArgs {
-        shell: Some(shell),
-        ..args("twice")
-    };
     for round in 0..10 {
-        concurrently(
-            || {
-                manager
-                    .open(Arc::clone(&out), &open_args)
-                    .expect("first open");
-            },
-            || {
-                manager
-                    .open(Arc::clone(&out), &open_args)
-                    .expect("second open");
-            },
-        );
+        manager.register_tab("twice", Some(temp_dir().as_path()));
+        let statuses = Mutex::new(Vec::new());
+        let open = || {
+            let status = manager
+                .open(Arc::clone(&out), "twice", 80, 24)
+                .expect("open");
+            statuses.lock().unwrap().push(status.instance);
+        };
+        concurrently(open, open);
+        let instances = statuses.into_inner().unwrap();
+        assert_eq!(instances[0], instances[1], "round {round}: two instances");
+
         let expected = round + 1;
         assert!(
             wait_until(SLOW, || recorded_pids(&pidfile).len() >= expected),
@@ -672,7 +980,7 @@ fn overlapping_opens_start_one_shell() {
             expected,
             "round {round}: a second shell was started"
         );
-        manager.close("twice");
+        manager.close_tab("twice");
     }
 }
 
@@ -683,7 +991,7 @@ fn resolve_shell_prefers_setting_then_env_then_account_then_default() {
     let missing = "/definitely/not/a/shell";
     let not_executable = "/etc/hosts";
     // A stand-in for the account's shell that exists on every unix runner.
-    let dir = std::env::temp_dir().join(format!("omp-acct-{}", std::process::id()));
+    let dir = temp_dir().join(format!("omp-acct-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let zsh_path = dir.join("zsh");
     std::fs::write(&zsh_path, "#!/bin/sh\n").unwrap();
@@ -751,7 +1059,7 @@ fn account_shell_lookup_finds_an_absolute_shell() {
 
 #[test]
 fn only_posix_shells_get_login_interactive_args() {
-    let dir = std::env::temp_dir().join(format!("omp-shell-{}", std::process::id()));
+    let dir = temp_dir().join(format!("omp-shell-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut seen = Vec::new();
     for name in ["bash", "zsh", "fish", "dash", "ksh", "sh", "nu", "pwsh"] {

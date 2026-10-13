@@ -79,7 +79,7 @@ Toggle plan mode (`Shift+Alt+P`, `/plan` or the composer pill) and the agent dra
 
 ### Terminal
 
-A real shell in every tab. `` Ctrl+` `` (`` ⌘` `` on macOS), the status-bar button or `/terminal` opens a panel above the prompt, in the tab's project folder, running your login shell (or the one set under Tweaks → Terminal). Hiding the panel keeps the shell running; closing the tab ends it and everything it started. After `exit`, press Enter in the panel to start a new one. It is your terminal, not the agent's: it runs with your full rights, omp's approvals do not apply to it, and nothing passes between it and the agent.
+A real shell in every tab. `` Ctrl+` `` (`` ⌘` `` on macOS), the status-bar button or `/terminal` opens a panel above the prompt, in the tab's project folder, running your login shell (or the one set under Tweaks → Terminal, which the app saves). Hiding the panel keeps the shell running; closing the tab ends it and everything it started. After `exit`, press Enter in the panel to start a new one. It is your terminal, not the agent's: it runs with your full rights, omp's approvals do not apply to it, and nothing passes between it and the agent.
 
 ### Profiles, updates, look
 

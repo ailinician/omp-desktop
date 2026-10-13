@@ -9,7 +9,8 @@
 //! chunks; a waiter blocks in `child.wait()` (Unix: `waitid` without reaping,
 //! see [`kill`]); a writer feeds the master from
 //! a bounded queue, so no command ever blocks on a full pty; a pump
-//! ([`pump`]) coalesces what reader and waiter send and emits it. The reader
+//! ([`pump`]) coalesces what reader and waiter send, records it in the
+//! terminal's output ring and emits it, under flow control. The reader
 //! owns a duplicate of the master descriptor, so dropping the master does not
 //! wake it: it ends at the pty's hangup (the shell, a session leader, exiting).
 //! The pump still gives up waiting for it after a grace period, should a
@@ -17,7 +18,6 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -27,8 +27,8 @@ use portable_pty::{native_pty_system, CommandBuilder, ExitStatus, MasterPty, Pty
 #[cfg(unix)]
 use super::kill::wait_exit;
 use super::kill::TreeKiller;
-use super::pump::{pump, Flags, Msg, READER_GRACE};
-use super::{Emit, OpenArgs};
+use super::pump::{pump, Emit, Msg, Stream, READER_GRACE};
+use super::ring::Replay;
 use crate::child_path;
 
 #[cfg(windows)]
@@ -45,13 +45,27 @@ const QUEUE_DEPTH: usize = 64;
 /// Writes queued for the shell; more than this and `write` fails.
 const INPUT_DEPTH: usize = 1024;
 
-/// A running shell: what `TerminalManager` keeps per session, behind an
-/// `Arc` so commands can use it without holding the manager's lock.
+/// What [`spawn`] starts: `program` with `shell_args` in `cwd`, on a
+/// `cols`×`rows` pty, as shell `instance` of tab `session_id`.
+pub struct SpawnSpec<'a> {
+    pub session_id: &'a str,
+    pub instance: u64,
+    pub cwd: &'a Path,
+    pub program: &'a Path,
+    pub shell_args: &'a [String],
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// A running (or exited) shell: what `TerminalManager` keeps per tab, behind
+/// an `Arc` so commands can use it without holding the manager's lock.
 pub struct Pty {
+    instance: u64,
+    shell: PathBuf,
     killer: Arc<TreeKiller>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     input: SyncSender<Vec<u8>>,
-    flags: Arc<Flags>,
+    stream: Arc<Stream>,
 }
 
 impl Pty {
@@ -61,8 +75,20 @@ impl Pty {
         &self.killer
     }
 
-    pub fn is_alive(&self) -> bool {
-        self.flags.alive.load(Ordering::Acquire)
+    pub const fn instance(&self) -> u64 {
+        self.instance
+    }
+
+    /// The program that was started.
+    pub fn shell(&self) -> &Path {
+        &self.shell
+    }
+
+    /// `None` while the shell runs; `Some(code)` once it exited (`code`
+    /// `None` = killed by a signal).
+    #[allow(clippy::option_option)] // the contract's shape, see `Stream::exit_code`
+    pub fn exit_code(&self) -> Option<Option<i32>> {
+        self.stream.exit_code()
     }
 
     /// Queue `data` for the shell. Never blocks: the writer thread does the
@@ -83,10 +109,23 @@ impl Pty {
     }
 
     /// Kill the shell and everything it started, and silence the terminal:
-    /// no exit event follows. Blocks briefly (see [`TreeKiller`]).
+    /// no event follows, and a pump stalled on flow control exits at once.
+    /// Blocks briefly (see [`TreeKiller`]).
     pub fn kill(&self) {
-        self.flags.closed.store(true, Ordering::Release);
+        self.stream.close();
         self.killer.kill();
+    }
+
+    /// The held output after event `after_seq` (see [`super::ring`]). Also
+    /// forgives the flow-control debt: the caller renders this instead of
+    /// acking the events it covers.
+    pub fn replay(&self, after_seq: u64) -> Replay {
+        self.stream.replay(after_seq)
+    }
+
+    /// The webview has rendered `bytes` more of the emitted output.
+    pub fn ack(&self, bytes: u64) {
+        self.stream.ack(bytes);
     }
 }
 
@@ -97,7 +136,7 @@ impl Drop for Pty {
     }
 }
 
-pub const fn size(cols: u16, rows: u16) -> PtySize {
+const fn size(cols: u16, rows: u16) -> PtySize {
     PtySize {
         rows,
         cols,
@@ -141,12 +180,7 @@ pub fn resolve_shell_with(
 ) -> Result<(PathBuf, Vec<String>), String> {
     let preference = preference.map(str::trim).filter(|p| !p.is_empty());
     let shell = if let Some(path) = preference {
-        if !is_executable_file(Path::new(path)) {
-            return Err(format!(
-                "terminal shell {path:?} is not an absolute path to an executable file"
-            ));
-        }
-        PathBuf::from(path)
+        validate_shell(path)?
     } else {
         [env_shell, account_shell]
             .into_iter()
@@ -165,6 +199,27 @@ pub fn resolve_shell_with(
         Vec::new()
     };
     Ok((shell, args))
+}
+
+/// A shell setting the user typed: an absolute path to an executable file
+/// (surrounding whitespace ignored). An empty setting means "default" and is
+/// the caller's to handle; here it is refused like any other non-path.
+pub fn validate_shell(path: &str) -> Result<PathBuf, String> {
+    let path = path.trim();
+    if is_executable_file(Path::new(path)) {
+        Ok(PathBuf::from(path))
+    } else {
+        Err(format!(
+            "terminal shell {path:?} is not an absolute path to an executable file"
+        ))
+    }
+}
+
+/// The shell an unset setting runs: what `resolve_shell(None)` picks. May
+/// look up the account's login shell (a short-lived process), so keep it
+/// off the IPC thread.
+pub fn default_shell() -> PathBuf {
+    resolve_shell(None).map_or_else(|_| PathBuf::from(DEFAULT_SHELL), |(shell, _)| shell)
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -228,32 +283,27 @@ pub fn parse_account_shell(output: &str) -> Option<String> {
     Some(shell.trim().to_owned()).filter(|s| s.starts_with('/'))
 }
 
-/// Start `program` on a new pseudo-terminal and the threads that stream its
-/// output through `emit`. `args` is validated by the caller.
-pub fn spawn<E: Emit>(
-    emit: Arc<E>,
-    args: &OpenArgs,
-    program: &Path,
-    shell_args: &[String],
-) -> Result<Pty, String> {
+/// Start `spec.program` on a new pseudo-terminal and the threads that stream
+/// its output through `emit`. `spec` is validated by the caller.
+pub fn spawn<E: Emit>(emit: Arc<E>, spec: &SpawnSpec<'_>) -> Result<Pty, String> {
     let pair = native_pty_system()
-        .openpty(size(args.cols, args.rows))
+        .openpty(size(spec.cols, spec.rows))
         .map_err(|e| format!("open pty: {e}"))?;
 
-    let mut cmd = CommandBuilder::new(program);
-    cmd.args(shell_args);
-    cmd.cwd(&args.cwd);
+    let mut cmd = CommandBuilder::new(spec.program);
+    cmd.args(spec.shell_args);
+    cmd.cwd(spec.cwd);
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("OMP_DESKTOP", "1");
-    cmd.env("OMP_DESKTOP_SESSION", &args.session_id);
+    cmd.env("OMP_DESKTOP_SESSION", spec.session_id);
     if let Some(path) = child_path::child_path() {
         cmd.env("PATH", path);
     }
     let mut child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| format!("spawn {}: {e}", program.display()))?;
+        .map_err(|e| format!("spawn {}: {e}", spec.program.display()))?;
     // Only the child may hold the slave, or the master never sees EOF.
     drop(pair.slave);
 
@@ -280,20 +330,23 @@ pub fn spawn<E: Emit>(
         }
     };
 
-    let flags = Arc::new(Flags::new());
+    let stream = Arc::new(Stream::new());
     let (tx, rx) = mpsc::sync_channel(QUEUE_DEPTH);
     let (input, input_rx) = mpsc::sync_channel(INPUT_DEPTH);
-    let id = args.session_id.clone(); // owned by the pump thread, which outlives `args`
+    let id = spec.session_id.to_owned(); // owned by the pump thread, which outlives `spec`
+    let instance = spec.instance;
 
     let wait_tx = tx.clone(); // reader and waiter both feed the pump
-    let wait_flags = Arc::clone(&flags);
+    let wait_stream = Arc::clone(&stream);
     let wait_killer = Arc::clone(&killer);
     let started = spawn_thread("terminal-wait", move || {
         #[cfg(unix)]
         let code = wait_for_exit(&mut *child, leader, &wait_killer);
         #[cfg(windows)]
         let code = reaped_code(child.wait());
-        wait_flags.alive.store(false, Ordering::Release);
+        // Before the pump hears of it: `Pty::exit_code` is current once the
+        // exit event is out.
+        wait_stream.set_exit(code);
         let _ = wait_tx.send(Msg::Exit(code));
         // End what the shell left behind and forget the session id now, not
         // at some later `close` or respawn. On unix the shell is still an
@@ -312,21 +365,24 @@ pub fn spawn<E: Emit>(
     .and_then(|()| spawn_thread("terminal-read", move || read_loop(reader, &tx)))
     .and_then(|()| spawn_thread("terminal-write", move || write_loop(writer, &input_rx)))
     .and_then(|()| {
-        let pump_flags = Arc::clone(&flags);
+        let pump_stream = Arc::clone(&stream);
         spawn_thread("terminal-emit", move || {
-            pump(&rx, emit.as_ref(), &id, &pump_flags);
+            pump(&rx, emit.as_ref(), &id, instance, &pump_stream);
         })
     });
     if let Err(e) = started {
+        stream.close();
         killer.kill();
         return Err(e);
     }
 
     Ok(Pty {
+        instance,
+        shell: spec.program.to_path_buf(),
         killer,
         master: Mutex::new(pair.master),
         input,
-        flags,
+        stream,
     })
 }
 

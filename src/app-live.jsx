@@ -230,12 +230,7 @@ function App() {
     bridge, activeSessionId: planKey, sessionIds, tweaks: t, setTweak,
   });
   const termHeight = t.terminalHeight ?? _TERM_DEFAULT_HEIGHT;
-  // Applied on blur: the next shell that starts uses it (running ones keep theirs).
-  const handleTerminalShell = v => {
-    const shell = v.trim();
-    bridge?.setTerminalShell(shell);
-    if (shell !== (t.terminalShell ?? "")) setTweak("terminalShell", shell);
-  };
+  const shellSettings = terminal.shellSettings;
 
   const subagentUi = useSubagentManager({
     bridge, layout: t.layout, setTweak, activeSessionId, subagents, messages, setHoveredMsgIdx,
@@ -706,7 +701,7 @@ function App() {
                         onClose={() => terminal.close(s.id)}
                         mountRef={terminal.mountFor(s.id)}
                         onContextMenu={(e) => { if (terminal.copySelection(s.id)) e.preventDefault(); }}
-                        shellLabel={_TERM_shellLabel(t.terminalShell)}
+                        shellLabel={_TERM_shellLabel(entry.status?.shell)}
                         cwd={s.path}
                       />
                     );
@@ -976,12 +971,18 @@ function App() {
           </TweakRow>
         </TweakSection>
         <TweakSection label="Terminal">
-          {/* Applied on blur (and Enter), not per keystroke: a half-typed path is not a shell. */}
+          {/* Saved on blur (and Enter), not per keystroke: a half-typed path is
+              not a shell. Rust validates and stores it; the next shell started
+              uses it (running ones keep theirs). */}
           <TweakRow label="shell">
             <input className="twk-field" type="text" spellCheck={false}
-              defaultValue={t.terminalShell ?? ""} placeholder="default ($SHELL)"
-              onBlur={e => handleTerminalShell(e.target.value)}
+              key={shellSettings?.shell ?? ""}
+              defaultValue={shellSettings?.shell ?? ""}
+              placeholder={shellSettings?.defaultShell ? `default (${shellSettings.defaultShell})` : "default"}
+              aria-invalid={terminal.shellError != null}
+              onBlur={e => terminal.saveShell(e.target.value)}
               onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }} />
+            {terminal.shellError != null && <div className="term-shell-error">{terminal.shellError}</div>}
           </TweakRow>
           <TweakToggle label="open with new tab" value={t.terminalAutoOpen ?? false}
             onChange={v => setTweak("terminalAutoOpen", v)} />

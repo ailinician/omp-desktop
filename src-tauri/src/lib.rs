@@ -75,8 +75,11 @@ struct StartSessionArgs {
     profile: Option<String>,
 }
 
-/// Start an omp process for a new tab session, then tell the widget host
-/// (which computes the project's git context on its own thread).
+/// Register the tab with the terminal, start an omp process for it, then
+/// tell the widget host (which computes the project's git context on its own
+/// thread). The terminal comes first so a failed omp spawn still leaves the
+/// tab a working shell; registering an existing tab (a profile switch) keeps
+/// its shell.
 #[tauri::command]
 fn start_session(
     args: StartSessionArgs,
@@ -84,6 +87,7 @@ fn start_session(
     rule_book: State<'_, Arc<RuleBook>>,
     store: State<'_, Arc<profiles::ProfileStore>>,
     widget_host: State<'_, Arc<widgets::WidgetHost>>,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let profile = store.resolve(args.profile.as_deref())?;
@@ -95,6 +99,7 @@ fn start_session(
     } else {
         Some(args.cwd.as_str())
     };
+    terminal.register_tab(&args.session_id, cwd_opt.map(Path::new));
     // The bridge takes the id by value; the widget hook below still needs it.
     let session_id = args.session_id.clone();
     bridge.start_session(
@@ -287,8 +292,8 @@ async fn conversation_tree(
 ///
 /// Deliberately does NOT touch the tab's terminal: a profile switch stops and
 /// respawns the omp process under the same tab id while the tab, and with it
-/// its shell, stays. The terminal ends only through `terminal_close` (the
-/// frontend's `closeSession`) and `TerminalManager::shutdown_all`.
+/// its shell, stays. The terminal ends only through [`close_tab`] /
+/// [`close_all_tabs`] and `TerminalManager::shutdown_all`.
 #[tauri::command]
 fn stop_session(
     session_id: String,
@@ -300,17 +305,96 @@ fn stop_session(
     widget_host.session_closed(&session_id);
 }
 
-/// Start the tab's terminal shell (no-op while it runs) — see `terminal`.
-/// `async` + `spawn_blocking`: spawning a shell (and killing a replaced
-/// one) blocks, and a sync command would run on the main thread.
+/// End a tab for good: its omp process (with its session grants), widget
+/// runs, git watcher and terminal shell. The one place a tab ends.
+fn end_tab(app: &AppHandle, session_id: &str) {
+    let rule_book = app.state::<Arc<RuleBook>>();
+    app.state::<AgentBridge>()
+        .stop_session(session_id, &rule_book);
+    app.state::<Arc<widgets::WidgetHost>>()
+        .session_closed(session_id);
+    app.state::<GitWatcherState>().stop(session_id);
+    app.state::<Arc<terminal::TerminalManager>>()
+        .close_tab(session_id);
+}
+
+/// Close a tab (the frontend's `closeSession`) — see [`end_tab`]. `async` +
+/// `spawn_blocking`: reaping omp and killing the shell's processes block.
 #[tauri::command]
-async fn terminal_open(args: terminal::OpenArgs, app: AppHandle) -> Result<(), String> {
+async fn close_tab(session_id: String, app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || end_tab(&app, &session_id))
+        .await
+        .map_err(|e| format!("join error: {e}"))
+}
+
+/// End every tab the backend knows (omp sessions and terminal tabs). Called
+/// by the webview at boot, before it restores its tabs: tab ids are never
+/// reused across a reload, so whatever is registered then belongs to a
+/// previous document and would otherwise run on unseen.
+#[tauri::command]
+async fn close_all_tabs(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let emit = Arc::new(terminal::TauriEmit(app.clone()));
-        app.state::<terminal::TerminalManager>().open(emit, &args)
+        let mut ids = app.state::<AgentBridge>().session_ids();
+        ids.extend(app.state::<Arc<terminal::TerminalManager>>().tab_ids());
+        ids.sort_unstable();
+        ids.dedup();
+        for id in &ids {
+            end_tab(&app, id);
+        }
     })
     .await
-    .map_err(|e| format!("join error: {e}"))?
+    .map_err(|e| format!("join error: {e}"))
+}
+
+/// Start the tab's terminal shell, in the tab's folder (else the home
+/// folder) with the shell setting — see `terminal`. While one is starting or
+/// running, returns its status instead. `async` + `spawn_blocking`: spawning
+/// a shell (and killing an exited one's leftovers) blocks.
+#[tauri::command]
+async fn terminal_open(
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    app: AppHandle,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Result<terminal::TerminalStatus, String> {
+    with_blocking(&terminal, move |t| {
+        t.open(Arc::new(terminal::TauriEmit(app)), &session_id, cols, rows)
+    })
+    .await
+}
+
+/// The tab's shell (`None` while it has none). A map lookup.
+#[tauri::command]
+fn terminal_status(
+    session_id: String,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Option<terminal::TerminalStatus> {
+    terminal.status(&session_id)
+}
+
+/// Output the tab's shell still holds after event `after_seq` of `instance`
+/// (everything it holds when `instance` is not the current shell). A copy
+/// of at most the ring's budget; never blocks.
+#[tauri::command]
+fn terminal_replay(
+    session_id: String,
+    instance: u64,
+    after_seq: u64,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Option<terminal::ReplayWire> {
+    terminal.replay(&session_id, instance, after_seq)
+}
+
+/// The webview rendered `bytes` of `instance`'s output (flow control).
+#[tauri::command]
+fn terminal_ack(
+    session_id: String,
+    instance: u64,
+    bytes: u64,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) {
+    terminal.ack(&session_id, instance, bytes);
 }
 
 /// Type into the tab's terminal: `data` reaches the shell unchanged.
@@ -323,7 +407,7 @@ async fn terminal_open(args: terminal::OpenArgs, app: AppHandle) -> Result<(), S
 fn terminal_write(
     session_id: String,
     data: String,
-    terminal: State<'_, terminal::TerminalManager>,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
 ) -> Result<(), String> {
     terminal.write(&session_id, data)
 }
@@ -336,20 +420,28 @@ fn terminal_resize(
     session_id: String,
     cols: u16,
     rows: u16,
-    terminal: State<'_, terminal::TerminalManager>,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
 ) -> Result<(), String> {
     terminal.resize(&session_id, cols, rows)
 }
 
-/// Kill the tab's terminal shell and everything it started (`async` +
-/// `spawn_blocking`: finding its processes blocks). Unknown tabs are fine.
+/// The shell setting and what an empty one runs. `spawn_blocking`: the
+/// default may come from the account database (a subprocess).
 #[tauri::command]
-async fn terminal_close(session_id: String, app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        app.state::<terminal::TerminalManager>().close(&session_id);
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))
+async fn terminal_settings(
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Result<terminal::TerminalSettings, String> {
+    with_blocking(&terminal, |t| Ok(t.settings())).await
+}
+
+/// Store the shell setting (empty = default, else an absolute path to an
+/// executable file) in `terminal.json`; the next shell started uses it.
+#[tauri::command]
+async fn terminal_set_shell(
+    shell: String,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Result<terminal::TerminalSettings, String> {
+    with_blocking(&terminal, move |t| t.set_shell(&shell)).await
 }
 
 /// Query a session's last error. Returns `None` if the session is
@@ -942,7 +1034,11 @@ async fn app_update_install(
 pub(crate) fn kill_child_processes(app: &AppHandle) {
     app.state::<AgentBridge>().shutdown_all();
     widgets::kill_all(app);
-    app.state::<terminal::TerminalManager>().shutdown_all();
+    // Managed in `setup` (it needs the config dir): absent only if the app
+    // exits before that ran, when there is no shell to kill either.
+    if let Some(terminal) = app.try_state::<Arc<terminal::TerminalManager>>() {
+        terminal.shutdown_all();
+    }
 }
 
 /// App-level state that needs a resolved path, and the cold-start "Open
@@ -962,6 +1058,14 @@ fn setup(app: &tauri::App) {
         .as_deref()
         .map(|dir| (dir.join("widgets.json"), dir.join("widget-approvals.json")))
         .unzip();
+    // Terminal tabs and the shell setting: <app_config_dir>/terminal.json.
+    // No temp-dir fallback either: another account could plant the shell
+    // this one runs; without a config dir the setting stays in memory.
+    app.manage(Arc::new(terminal::TerminalManager::new(
+        resolved_config_dir
+            .as_deref()
+            .map(|dir| dir.join("terminal.json")),
+    )));
     // Falls back to the temp dir if the config dir can't be resolved
     // (e.g. a locked-down test environment) rather than failing
     // startup — approval grants and profiles just won't survive a
@@ -1058,7 +1162,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AgentBridge::new())
-        .manage(terminal::TerminalManager::new())
         .manage(GitWatcherState::new())
         .manage(OpenProjectState::new())
         .manage(updater::UpdaterState::default())
@@ -1067,9 +1170,15 @@ pub fn run() {
             start_session,
             stop_session,
             terminal_open,
+            terminal_status,
+            terminal_replay,
+            terminal_ack,
             terminal_write,
             terminal_resize,
-            terminal_close,
+            terminal_settings,
+            terminal_set_shell,
+            close_tab,
+            close_all_tabs,
             session_status,
             replay_events,
             extension_ui_state,

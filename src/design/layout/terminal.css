@@ -42,3 +42,6 @@
 .term-head-close:hover { background: var(--bg-hover); color: var(--fg); }
 
 .term-body { flex: 1; min-height: 0; padding: 4px 6px; overflow: hidden; }
+
+/* Tweaks → Terminal shell: Rust refused the path (app-live.jsx). */
+.term-shell-error { color: var(--rose); font-size: var(--d-text-xs); overflow-wrap: anywhere; }
