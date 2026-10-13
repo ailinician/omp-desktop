@@ -57,24 +57,8 @@ function ThinkingMenu({ model, level, cycleHint, onLoad, onSet }) {
     (pop.querySelector('[aria-checked="true"]') ?? pop.querySelector('[role="menuitemradio"]'))?.focus();
   }, [open, shown]);
 
-  // Arrows, Home and End move between the levels. Tab closes the menu,
-  // as in any menu, and is prevented so Shift+Tab does not also cycle.
-  // Ctrl/Alt/Meta chords are left to the window keymap (Ctrl+Tab, …).
-  const onPopKey = e => {
-    if (e.ctrlKey || e.altKey || e.metaKey) return;
-    if (e.key === "Tab") { e.preventDefault(); close(); return; }
-    const all = [...popRef.current.querySelectorAll('[role="menuitemradio"]')];
-    if (!all.length) return;
-    const i = all.indexOf(document.activeElement);
-    const next = e.key === "ArrowDown" ? all[(i + 1) % all.length]
-      : e.key === "ArrowUp" ? all[i <= 0 ? all.length - 1 : i - 1]
-      : e.key === "Home" ? all[0]
-      : e.key === "End" ? all[all.length - 1]
-      : null;
-    if (!next) return;
-    e.preventDefault();
-    next.focus();
-  };
+  // Arrows, Home and End move between the levels; Tab closes the menu.
+  const onPopKey = e => window.menuKeyNav(e, popRef.current, '[role="menuitemradio"]', close);
 
   // Sent even for the ticked level: in `auto` mode the tick is only what
   // auto resolved to, and picking it is how the level gets pinned.

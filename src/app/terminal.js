@@ -189,15 +189,12 @@
     return window.OMP_PROJECT_NAV.basename(path).replace(/\.exe$/i, "") || "shell";
   }
 
-  /** A Windows drive path (`C:\…`, `C:/…`). */
-  const DRIVE_PATH = /^[A-Za-z]:[\\/]/;
-  const windowsKey = (p) => p.replace(/\//g, "\\").toLowerCase();
-
-  /** Same program path: exact, or for two Windows drive paths ignoring case
-   *  and `/` vs `\` (a 0.7.0 setting typed as `C:\Windows\…` or `C:/Windows/…`
-   *  names the listed `C:\WINDOWS\…`). */
+  /** Same program path, Windows drive/UNC paths ignoring case and `/` vs `\`
+   *  (a 0.7.0 setting typed as `C:\Windows\…` or `C:/Windows/…` names the
+   *  listed `C:\WINDOWS\…`). */
   function samePath(a, b) {
-    return a === b || (DRIVE_PATH.test(a) && DRIVE_PATH.test(b) && windowsKey(a) === windowsKey(b));
+    const { normPath } = window.OMP_PROJECT_NAV;
+    return normPath(a) === normPath(b);
   }
 
   /**

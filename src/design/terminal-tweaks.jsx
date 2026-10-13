@@ -44,10 +44,10 @@ function _TT_useShellSetting(bridge) {
   // Sent even for the ticked row: Rust's reply is the stored setting, which
   // the menu may not show.
   const save = React.useCallback(async (value) => {
-    if (bridge) apply(await bridge.setTerminalShell(value));
+    apply(await bridge.setTerminalShell(value));
   }, [bridge, apply]);
   const pick = React.useCallback(async () => {
-    if (!bridge || _TT_pickInFlight) return;
+    if (_TT_pickInFlight) return;
     _TT_pickInFlight = bridge.pickTerminalShell();
     try { apply(await _TT_pickInFlight); } finally { _TT_pickInFlight = null; }
   }, [bridge, apply]);
@@ -75,25 +75,11 @@ function _TT_ShellPicker({ settings, error, save, pick }) {
   }, [open]);
 
   // Arrows, Home and End move between the rows; Tab closes the menu.
-  const onMenuKey = e => {
-    if (e.ctrlKey || e.altKey || e.metaKey) return;
-    if (e.key === "Tab") { e.preventDefault(); close(); return; }
-    const all = [...menuRef.current.querySelectorAll("button")];
-    const i = all.indexOf(document.activeElement);
-    const next = e.key === "ArrowDown" ? all[(i + 1) % all.length]
-      : e.key === "ArrowUp" ? all[i <= 0 ? all.length - 1 : i - 1]
-      : e.key === "Home" ? all[0]
-      : e.key === "End" ? all[all.length - 1]
-      : null;
-    if (!next) return;
-    e.preventDefault();
-    next.focus();
-  };
+  const onMenuKey = e => window.menuKeyNav(e, menuRef.current, "button", close);
 
   return (
     <div className="twk-row" ref={rootRef}>
-      <div className="twk-row twk-row-h">
-        <div className="twk-lbl"><span>shell</span></div>
+      <_TT_Row label="shell" inline>
         <button ref={triggerRef} type="button" className="twk-btn secondary twk-pick"
           aria-haspopup="menu" aria-expanded={open} disabled={!settings}
           title={settings ? (settings.shell || `default: ${settings.defaultShell}`) : undefined}
@@ -101,7 +87,7 @@ function _TT_ShellPicker({ settings, error, save, pick }) {
           {label}
           <_TT_Icon name="chev" size={10} color="var(--fg-4)" />
         </button>
-      </div>
+      </_TT_Row>
       {open && (
         <div ref={menuRef} className="twk-menu" role="menu" aria-label="shell" onKeyDown={onMenuKey}>
           {rows.map(r => (

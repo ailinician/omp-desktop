@@ -7,7 +7,12 @@
    `onEscape`. Escape is prevented, so the window keymap (use-keymap.jsx
    skips defaultPrevented events) does not also abort the running turn. The
    listeners are attached only while open, and the callbacks are read
-   through a ref, so an inline arrow does not re-attach them every render. */
+   through a ref, so an inline arrow does not re-attach them every render.
+
+   menuKeyNav(e, menu, selector, close): a menu's onKeyDown. Arrows, Home
+   and End move focus between the `selector` items in `menu`; Tab closes the
+   menu, prevented so Shift+Tab does nothing else. Ctrl/Alt/Meta chords are
+   left to the window keymap (Ctrl+Tab, …). */
 
 (function () {
   function usePopoverDismiss(open, rootRef, onOutside, onEscape = onOutside) {
@@ -27,5 +32,22 @@
     }, [open, rootRef]);
   }
 
+  function menuKeyNav(e, menu, selector, close) {
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    if (e.key === "Tab") { e.preventDefault(); close(); return; }
+    const all = [...menu.querySelectorAll(selector)];
+    if (!all.length) return;
+    const i = all.indexOf(document.activeElement);
+    const next = e.key === "ArrowDown" ? all[(i + 1) % all.length]
+      : e.key === "ArrowUp" ? all[i <= 0 ? all.length - 1 : i - 1]
+      : e.key === "Home" ? all[0]
+      : e.key === "End" ? all[all.length - 1]
+      : null;
+    if (!next) return;
+    e.preventDefault();
+    next.focus();
+  }
+
   window.usePopoverDismiss = usePopoverDismiss;
+  window.menuKeyNav = menuKeyNav;
 })();

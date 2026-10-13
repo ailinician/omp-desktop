@@ -63,19 +63,9 @@ const CANDIDATES: &[Candidate] = &[
     },
 ];
 
-/// The shells `shell::LOGIN_SHELLS` starts as login shells, found on `PATH`
-/// like the shell itself would find them.
-#[cfg(not(windows))]
-const CANDIDATES: &[Candidate] = &[
-    on_path("sh"),
-    on_path("bash"),
-    on_path("zsh"),
-    on_path("fish"),
-    on_path("dash"),
-    on_path("ksh"),
-    on_path("nu"),
-];
-
+/// A unix candidate: one of the shells `shell::LOGIN_SHELLS` starts as login
+/// shells (the whole unix list), found on `PATH` like the shell itself would
+/// find it.
 #[cfg(not(windows))]
 const fn on_path(name: &'static str) -> Candidate {
     Candidate {
@@ -94,8 +84,12 @@ pub fn available() -> Vec<ShellChoice> {
         .or_else(|| std::env::var_os("PATH"))
         .unwrap_or_default();
     let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    #[cfg(windows)]
+    let candidates = CANDIDATES;
+    #[cfg(not(windows))]
+    let candidates = &shell::LOGIN_SHELLS.map(on_path);
     available_with(
-        CANDIDATES,
+        candidates,
         |var| std::env::var_os(var),
         &dirs,
         shell::is_executable_file,
@@ -112,6 +106,11 @@ fn available_with(
     dirs: &[PathBuf],
     usable: impl Fn(&Path) -> bool,
 ) -> Vec<ShellChoice> {
+    let dirs: Vec<&Path> = dirs
+        .iter()
+        .map(PathBuf::as_path)
+        .filter(|dir| dir.is_absolute())
+        .collect();
     candidates
         .iter()
         .filter_map(|candidate| {
@@ -119,11 +118,10 @@ fn available_with(
                 .fixed
                 .iter()
                 .filter_map(|&(var, rel)| env(var).map(|root| Path::new(&root).join(rel)));
-            let on_path = candidate.on_path.into_iter().flat_map(|file| {
-                dirs.iter()
-                    .filter(|dir| dir.is_absolute())
-                    .map(move |dir| dir.join(file))
-            });
+            let on_path = candidate
+                .on_path
+                .into_iter()
+                .flat_map(|file| dirs.iter().map(move |dir| dir.join(file)));
             let path = fixed
                 .chain(on_path)
                 .filter_map(|path| path.into_os_string().into_string().ok())
@@ -219,14 +217,6 @@ mod tests {
         let dirs = [PathBuf::from(r"C:\Windows\System32")];
         let found = available_with(CANDIDATES, |_| None, &dirs, |_| true);
         assert!(found.iter().all(|c| c.name != "bash"), "{found:?}");
-    }
-
-    /// Every unix shell offered starts as a login shell, and every login
-    /// shell is offered.
-    #[cfg(not(windows))]
-    #[test]
-    fn unix_candidates_are_the_login_shells() {
-        assert!(CANDIDATES.iter().map(|c| c.name).eq(shell::LOGIN_SHELLS));
     }
 
     /// A non-UTF-8 folder holding the shell is passed over for a later one.
