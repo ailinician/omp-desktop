@@ -52,14 +52,14 @@ use windows_sys::Win32::System::JobObjects::{
 /// each in an atomic that is `Send + Sync` on its own, so no
 /// `unsafe impl Send` is needed.
 #[cfg(windows)]
-pub(super) struct ProcessSupervisor {
+pub struct ProcessSupervisor {
     /// Job object handle, or null once closed (including if creation or
     /// setup failed, in which case there was never anything to close).
     job: AtomicPtr<core::ffi::c_void>,
 }
 
 #[cfg(unix)]
-pub(super) struct ProcessSupervisor {
+pub struct ProcessSupervisor {
     /// Process-group id — equal to the child's own pid, since `prepare`
     /// makes it the group leader — or `0` once the tree has been killed.
     pgid: AtomicI32,
@@ -71,22 +71,27 @@ impl ProcessSupervisor {
     /// Unix needs this pre-spawn hook to install the child as the leader
     /// of a brand new process group, so descendants that never call
     /// `setpgid` themselves stay in it. Windows attaches supervision
-    /// post-spawn instead (a job object needs a live process handle), so
-    /// this is a no-op there.
+    /// post-spawn instead (a job object needs a live process handle); its
+    /// `prepare` only hides the console window.
     #[cfg(unix)]
-    pub(super) fn prepare(cmd: &mut Command) {
+    pub fn prepare(cmd: &mut Command) {
         cmd.process_group(0);
     }
 
-    /// Windows counterpart of the Unix `prepare` — no pre-spawn setup is
-    /// needed, since job-object assignment happens after `.spawn()`.
+    /// Windows counterpart of the Unix `prepare`. Job-object assignment
+    /// happens after `.spawn()`; the only pre-spawn setup is
+    /// `CREATE_NO_WINDOW`, since every supervised child (omp, a widget
+    /// plugin) is a console program spawned by this GUI app.
     #[cfg(windows)]
-    pub(super) const fn prepare(_cmd: &mut Command) {}
+    pub fn prepare(cmd: &mut Command) {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(super::spawn::CREATE_NO_WINDOW);
+    }
 
     /// Attach supervision to a just-spawned child. Must be called *after*
     /// `.spawn()`.
     #[cfg(unix)]
-    pub(super) fn attach(child: &Child) -> Self {
+    pub fn attach(child: &Child) -> Self {
         // `prepare` already called `process_group(0)`, so the child's own
         // pid doubles as the process-group id. `try_from` avoids an `as`
         // truncation lint; a pid that somehow doesn't fit `i32` becomes the
@@ -102,7 +107,7 @@ impl ProcessSupervisor {
     /// configuring it to kill everything assigned to it once its last
     /// handle closes, and assigning the child to it.
     #[cfg(windows)]
-    pub(super) fn attach(child: &Child) -> Self {
+    pub fn attach(child: &Child) -> Self {
         // SAFETY: null security attributes and a null (anonymous) name is
         // the documented way to create an unnamed job object usable only
         // through the returned handle, which this call exclusively owns
@@ -177,7 +182,7 @@ impl ProcessSupervisor {
     /// rather than a double-close (Windows) or a harmless-but-wasteful
     /// re-signal (Unix).
     #[cfg(unix)]
-    pub(super) fn kill_tree(&self) {
+    pub fn kill_tree(&self) {
         let pgid = self.pgid.swap(0, Ordering::AcqRel);
         if pgid != 0 {
             // SAFETY: plain-integer FFI call, no pointers involved.
@@ -195,7 +200,7 @@ impl ProcessSupervisor {
     /// the job handle, which triggers `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
     /// See the Unix doc comment above for the idempotency guarantee.
     #[cfg(windows)]
-    pub(super) fn kill_tree(&self) {
+    pub fn kill_tree(&self) {
         let job = self.job.swap(std::ptr::null_mut(), Ordering::AcqRel);
         if !job.is_null() {
             // SAFETY: `job` was produced by a successful `attach` and has

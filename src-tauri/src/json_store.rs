@@ -170,9 +170,13 @@ pub fn sweep_orphan_temp_files(dir: &Path, base_name: &str) -> io::Result<usize>
 /// and [`SnapshotRing::restore_latest`] can detect on-disk corruption by
 /// simply re-hashing and comparing to the filename.
 pub fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
+    hex_lower(&Sha256::digest(bytes))
+}
+
+/// Lowercase hex of `bytes` (a digest), two characters per byte.
+pub fn hex_lower(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         let _ = write!(hex, "{byte:02x}");
     }
     hex

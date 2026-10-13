@@ -159,6 +159,13 @@
        of them. -->
   <script src="app/goal.js"></script>
 
+  <!-- Rail widget plugin output contract (schema v1, insert/append text, run
+       bookkeeping). Dependency-free IIFE; app/use-widgets.jsx,
+       design/widgets/widget-blocks.jsx, design/widgets/widget-card.jsx and
+       app-live.jsx destructure window.OMP_WIDGETS at top level; composer.jsx
+       reads it late-bound. -->
+  <script src="app/widgets.js"></script>
+
   <!-- Design components (unchanged — from src/design/ copy) -->
   <script src="design/tweaks/style.js"></script>
   <script src="design/tweaks/use-tweaks.js"></script>
@@ -206,6 +213,12 @@
   <script type="text/babel" src="design/subagents/subagent-inspector.jsx"></script>
   <script type="text/babel" src="design/subagents/subagent-pane.jsx"></script>
   <script type="text/babel" src="design/subagents/subagent-rail-card.jsx"></script>
+  <!-- Rail widget plugin cards (#49). widget-blocks.jsx destructures
+       window.Icon, window.useSaNow (subagent-bits.jsx) and window.OMP_WIDGETS;
+       widget-card.jsx destructures window.Icon, window.OMP_WIDGETS and
+       window.WidgetBlocks — order matters. -->
+  <script type="text/babel" src="design/widgets/widget-blocks.jsx"></script>
+  <script type="text/babel" src="design/widgets/widget-card.jsx"></script>
   <script type="text/babel" src="design/mention-menu.jsx"></script>
   <!-- Collapsed-paste chips + preview (#31), the steer / follow-up queue
        strip, and the thinking pill's level menu (#10); composer.jsx renders
@@ -280,6 +293,8 @@
        window.OMP_SESSION_UI, window.OMP_GOAL and window.OMP_TURN_STATUS
        at top level. -->
   <script type="text/babel" src="app/use-goal-mode.jsx"></script>
+  <!-- Rail widgets hook; destructures window.OMP_WIDGETS at top level. -->
+  <script type="text/babel" src="app/use-widgets.jsx"></script>
   <script type="text/babel" src="app/use-conversation-tree.jsx"></script>
 
   <script type="text/babel" src="app-live.jsx"></script>

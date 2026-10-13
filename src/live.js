@@ -365,6 +365,15 @@
     }
   }
 
+  // Rail widgets: the `WidgetsSnapshot` `cmd` returns, or an empty one that
+  // carries the rejection as `fatal` (browser mode: empty, no fatal).
+  // app/use-widgets.jsx's applySnapshot defaults every missing field.
+  async function _widgetsSnapshot(cmd) {
+    if (!window.__TAURI__) return {};
+    const r = await _invokeResult(cmd, {});
+    return r.ok ? r.value : { fatal: r.error };
+  }
+
   // What the user typed for a `/skill:` call, from its `skill-prompt`
   // message's details (omp's `buildSkillPromptMessage`): `prompt` is the
   // draft as sent, else the invocation is rebuilt from name and args.
@@ -3232,6 +3241,48 @@
       const path = _activeProjectPath();
       if (!path) return;
       await _invokeSafe("workspace_reject", { path, relPath });
+    },
+
+    // ── Rail widget plugins (src-tauri/src/widgets/, docs/widgets.md) ─────
+    // Rust owns config, approval, triggers and scheduling; the webview only
+    // reports its view and renders snapshots and events. These are thin
+    // invoke/listen wrappers, too side-effectful to test here: the behaviour
+    // behind them is covered by the Rust widget tests and the live test.
+    /** `WidgetsSnapshot`; a rejected invoke is surfaced as `fatal`, browser
+     *  mode (no Tauri) gets an empty one. */
+    async widgetsState() {
+      return _widgetsSnapshot("widgets_state");
+    },
+    /** Re-read widgets.json (the only time it is read besides startup). */
+    async widgetsReload() {
+      return _widgetsSnapshot("widgets_reload");
+    },
+    /** Approve `pluginId` at the exact `fingerprint` its approval card
+     *  showed. `{ok: true, value: snapshot}` or `{ok: false, error}` (stale
+     *  card: the command or script changed since it was rendered). */
+    widgetsApprove(pluginId, fingerprint) {
+      return _invokeResult("widgets_approve", { pluginId, fingerprint });
+    },
+    /** `{ sessionId, railVisible, windowVisible, hidden }` — what the
+     *  scheduler may run for; sent by app/use-widgets.jsx on change only. */
+    async widgetsSetView(view) {
+      await _invokeSafe("widgets_set_view", { view });
+    },
+    /** Manual run of one plugin for the active tab (card refresh button). */
+    async widgetsRefresh(pluginId) {
+      await _invokeSafe("widgets_refresh", { pluginId });
+    },
+    /** Listen to the `widgets://` events; `handler(kind, payload)` with
+     *  kind "config" (snapshot), "run" (RunView), "removed" ({key,
+     *  pluginId}) or "active" ({sessionId, applicable}). Resolves once every
+     *  listener is attached — fetch `widgetsState()` after that so no event
+     *  falls between the two — to an unlisten for all of them. */
+    async onWidgetsEvent(handler) {
+      if (!window.__TAURI__) return () => {};
+      const unlistens = await Promise.all(["config", "run", "removed", "active"].map(kind =>
+        window.__TAURI__.event.listen(`widgets://${kind}`, ev => handler(kind, ev.payload))
+          .catch(err => { console.error(`[live] widgets://${kind} listener failed:`, err); return null; })));
+      return () => { for (const u of unlistens) u?.(); };
     },
 
     /** Usage statistics for the active tab's profile — see usage_stats in

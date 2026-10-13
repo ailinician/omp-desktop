@@ -21,9 +21,11 @@ mod omp_cli;
 mod open_tabs;
 mod profiles;
 mod recent_projects;
+mod redaction;
 mod saved_sessions;
 mod stats;
 mod updater;
+mod widgets;
 mod workspace;
 
 use agent::AgentBridge;
@@ -71,13 +73,15 @@ struct StartSessionArgs {
     profile: Option<String>,
 }
 
-/// Start an omp process for a new tab session.
+/// Start an omp process for a new tab session, then tell the widget host
+/// (which computes the project's git context on its own thread).
 #[tauri::command]
 fn start_session(
     args: StartSessionArgs,
     bridge: State<'_, AgentBridge>,
     rule_book: State<'_, Arc<RuleBook>>,
     store: State<'_, Arc<profiles::ProfileStore>>,
+    widget_host: State<'_, Arc<widgets::WidgetHost>>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let profile = store.resolve(args.profile.as_deref())?;
@@ -89,6 +93,8 @@ fn start_session(
     } else {
         Some(args.cwd.as_str())
     };
+    // The bridge takes the id by value; the widget hook below still needs it.
+    let session_id = args.session_id.clone();
     bridge.start_session(
         args.session_id,
         cwd_opt,
@@ -96,7 +102,9 @@ fn start_session(
         profile,
         app,
         Arc::clone(rule_book.inner()),
-    )
+    )?;
+    widget_host.session_started(&session_id, cwd_opt.map(Path::new));
+    Ok(())
 }
 
 /// Run a blocking operation against a shared `Arc<S>` off the main command
@@ -272,14 +280,17 @@ async fn conversation_tree(
 }
 
 /// Kill the omp process for a tab session. Also drops its session-scoped
-/// approval-rule grants (see `approval::RuleBook::clear_session`).
+/// approval-rule grants (see `approval::RuleBook::clear_session`) and its
+/// widget runs.
 #[tauri::command]
 fn stop_session(
     session_id: String,
     bridge: State<'_, AgentBridge>,
     rule_book: State<'_, Arc<RuleBook>>,
+    widget_host: State<'_, Arc<widgets::WidgetHost>>,
 ) {
     bridge.stop_session(&session_id, &rule_book);
+    widget_host.session_closed(&session_id);
 }
 
 /// Query a session's last error. Returns `None` if the session is
@@ -555,6 +566,47 @@ async fn workspace_reject(path: String, rel_path: String) -> Result<(), String> 
         .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Widget config, approvals, active view and runs — see
+/// `widgets::host::WidgetsSnapshot`. A copy of the host's snapshot; no I/O.
+#[tauri::command]
+fn widgets_state(host: State<'_, Arc<widgets::WidgetHost>>) -> widgets::WidgetsSnapshot {
+    host.state()
+}
+
+/// Re-read `widgets.json` and the approvals file (also emitted as
+/// `widgets://config`). Blocks on the widget scheduler thread, which reads
+/// and fingerprints every script, hence `spawn_blocking`.
+#[tauri::command]
+async fn widgets_reload(
+    host: State<'_, Arc<widgets::WidgetHost>>,
+) -> Result<widgets::WidgetsSnapshot, String> {
+    with_blocking(&host, |h| Ok(h.reload())).await
+}
+
+/// Approve a plugin under the fingerprint its approval card showed; an
+/// unknown id or a stale fingerprint is an error. Persists the approval.
+#[tauri::command]
+async fn widgets_approve(
+    plugin_id: String,
+    fingerprint: String,
+    host: State<'_, Arc<widgets::WidgetHost>>,
+) -> Result<widgets::WidgetsSnapshot, String> {
+    with_blocking(&host, move |h| h.approve(&plugin_id, &fingerprint)).await
+}
+
+/// What the rail shows: active tab, rail and window visibility, hidden
+/// cards. Validated by the host (malformed ids dropped, at most 64).
+#[tauri::command]
+fn widgets_set_view(view: widgets::ViewArgs, host: State<'_, Arc<widgets::WidgetHost>>) {
+    host.set_view(view);
+}
+
+/// Manual refresh of one card; a malformed id is ignored.
+#[tauri::command]
+fn widgets_refresh(plugin_id: String, host: State<'_, Arc<widgets::WidgetHost>>) {
+    host.refresh(&plugin_id);
+}
+
 /// Usage statistics for the "Usage" panel — see `stats::fetch`. Scoped to
 /// `profile` (the active tab's profile — resolved the same way as
 /// `list_saved_sessions`), *not* every profile at once: `omp stats`
@@ -810,6 +862,16 @@ async fn app_update_install(
     updater::install(&app, &state).await
 }
 
+/// Kill every child process tree the app owns — omp sessions first, then
+/// running widget plugins — on the calling thread. For the exits where
+/// managed state is never dropped (app exit, the updater relaunch); on Unix
+/// each tree sits in its own process group and would outlive us. Both steps
+/// are idempotent.
+pub(crate) fn kill_child_processes(app: &AppHandle) {
+    app.state::<AgentBridge>().shutdown_all();
+    widgets::kill_all(app);
+}
+
 /// App-level state that needs a resolved path, and the cold-start "Open
 /// with" argv — `run()`'s `setup` hook. No omp process starts here: the app
 /// opens with no tab until the user (or an OS folder open) picks a project.
@@ -818,14 +880,20 @@ fn setup(app: &tauri::App) {
     if let Some(win) = app.get_webview_window("main") {
         win.open_devtools();
     }
+    let resolved_config_dir = app.path().app_config_dir().ok();
+    // Rail widget plugins: <app_config_dir>/widgets.json and the approvals in
+    // <app_config_dir>/widget-approvals.json. No temp-dir fallback: a
+    // `widgets.json` in a shared temp dir could be planted by another user,
+    // so without a config dir widgets stay disabled (the snapshot's `fatal`).
+    let (widget_config, widget_approvals) = resolved_config_dir
+        .as_deref()
+        .map(|dir| (dir.join("widgets.json"), dir.join("widget-approvals.json")))
+        .unzip();
     // Falls back to the temp dir if the config dir can't be resolved
     // (e.g. a locked-down test environment) rather than failing
     // startup — approval grants and profiles just won't survive a
     // restart there.
-    let config_dir = app
-        .path()
-        .app_config_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
+    let config_dir = resolved_config_dir.unwrap_or_else(std::env::temp_dir);
     // Approval-rule store: project-scoped grants persist under
     // <app_config_dir>/approval-rules/<project-hash>.json.
     app.manage(Arc::new(RuleBook::new(config_dir.join("approval-rules"))));
@@ -836,6 +904,12 @@ fn setup(app: &tauri::App) {
     // Keybinding overlay: <app_config_dir>/keybindings.json.
     app.manage(Arc::new(keybindings::overlay::OverlayStore::new(
         config_dir.join("keybindings.json"),
+    )));
+    // Widget scheduler thread; it loads the config and approvals itself.
+    app.manage(Arc::new(widgets::WidgetHost::for_app(
+        app.handle().clone(), // the host emits `widgets://` events for the app's lifetime
+        widget_config,
+        widget_approvals,
     )));
     // Recently opened projects: <app_config_dir>/recent-projects.json.
     app.manage(Arc::new(recent_projects::RecentProjectsStore::new(
@@ -934,6 +1008,11 @@ pub fn run() {
             workspace_diff,
             workspace_accept,
             workspace_reject,
+            widgets_state,
+            widgets_reload,
+            widgets_approve,
+            widgets_set_view,
+            widgets_refresh,
             usage_stats,
             goal_continuation_get,
             goal_continuation_set,
@@ -964,17 +1043,16 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            kill_child_processes(app);
+        }
         // macOS' "Open with" for a folder (see `Info.plist`) arrives as a
         // run-loop event, on launch *and* while already running — the one
         // delivery path that is neither argv nor a plugin. `RunEvent::Opened`
-        // does not exist on the other targets, hence the discard below.
+        // does not exist on the other targets.
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Opened { urls } = &event {
             external_open::ingest_urls(app, urls);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            _ = (app, event);
         }
     });
 }

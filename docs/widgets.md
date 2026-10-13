@@ -1,0 +1,355 @@
+# Rail widgets
+
+A widget is a small program, in any language, that the desktop starts as a separate process. It prints one JSON document to stdout, and the desktop renders it as a card in the ambient rail using a fixed set of block types. You register commands in your own `widgets.json`. A plugin runs only after you approve it in the rail, and it never runs code inside the app.
+
+Internals (scheduler, IPC, invariants) are in [`architecture/widgets.md`](architecture/widgets.md).
+
+## Five-minute start
+
+1. Copy the example scripts to `~/.omp-desktop/widgets/`:
+
+   ```bash
+   mkdir -p ~/.omp-desktop/widgets
+   cp examples/widgets/*.sh examples/widgets/*.py examples/widgets/*.mjs ~/.omp-desktop/widgets/
+   chmod +x ~/.omp-desktop/widgets/*
+   ```
+
+2. Copy `examples/widgets/widgets.example.json` to `<app config>/widgets.json`. The path is shown under Tweaks → Rail, in the `plugins` row:
+
+   | OS | `<app config>` |
+   |---|---|
+   | macOS | `~/Library/Application Support/dev.ohMyPi.desktop/` |
+   | Linux | `~/.config/dev.ohMyPi.desktop/` (`$XDG_CONFIG_HOME` if set) |
+   | Windows | `%APPDATA%\dev.ohMyPi.desktop\` |
+
+   A minimal file with one plugin looks like this:
+
+   ```json
+   { "version": 1, "plugins": [
+     { "id": "hello", "title": "Hello", "command": ["python3", "-I", "~/.omp-desktop/widgets/hello.py"] }
+   ] }
+   ```
+
+3. Click "reload widgets" in the same Tweaks row. An approval card for "Hello" appears in the rail. It lists the exact command. Check it, then click **Approve**.
+4. The card runs and shows the context it was given. From now on it refreshes on its own (see [When a plugin runs](#when-a-plugin-runs)).
+
+A ten-line shell script works the same way:
+
+```bash
+#!/usr/bin/env bash
+python3 -I - "$OMP_WIDGET_PROJECT" "$OMP_WIDGET_BRANCH" <<'PY'
+import json, sys
+project, branch = sys.argv[1], sys.argv[2]
+print(json.dumps({"version": 1, "status": "ok", "blocks": [
+    {"type": "kv", "rows": [{"k": "project", "v": project}, {"k": "branch", "v": branch}]}]}))
+PY
+```
+
+## Where cards appear
+
+Widget cards sit in the ambient rail **between the Subagents card and the Minimap**, in this order:
+
+1. Error cards about `widgets.json` itself.
+2. **Approval cards**, in `widgets.json` order: one for every enabled plugin that is not approved yet, or that changed since you approved it. They show in every tab, whatever the plugin's `match` says, so you can approve a plugin before you open a project it applies to. An approval card whose Tweaks toggle is off is hidden too.
+3. **Result cards**, in `widgets.json` order, for the approved plugins that apply to the active tab (their `match` fits its project and remote). A card shows as idle until its first run.
+
+A disabled plugin (`"enabled": false`) gets no card.
+
+Tweaks → Rail has one toggle per enabled plugin, next to the toggles for the built-in cards (`showContext`, `showRadar`, `showSubagents`, `showMinimap`). A plugin's toggle is stored as the tweak `widget:plugin:<id>`, so the choice survives restarts (toggles saved by earlier builds under `widget:<id>` are not carried over). **A hidden card never runs.** The same goes for the whole rail: while the rail is hidden (focus layout, or the conversation tree is open), no plugin starts. Closing the rail with its × button stays available even when every card is hidden.
+
+## Config reference
+
+`<app config>/widgets.json`:
+
+```json
+{
+  "version": 1,
+  "plugins": [
+    {
+      "id": "git",
+      "title": "Git",
+      "command": ["bash", "~/.omp-desktop/widgets/git.sh"],
+      "match": { "path": "~/GIT/work", "remote": "gitlab.example.com" },
+      "triggers": ["activate", "turn_end", "branch"],
+      "timeoutMs": 10000,
+      "intervalMs": 60000,
+      "enabled": true,
+      "scope": "tab"
+    }
+  ]
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `version` | yes | Must be `1`. Anything else rejects the whole file: one error card, no plugin runs. |
+| `id` | yes | `[a-z0-9-]{1,32}`, unique. Also names the plugin's Tweaks toggle (`widget:plugin:<id>`) and its approval. |
+| `title` | no | Shown in the card head. Defaults to `id`. |
+| `command` | yes | An argv array. Element 0 is either a bare program name (looked up on `PATH`) or an absolute path. A relative path such as `./x` or `bin/x` is rejected, because the working directory is the untrusted project. There is no shell. A leading `~/` in any element is expanded to your home directory (`$HOME`, or `%USERPROFILE%` on Windows); `~user` and a bare `~` are left as they are. If there is no home directory, the entry is reported as an error. |
+| `match` | no | Every key is optional, and every key you give must match. `path` matches when the project path starts with this prefix, on a directory boundary (`~/` is expanded). `remote` matches when the default remote's fetch URL contains this substring. Without `match`, the plugin applies to every project. Typical use: work widgets under `~/GIT/work`, personal ones under `~/GIT/private`. |
+| `triggers` | no | Any of `activate`, `turn_end` and `branch`. All three are the default; `[]` means the plugin runs only from its refresh button (and `intervalMs`). The refresh button (`manual`) always works, so listing `manual` is allowed but changes nothing. `interval` is not accepted here: set `intervalMs` instead. |
+| `timeoutMs` | no | Default 10000, clamped to 1000..60000. |
+| `intervalMs` | no | Periodic refresh. Absent or `0` means none. Clamped to 15000..3600000 (15 s to 1 h). |
+| `enabled` | no | Default `true`. A disabled plugin is never offered for approval and never runs, and it has no Tweaks toggle. |
+| `scope` | no | `"tab"` (default) or `"global"`; anything else rejects the entry. A `tab` plugin keeps one result per tab. A `global` plugin keeps one result for the whole app, computed with the active tab's context. |
+
+How the file is read:
+
+- It is read at startup and when you click "reload widgets", never in between. Edits to `widgets.json` take effect only on reload.
+- At most 32 entries are read. Any beyond that are ignored, with one error card.
+- A malformed entry (bad `id`, duplicate `id`, empty or relative `command`, unknown `scope`) is skipped with an error card naming it. The other plugins still run.
+- An unknown key (a typo such as `"intervallMs"`), an unknown trigger name, or `"interval"` in `triggers` adds an error card naming the key or value. The entry itself stays valid.
+- A missing `widgets.json` means no plugins and no error.
+- If the desktop cannot determine its config directory, the plugins row says so and nothing runs.
+
+## Approval
+
+A plugin never runs until you approve it. Approving pins the plugin's **fingerprint**: a SHA-256 hash over
+
+- every `command` element (after `~/` expansion), and
+- the contents of every element that is an absolute path to a regular file, such as the script in `["bash", "~/.omp-desktop/widgets/git.sh"]`. A file larger than 8 MiB contributes its size and modification time instead.
+
+The rail shows an approval card for each enabled plugin whose fingerprint is not approved, regardless of `match`. The card lists the command, one argument per line, each in double quotes with line breaks, control characters and invisible or direction-changing Unicode characters escaped (`\n`, `\u202e`), so what you read is exactly what will run. If the plugin was approved before under a different fingerprint, the card says that it changed since you approved it.
+
+Before **every** run, the desktop recomputes the fingerprint. If anything changed (the command in `widgets.json` after a reload, or the script file on disk), nothing is started. The card shows `plugin changed since it was approved — approve it again`, and the approval card comes back.
+
+Approvals are stored in `<app config>/widget-approvals.json`, as `{ "version": 1, "approved": { "<id>": "<fingerprint>" } }`. To revoke one, delete its entry (keep the JSON valid), or the file, and click "reload widgets". Approving writes only that plugin's entry into the file as it is on disk, so a revocation you have not reloaded yet stays revoked. If the file exists but is not valid JSON or has another `version`, no plugin is approved, and approving is refused until you fix or delete it.
+
+## When a plugin runs
+
+| Trigger | When |
+|---|---|
+| `activate` | A tab becomes active, or a plugin becomes runnable for the active tab: you approve it, show its card, show the rail, or reload a config that adds or matches it. Only the plugins that *became* runnable run, so approving or showing one card does not re-run the others. |
+| `turn_end` | omp finished a turn (`agent_end`) in that tab. |
+| `branch` | The tab's `.git/HEAD` changed to another branch. The first branch seen for a tab is only recorded. |
+| `manual` | You clicked the card's refresh button. |
+| `interval` | Every `intervalMs` (not a `triggers` value). |
+
+Scheduling happens in the desktop's Rust backend. The rules:
+
+- **Active tab.** A `turn_end` or `branch` event in the active tab runs every runnable plugin that lists it.
+- **Background tabs.** A `turn_end` or `branch` event in a tab you are not looking at is remembered per tab plugin. When you switch to that tab, each such plugin runs once: with `activate` if it lists `activate`, otherwise with the remembered trigger. Global plugins ignore events from background tabs.
+- **Global plugins on `activate`** run only when they have no result yet, or when the last result is older than `intervalMs`. Without `intervalMs`, they run on every `activate`, as a tab plugin does.
+- **Interval.**
+  - Tab plugins: the timer belongs to the active tab and restarts on a tab switch.
+  - Global plugins: the timer keeps running across tab switches.
+  - A tick runs the plugin only while the window and the rail are visible and the plugin is runnable.
+  - When the window or the rail becomes visible again, every interval plugin whose last run is older than its interval (or that never ran) runs once. A run still in flight counts as fresh.
+  - A config reload that changes a plugin's `intervalMs`, `match`, `scope`, `enabled` state or approval restarts its timer.
+- **Runnable** means all of these hold:
+  - the plugin is enabled and approved;
+  - its card toggle is on;
+  - the rail is visible;
+  - the tab has a session, and its project and remote satisfy `match`.
+
+  For a global plugin, `match` is checked against the active tab.
+- **One run at a time per card.**
+  - A card means a (tab, plugin) pair for tab plugins, and one shared slot for global ones.
+  - A trigger that arrives while a run is in flight is coalesced into at most one follow-up run. An `interval` never replaces a queued non-interval trigger.
+  - Before the follow-up starts, it is checked again: it must still be runnable. An interval follow-up also needs the window visible and, for a tab plugin, its tab still active.
+- **At most 4 plugins run at once across the whole app.** Further runs wait in a first-in, first-out queue. A waiting card shows as running.
+- **Closing a tab** kills that tab's running plugins and drops its results. Quitting the app, or relaunching it after an update, kills every running plugin.
+
+## Input: session information
+
+Environment variables (always set, possibly empty):
+
+| Variable | Value |
+|---|---|
+| `OMP_WIDGET_VERSION` | `1` |
+| `OMP_WIDGET_PROJECT` | absolute project path of the tab the run is for |
+| `OMP_WIDGET_BRANCH` | current branch, or empty (detached HEAD, or not a repo) |
+| `OMP_WIDGET_REMOTE` | fetch URL of the default remote, or empty. A password in the URL's userinfo is removed (`https://x-access-token:…@host/…` becomes `https://x-access-token@host/…`) |
+| `OMP_WIDGET_SESSION` | desktop session id of that tab |
+| `OMP_WIDGET_TRIGGER` | `activate` \| `turn_end` \| `branch` \| `manual` \| `interval` |
+
+The same values are written to stdin as one JSON object, and then stdin is closed. Plugins may ignore stdin.
+
+```json
+{"version":1,"project":"/Users/me/GIT/app","branch":"main","remote":"git@host:me/app.git","session":"s1","trigger":"manual"}
+```
+
+`branch`, `remote`, `session` and `trigger` are each limited to 2048 bytes (cut on a character boundary), in both the environment and stdin. `project` is passed as it is.
+
+Other process details:
+
+- **Working directory:** the project path. If the tab has no project, it is your home directory.
+- **Environment:** plugins run with your environment, so `glab`, `gh` and `git` logins work. They get the app's extended `PATH`, with empty and relative entries removed.
+
+No other session data is available. In particular, plugins cannot see the transcript or the model, and they cannot send prompts.
+
+## Output schema v1
+
+stdout must be UTF-8 and contain one JSON document:
+
+```json
+{
+  "version": 1,
+  "status": "ok",
+  "blocks": [
+    { "type": "status",   "label": "pipeline", "value": "passed", "tone": "ok" },
+    { "type": "number",   "label": "unpushed", "value": 3, "unit": "commits" },
+    { "type": "progress", "label": "review",   "value": 2, "max": 5 },
+    { "type": "text",     "text": "Branch is 3 ahead of origin/main." },
+    { "type": "kv",       "rows": [ { "k": "branch", "v": "feat/x" } ] },
+    { "type": "list",     "items": [
+        { "label": "!42 Login fix", "detail": "2 approvals", "tone": "ok",
+          "url": "https://…/-/merge_requests/42", "insert": "MR !42: Login fix https://…",
+          "time": "2026-10-13T09:30:00Z" }
+    ] },
+    { "type": "link",     "label": "Open pipeline", "url": "https://…" }
+  ]
+}
+```
+
+Top level:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `version` | yes | Must be the number `1`. Another number gives the error card "plugin reports version N, this desktop supports 1"; a non-number gives "plugin reports an invalid version, …". |
+| `status` | no | `ok` \| `warn` \| `error` \| `info` \| `neutral` (default `neutral`). Tints the dot in the card head. |
+| `blocks` | yes | An array of at most 32 blocks. |
+
+Blocks:
+
+| `type` | Fields |
+|---|---|
+| `status` | `label`, `value`, `tone`. Needs a label or a value. |
+| `number` | `label`, `value` (a number, or a decimal number string), `unit` (optional) |
+| `progress` | `label`, `value`, `max` (numbers or decimal number strings) |
+| `text` | `text`, `insert` (optional, ≤ 2000 chars; adds a + button that inserts the text into the composer) |
+| `kv` | `title` (optional), `rows`: `[{ "k", "v" }]` |
+| `list` | `title` (optional; shown with the item count), `limit` (optional, 1–50: only the first `limit` items show, plus a "+N more" button), `items`: `[{ "label", "detail", "tone", "url", "insert", "time" }]`. Only `label` is required. |
+| `link` | `label`, `url` |
+
+Field rules:
+
+- **Scalars.** `label`, `value`, `detail`, `k` and `v` accept a string, a finite number or a boolean, coerced to a string. `null`, objects and arrays are dropped.
+- **Numeric strings** must be decimal (`"3"`, `"-1.5"`). A blank string, hex (`"0x10"`) and similar are rejected.
+- **Unknown block `type`.** The block is skipped, the rest renders, and the card shows a small "1 unsupported block" note. Unknown fields are ignored.
+- **`tone`** (on `status` and list items) is one of `ok`, `warn`, `error`, `info` or `neutral`.
+- **`url`.** Only `http:`/`https:` URLs of at most 2000 chars with no control characters are opened, in the system browser.
+  - A `link` block with any other URL is rendered as plain text (its label, or the URL string), without a button.
+  - A list item with any other URL keeps its row, but the URL is dropped: no open action, and a click inserts the label.
+- **`insert`.** Clicking an item appends text to the composer draft, separated by a space. It never replaces the draft and never discards a draft that starts with `/`. Without `insert`, the click inserts `label` plus the `url` if there is one. Limited to 2000 chars.
+- **`time`** (list items) is either an ISO 8601 date-time with an explicit zone (`2026-10-13T09:30:00Z`, `…T09:30+02:00`; seconds and fractions optional) or epoch seconds (a number). Anything else (`"March 7"`, a time without a zone, an impossible date such as `2026-02-30`) is dropped.
+  - It is shown right of the label as a compact relative time: `now` under a minute, then `5m`, `3h`, `2d`, or `in 12m` for future times. Beyond 30 days it shows a `YYYY-MM-DD` UTC date. The labels update every minute.
+  - The tooltip shows the ISO timestamp.
+- **A `list`** scrolls inside a 220 px area, so a long list never makes the card taller than the rail.
+- **Strings** are rendered as text, never as HTML or markdown.
+- **Lengths.** `label`, `value`, `detail`, `k`, `v` and `title` are cut to 200 chars; `text` to 2000. A list keeps at most 50 items and a `kv` block at most 50 rows. These caps are enforced by the frontend parser (`src/app/widgets.js`).
+
+### Conventions
+
+- **List items are the clickable rows.** Use them for MRs, CI jobs, branches, or any other row the user can act on.
+- **Empty state.** Use a `text` block ("No open MRs.", "Pipeline never run.") rather than an empty `list` or `kv`.
+- **One card per plugin.** Each config entry produces one card, with up to 32 blocks.
+
+## Errors
+
+| Failure | Card shows |
+|---|---|
+| Not approved, or changed since approval | approval card; a run attempt after a change shows `plugin changed since it was approved — approve it again` |
+| Exit ≠ 0 | `exit <status>: ` + the last 300 chars of stderr (of stdout if stderr is empty) |
+| Timeout | `timed out after N ms` |
+| stdout over 256 KiB | `stdout exceeds 256 KiB` |
+| stdout not UTF-8 | `stdout is not UTF-8` |
+| stdout not JSON | `stdout is not JSON: <first 120 chars>` |
+| Wrong output `version` / no `blocks` array | `plugin reports version N, this desktop supports 1` / `output has no "blocks" array` |
+| Cannot start (program, interpreter or working directory missing) | `could not start <argv0>: <OS error>` |
+| Bad `widgets.json` (version, not JSON) | one error card titled `widgets.json`; no plugin runs |
+| Malformed entry, unknown key or trigger | an error card naming the entry and the problem |
+
+The backend masks credentials in all plugin text that becomes an error message (exit tails, the non-JSON preview), before it reaches the window: `Bearer …`, `token=…`, `password: …`, `ghp_…`/`sk-…`-style tokens and URL userinfo become `[REDACTED]`. Other diagnostics are shown as printed.
+
+A card keeps its previous successful result visible, dimmed, while a new run is in flight. An error replaces it with the error card, which keeps a "last ok HH:MM" note. If a card fails to render, only that card shows an error; the conversation and the other cards keep working.
+
+## Trust and permission model
+
+**What runs.** Only commands from your own `widgets.json`.
+
+- A project cannot define commands.
+- The window never sends a command line to the backend. It sends only plugin ids and view state (active tab, rail and window visibility, hidden cards), and the backend looks the command up itself.
+- There is no shell: `command` is an argv array. Write `["sh", "-c", "…"]` yourself if you want one.
+- Plugin output is rendered as text only. The frontend's content security policy is unchanged, and no plugin code runs in the webview.
+
+**With which rights.** A plugin runs as you, with your full environment and permissions. It can read your files and your tokens, and use the network.
+
+**When.** Once approved, a plugin runs **automatically, without asking again**, in every project its `match` allows, on every trigger it lists:
+
+- on tab activation, turn end and branch change,
+- on every interval,
+- for a background tab, on your next switch to it.
+
+**Not covered by omp's approval.** The desktop starts omp with `--approval-mode write`, so the agent's shell commands ask first. Widget plugins are not agent tool calls and do not go through that prompt. Your one-time widget approval is the only gate.
+
+**What approval protects against.** Changes made outside the desktop UI. Examples:
+
+- an agent with write access, or a script you ran, edits a plugin's `command` in `widgets.json` (after the next reload);
+- someone edits an approved script file.
+
+Neither runs until you approve the new fingerprint in the rail. This matters because an agent working in a project can write files outside it, including `~/.omp-desktop/widgets/` and the app config directory, unless your setup prevents it.
+
+**What approval does not protect against:**
+
+- **The rest of the entry.** The fingerprint pins only `command` and the files it names. Edits to `match`, `triggers`, `intervalMs`, `timeoutMs`, `scope`, `title` and `enabled` take effect on the next reload without a new approval. So whoever can edit `widgets.json` can, for example, widen an approved plugin's `match.path` to `/` so that it runs in every project, untrusted clones included, or turn an approved plugin you disabled back on. Approve only commands you are willing to run in any project.
+- **Files the fingerprint does not cover.**
+  - A program resolved via `PATH` (`bash`, `python3`, `node`) is hashed by name only.
+  - So is anything the script loads by itself: modules, sourced files, config files, or packages fetched by `uv`/`npx`.
+  - A file larger than 8 MiB is covered only by its size and modification time.
+
+  Keep a widget self-contained in one script file, and use absolute interpreter paths if you want them pinned.
+- **The approvals file.** `widget-approvals.json` is an ordinary user file, like `approval-rules/`. Anything that can write arbitrary files as you can edit it, and it could just as well edit `~/.bashrc`. Approval does not defend against that level of access.
+- **The webview.** Approving goes through the desktop window (`widgets_approve`), as answering tool approvals does. A compromised webview could approve a plugin, but it can already send prompts and answer tool approvals, so this adds no new power.
+- **Hostile project contents.** The working directory is the project, which you should treat as untrusted: a cloned repo can contain any file. Make sure nothing from it is imported or executed:
+  - **Python:** run with `python3 -I`. It ignores the working directory, the `PYTHON*` variables and the user site-packages. `python3 -c` and `python3 -` otherwise put the working directory on `sys.path`, so a repo's `json.py` would run. With `-I`, neither the working directory nor the script's directory is put on the path.
+  - **Node** loads project code only if your script `require`s/`import`s a relative path.
+  - **`uv`** runs the interpreter of a `.venv` it finds in the working directory or any of its parents, even with `--no-project`, and otherwise reads `pyproject.toml`, `uv.toml` and `.python-version` there. Pass `--directory <your widgets dir>` so uv never looks at the project, plus `--no-project --no-config`.
+  - **`npx`/`npm`** read the project's `.npmrc` and `node_modules`. Start them with another working directory.
+  - **Arguments:** give script arguments as absolute paths too.
+
+**Limits that hold even for a broken plugin:**
+
+- the timeout (default 10 s, at most 60 s) and the 256 KiB stdout cap both kill the plugin's whole process group (on Windows its Job Object);
+- at most 4 plugins run at once;
+- closing a tab, quitting, or relaunching after an update kills its plugins;
+- stderr is never shown, except as the error tail of a failed run, and that tail has credentials masked.
+
+## Where to keep your widgets
+
+Put them in `~/.omp-desktop/widgets/`, one executable per widget, and reference them as `~/.omp-desktop/widgets/<name>` in `widgets.json`.
+
+- Keep them out of project repos: the project is untrusted, and widgets run with your permissions.
+- `chmod +x` each script and give it a shebang, or start it through an interpreter, e.g. `["python3", "-I", "~/.omp-desktop/widgets/x.py"]`.
+
+### Windows
+
+- **Paths.** Write paths in `widgets.json` with forward slashes, or escape backslashes (`"C:\\Tools\\x.exe"`). `~/` expands to `%USERPROFILE%`.
+- **`bash`.** A bare `bash` may resolve to the WSL launcher (`C:\Windows\System32\bash.exe`), which runs the script inside Linux. Start shell widgets with Git for Windows' bash by absolute path instead, e.g. `["C:/Program Files/Git/bin/bash.exe", "~/.omp-desktop/widgets/git.sh"]`.
+- **`python3`** may be the Microsoft Store stub, which opens the Store instead of running. Use `["py", "-3", "-I", "…"]` or an absolute `python.exe` path.
+- **No console window.** Plugins start without one, and a timeout kills the whole process tree.
+
+## Examples
+
+`examples/widgets/` contains:
+
+- `widgets.example.json`: wires all four examples with `~/.omp-desktop/widgets/…` paths. `git` and `hello` are enabled; `node` and `mcp` are disabled until you set them to `true`.
+- `git.sh`: branch (or `detached @ <sha>`), upstream, changed files, ahead/behind, and the unpushed commits; with no upstream, the recent commits instead. Click `+` on a commit to insert `<sha> <subject>`. Needs `bash`, `git` and `python3` (for JSON escaping). It runs git with `GIT_OPTIONAL_LOCKS=0`, so it never takes `.git/index.lock` from under the agent's own `git add`/`commit`.
+- `hello.py`: Python 3, standard library only. Echoes the context as key/value rows; the remote is shown without its password, because the desktop already removed it.
+- `hello.mjs`: the same in Node ≥ 18.
+- `mcp-tool.py`: calls one MCP tool over stdio and shows its text result. Started with `uv run --directory ~/.omp-desktop/widgets --no-project --no-config --with mcp`, and it starts the MCP server (`npx`) in your home directory, so nothing from the project is used.
+
+## MCP
+
+The desktop knows nothing about MCP. A plugin that wants to use an MCP tool is itself the MCP client: it starts the server, calls the tool, and prints the result as widget JSON. `mcp-tool.py` shows the pattern.
+
+## omp extension widgets
+
+omp extensions can show their own UI through `ctx.ui.setWidget` and `ctx.ui.setStatus`, which omp forwards as `extension_ui_request` in `--mode rpc-ui`. **This mechanism does not render those**: the desktop currently ignores them, and an omp extension cannot register a rail card through `widgets.json`.
+
+The two are separate interfaces:
+
+- **Rail widgets** are desktop-specific: external processes configured per user, independent of omp and of any session's extensions.
+- **omp extension widgets** belong to a session and come from extensions loaded into that omp process.
+
+Rendering them in the rail is tracked in [#52](https://github.com/apoc/omp-desktop/issues/52). It will reuse the same card component (`WidgetCard`), with its own Tweaks keys (`widget:ext:<key>`, next to this mechanism's `widget:plugin:<id>`).

@@ -22,6 +22,9 @@ Feature internals (RPC frames, state machines, measured omp behaviour) live in `
 |`external-open.md`|"Open with OMP Desktop" on macOS/Windows/Linux|`external_open.rs`, `src-tauri/packaging/`|
 |`frontend-load-order.md`|full `src/index.html` script-order rationale|`src/index.html`|
 |`release-frontend.md`|`dist/` build, CSP check, `?v=` asset stamping|`scripts/build-frontend.mjs`|
+|`widgets.md`|rail widget plugins: Rust scheduler state machine, approval/fingerprint, `widgets_*` commands and `widgets://` events, runner|`src-tauri/src/widgets/`, `app/widgets.js`, `app/use-widgets.jsx`, `design/widgets/`|
+
+User-facing rail widget contract (`widgets.json`, approval, output schema v1, limits, trust model): `docs/widgets.md`. Keep it in sync with any change to those.
 
 ## Commands
 
@@ -39,7 +42,7 @@ Feature internals (RPC frames, state machines, measured omp behaviour) live in `
 |One JS regression|`node tests/test-<name>.mjs` (or `npm run test:<name>`)|
 |Probe omp RPC (needs a live omp, not in `npm test`)|`node tests/test-rpc.mjs`|
 
-Regression files are mostly named after the `src/app/<name>.js` module they cover (`app/turn-status.js` → `test-turn-status.mjs`); exceptions: `test-markdown.mjs` (`app/marked-setup.js`), `test-recent-models.mjs` (`adapter.js`), `test-tool-output.mjs` (bash tool card), `test-updater-json.mjs` (`.github/scripts/updater-json.mjs`). A new test file must be added to the `npm test` chain in `package.json`.
+Regression files are mostly named after the `src/app/<name>.js` module they cover (`app/turn-status.js` → `test-turn-status.mjs`); exceptions: `test-markdown.mjs` (`app/marked-setup.js`), `test-recent-models.mjs` (`adapter.js`), `test-tool-output.mjs` (bash tool card), `test-updater-json.mjs` (`.github/scripts/updater-json.mjs`), `test-widget-examples.mjs` (`examples/widgets/git.sh`, parsed with `app/widgets.js`). A new test file must be added to the `npm test` chain in `package.json`.
 
 `omp` must be on PATH (`%LOCALAPPDATA%\omp\omp.exe` on Win). CI and every release run the same suite (`.github/workflows/tests.yml`): `cargo test --locked` on win/linux/mac, plus `npm test`.
 
@@ -58,6 +61,10 @@ Regression files are mostly named after the `src/app/<name>.js` module they cove
 |`src-tauri/src/{git,git_watcher,workspace,files}.rs`|branch/HEAD info, `.git/HEAD` watcher, Changes panel, `@`-mention paths|
 |`src-tauri/src/{omp_cli,stats,goal_config}.rs`|one-shot `omp <subcommand>` runs (Usage panel, goal auto-continue)|
 |`src-tauri/src/{approval,model_usage,updater,external_open,child_path,navigation_guard}.rs`|tool-approval rules, model MRU, updater, OS folder opens, child PATH, webview navigation guard|
+|`src-tauri/src/widgets/`|rail widget plugins: `config.rs` (`widgets.json` load/validate, matching), `schedule.rs` (pure trigger/run scheduler), `trust.rs` (fingerprint, `widget-approvals.json`), `host.rs` (`WidgetHost`: scheduler thread, run registry, emits), `run.rs` (spawn, timeout, stdout cap, process-tree kill), `context.rs` (git context), `redact.rs`|
+|`src-tauri/src/redaction.rs`|credential key list + placeholder shared by `agent/reader.rs` and `widgets/redact.rs`|
+|`src/app/widgets.js`, `src/app/use-widgets.jsx`, `src/design/widgets/`|widget output parser + limits (`widgets.js`), thin hook (snapshot + `widgets://` events → cards, view state → Rust), card/approval/error/block renderers|
+|`examples/widgets/`|bundled widget plugins + `widgets.example.json` (`docs/widgets.md`)|
 |`src-tauri/packaging/`|Info.plist, Linux `.desktop`, Windows folder verb (`.nsh` + `.wxs`)|
 |`src/live.js`|the bridge: per-session live state, `sessionRegistry`, `window.OMP_BRIDGE`|
 |`src/adapter.js`|pure RPC ↔ UI shape transforms|
@@ -92,7 +99,7 @@ One tab = one omp process (`--profile <id>`; `default` = no flag). `lib.rs::setu
 - omp's `agent.db` (WAL): open read-only, never `immutable=1`, never `SQLITE_OPEN_CREATE`, short `busy_timeout`, one connection per query.
 - Paths reaching the frontend from the OS are canonicalised in Rust (`external_open::canonical_folder`); tab paths and recent entries must stay in that form.
 - `bundle.createUpdaterArtifacts` lives only in `src-tauri/tauri.release.conf.json`. The updater signing key lives only in the `TAURI_SIGNING_PRIVATE_KEY` repo secret and is **never** committed; rotating it strands every installed copy.
-- Relaunch after update skips `Drop`: `AgentBridge::shutdown_all` must kill omp children first. Don't override the updater plugin's `on_before_exit`.
+- Relaunch after update skips `Drop` (so does `RunEvent::Exit`): both go through `lib.rs::kill_child_processes`, where `AgentBridge::shutdown_all` kills omp children first and `WidgetHost::kill_all` the running widget plugins next. Don't override the updater plugin's `on_before_exit`.
 
 ## Frontend load order (`src/index.html`)
 
@@ -160,6 +167,7 @@ Trigger: 6th major component in one file, or 4th unrelated concern in one Rust m
 - Tauri's built-in Linux desktop template has a bare `Exec={{exec}}`: without `src-tauri/packaging/omp-desktop.desktop`'s `%F` the folder the user picked never reaches argv and "Open with" silently opens an empty app. Same trap for the `MimeType` line — dropping it removes the app from the file manager's menu entirely, and dropping its `{{mime_type}}` half would silently strip any future `fileAssociations`/deep-link registration from the Linux entry alone.
 - `src-tauri/packaging/windows-folder-verb.wxs` hardcodes the `Open with OMP Desktop` label and re-derives `Win64` (preprocessor defines don't cross `.wxs` files; a 32-bit component would write to `Wow6432Node`, where 64-bit Explorer never looks). Keep the label in sync with `productName`.
 - `std::env::args()` **panics** on a non-UTF-8 argument, and a Linux folder name is an arbitrary byte string that `%F` passes verbatim — the launch-argv ingest in `setup` must stay on `args_os()`, or "Open with" on such a folder kills the app at startup instead of logging one dropped request. Only the cold start is protected: `tauri-plugin-single-instance`'s *sending* process collects `std::env::args()` itself, so a forwarded open on such a folder aborts that process before anything reaches us (plugin limitation, not ours).
+- Rail widget plugins (`docs/architecture/widgets.md`): **every** spawn is preceded by a fingerprint check against the approval store — no path may start a plugin without it. Triggers, timers, matching and run queues live in Rust (`widgets/schedule.rs`), never in React or `live.js`; the frontend sends only plugin ids, an approval fingerprint and view state (`widgets_set_view`), never a path, command, trigger or context. `WidgetHost::kill_all` sits beside `AgentBridge::shutdown_all` in `kill_child_processes`, called on the updater relaunch path (which skips `Drop`) and on `RunEvent::Exit`; drop it and a relaunch orphans running plugins.
 
 ## Code style
 

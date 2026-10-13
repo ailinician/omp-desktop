@@ -238,17 +238,20 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
 
   // Prompt-history picker (Ctrl+Up modal) hands a pick here the same way
   // ⌘K's draftInsert does — keyed on `nonce` so picking the same prompt
-  // twice in a row still re-fires. Unlike draftInsert, this always
+  // twice in a row still re-fires. Unlike draftInsert, this
   // *replaces* the draft (the modal's contract is "put this message
   // directly in the prompt box"), never appends an existing one. `images`
-  // (a goal start omp refused) go back in as attachments. An insert from
-  // before this composer mounted (it unmounts while no tab is open) is not
-  // replayed into the next tab's draft.
+  // (a goal start omp refused) go back in as attachments. An `append`
+  // insert (a rail widget click) goes *after* the current draft instead —
+  // never in front of it and never replacing it, a `/command` draft
+  // included (OMP_WIDGETS.appendToDraft). An insert from before this
+  // composer mounted (it unmounts while no tab is open) is not replayed
+  // into the next tab's draft.
   const seenInsertRef = React.useRef(promptInsert?.nonce);
   React.useEffect(() => {
     if (!promptInsert || promptInsert.nonce === seenInsertRef.current) return;
     seenInsertRef.current = promptInsert.nonce;
-    replaceDraft(promptInsert.text);
+    replaceDraft(promptInsert.append ? window.OMP_WIDGETS.appendToDraft(text, promptInsert.text) : promptInsert.text);
     const images = promptInsert.images ?? [];
     if (images.length === 0) return;
     const back = images.map(image => ({ id: `att-${++attachCounterRef.current}`, name: "", image, src: toDataUrl(image) }));

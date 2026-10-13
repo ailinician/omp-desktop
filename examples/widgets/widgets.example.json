@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "plugins": [
+    { "id": "git",   "title": "Git",      "command": ["bash", "~/.omp-desktop/widgets/git.sh"], "intervalMs": 60000 },
+    { "id": "hello", "title": "Hello",    "command": ["python3", "-I", "~/.omp-desktop/widgets/hello.py"], "triggers": ["activate"], "scope": "global" },
+    { "id": "node",  "title": "Hello JS", "command": ["node", "~/.omp-desktop/widgets/hello.mjs"], "enabled": false },
+    { "id": "mcp",   "title": "MCP echo", "command": ["uv", "run", "--directory", "~/.omp-desktop/widgets", "--no-project", "--no-config", "--with", "mcp", "~/.omp-desktop/widgets/mcp-tool.py"], "triggers": [], "timeoutMs": 30000, "enabled": false }
+  ]
+}

@@ -32,7 +32,7 @@ Built on Tauri 2 (Rust + the system webview). It doesn't bundle Electron, doesn'
 
 - **Tool cards** for every call: `read`, `grep`, `bash`, `eval` (JS/Python kernel cells), `edit`, `task` and more. Output streams live, code is syntax-highlighted, and edit diffs have a scrubber.
 - **Approvals.** Sessions start in `--approval-mode write`, so exec-tier tools ask first. Answer *Approve*, *Allow for this session* or *Always allow in this project*, and review or revoke the saved rules in the approval-rules panel.
-- **Ambient rail.** Shows the context-window gauge, cost, a tokens/sec sparkline, an agent radar of recent tool activity, and a minimap of the session. Click a minimap cell to jump to that message.
+- **Ambient rail.** Shows the context-window gauge, cost, a tokens/sec sparkline, an agent radar of recent tool activity, and a minimap of the session. Click a minimap cell to jump to that message. Show or hide each card under Tweaks → Rail. Add your own cards: any program that prints JSON, run by the desktop after you approve it once — see [`docs/widgets.md`](docs/widgets.md).
 - **Subagent manager.** Agents started by a `task` call appear in the rail as they run. Open the manager to get totals, a swimlane timeline, agents grouped by the task call that spawned them, and an inspector for each agent's assignment, tools, output and transcript.
 
 ![Subagent manager: four parallel scouts, their timeline and per-agent cost](screenshots/subagents.webp)

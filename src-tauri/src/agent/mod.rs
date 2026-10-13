@@ -19,7 +19,7 @@ mod inner;
 pub mod journal;
 mod reader;
 pub mod spawn;
-mod supervisor;
+pub mod supervisor;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -379,9 +379,10 @@ impl AgentBridge {
     }
 
     /// Kill and reap every session's process tree, synchronously. For the
-    /// path where the process is about to end *without* running `Drop` —
-    /// an update's relaunch (`AppHandle::request_restart`), where a Unix
-    /// child in its own process group would otherwise outlive us. Only
+    /// paths where the process is about to end *without* running `Drop` —
+    /// app exit and an update's relaunch (`AppHandle::request_restart`),
+    /// both via `crate::kill_child_processes` — where a Unix child in its
+    /// own process group would otherwise outlive us. Only
     /// ever called on the way out. Idempotent: the map is drained, so a
     /// later call (or `Drop`) finds nothing to do.
     pub fn shutdown_all(&self) {

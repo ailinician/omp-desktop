@@ -20,7 +20,8 @@
 const {
   Icon, ChatView, Composer, CommandBridge, WindowChrome, TabBar, SubagentPane, ProjectSidebar, EmptyWorkspace,
   StatusBar, AmbientRail, ConversationTree, PlanKanban, HistoryModal, ChangesPanel, ApprovalRulesPanel, UsageStatsPanel, PromptHistoryModal, UpdateModal, useTweaks,
-  TweaksPanel, TweakSection, TweakRadio, TweakToggle, TweakColor, TweakSlider,
+  TweaksPanel, TweakSection, TweakRow, TweakRadio, TweakToggle, TweakColor, TweakSlider, TweakButton,
+  useWidgets, WidgetCard, WidgetErrorCard, WidgetApprovalCard, WidgetBoundary,
   TWEAK_DEFAULTS, NULL_MODEL, EMPTY_PROJECT, DEFAULT_PROFILE_ID,
   INTENT_FRAMING, APPROVAL_PROMPT,
   useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, timeNow,
@@ -33,6 +34,7 @@ const {
   PLAN_IDLE, togglePlan, enterPlan, approvePlan, annotatePlan, markPlanSent,
 } = window.OMP_SESSION_UI;
 const { NO_OVERRIDES: NO_COLLAPSE_OVERRIDES, foldModes: _foldModes, overridesForAll: _collapseOverridesForAll } = window.OMP_COLLAPSE;
+const { tweakKey: _widgetTweakKey } = window.OMP_WIDGETS;
 
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
@@ -225,6 +227,13 @@ function App() {
 
   const updater = useUpdater({ bridge, autoCheck: t.updateCheck ?? true, skipped: t.skippedUpdate, setTweak });
 
+  // `activeProject.id`, not `activeSessionId`: the latter keeps a closed
+  // tab's id (see handleSelectProfile below). Widgets only run while the
+  // rail is on screen — not in focus layout, not under the conversation tree.
+  const widgets = useWidgets({
+    bridge, activeSessionId: activeProject.id, railVisible: t.layout !== "focus" && !treeOpen, tweaks: t,
+  });
+
   // Handler map read through a ref so the dispatch effect never re-subscribes.
   const handlersRef = React.useRef({});
   useKeymapDispatch(handlersRef);
@@ -343,10 +352,14 @@ function App() {
   const handleInsertDraft = (text) => setDraftInsert({ text, nonce: Date.now() });
 
   // Prompt-history picker (Ctrl+Up modal, issue #16) — same {text, nonce}
-  // shape and rationale as draftInsert above, but always *replaces* the
-  // draft (see composer.jsx's promptInsert effect) rather than appending.
+  // shape and rationale as draftInsert above, but *replaces* the draft (see
+  // composer.jsx's promptInsert effect) rather than prepending. Rail widget
+  // inserts set `append` instead: they go after the draft
+  // (OMP_WIDGETS.appendToDraft), since ⌘K's draftInsert replaces a
+  // `/command` draft.
   const [promptInsert, setPromptInsert] = React.useState(null);
   const handlePickHistoryPrompt = (text) => setPromptInsert({ text, nonce: Date.now() });
+  const handleWidgetInsert = React.useCallback(text => setPromptInsert({ text, append: true, nonce: Date.now() }), []);
 
   // Goal mode in the composer and the goal strip above it (omp's `goal`).
   const goalUi = useGoalMode({
@@ -748,7 +761,23 @@ function App() {
                   hoveredMsgIdx={hoveredMsgIdx}
                   onMinimapHover={setHoveredMsgIdx}
                   onMinimapClick={handleMinimapClick}
-                />
+                  show={{ context: t.showContext ?? true, radar: t.showRadar ?? true, subagents: t.showSubagents ?? true, minimap: t.showMinimap ?? true }}
+                >
+                  {widgets.fatal && <WidgetErrorCard title="widgets.json" error={widgets.fatal} />}
+                  {widgets.configErrors.map((e, i) => <WidgetErrorCard key={i} title="widgets.json" error={e} />)}
+                  {widgets.approvals.map(a => (
+                    <WidgetBoundary key={`approve:${a.id}`} title={a.title}>
+                      <WidgetApprovalCard title={a.title} command={a.command} changed={a.changed}
+                        onApprove={() => widgets.approve(a.id)} />
+                    </WidgetBoundary>
+                  ))}
+                  {widgets.cards.map(c => (
+                    <WidgetBoundary key={c.id} title={c.title} resetKey={c.resetKey}>
+                      <WidgetCard title={c.title} run={c.run}
+                        onRefresh={() => widgets.refresh(c.id)} onInsert={handleWidgetInsert} />
+                    </WidgetBoundary>
+                  ))}
+                </AmbientRail>
               )}
             </div>
           </div>
@@ -878,6 +907,19 @@ function App() {
               min={window.OMP_COLLAPSE.MIN_AFTER} max={window.OMP_COLLAPSE.MAX_AFTER} step={1} unit=" newer"
               onChange={v => setTweak("collapseAfter", v)} />
           )}
+        </TweakSection>
+        <TweakSection label="Rail">
+          <TweakToggle label="context gauge" value={t.showContext ?? true} onChange={v => setTweak("showContext", v)} />
+          <TweakToggle label="agent radar" value={t.showRadar ?? true} onChange={v => setTweak("showRadar", v)} />
+          <TweakToggle label="subagents" value={t.showSubagents ?? true} onChange={v => setTweak("showSubagents", v)} />
+          <TweakToggle label="minimap" value={t.showMinimap ?? true} onChange={v => setTweak("showMinimap", v)} />
+          {widgets.togglePlugins.map(p => (
+            <TweakToggle key={p.id} label={`widget: ${p.title}`} value={t[_widgetTweakKey(p.id)] ?? true}
+              onChange={v => setTweak(_widgetTweakKey(p.id), v)} />
+          ))}
+          <TweakRow label="plugins" value={widgets.configPath ?? "unavailable"}>
+            <TweakButton label="reload widgets" secondary onClick={widgets.reload} />
+          </TweakRow>
         </TweakSection>
         <TweakSection label="Session">
           <TweakSlider label="prompt history" value={t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT}

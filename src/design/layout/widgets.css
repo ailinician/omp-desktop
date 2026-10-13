@@ -1,0 +1,55 @@
+/* layout/widgets.css — rail widget plugin cards (design/widgets/; user
+   guide: docs/widgets.md). */
+.wdg-card { display: flex; flex-direction: column; gap: 6px; }
+.wdg-card .rail-card-head { gap: 6px; min-width: 0; }
+.wdg-title { color: var(--fg-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wdg-meta { margin-left: auto; flex: none; }
+.wdg-stale > :not(.rail-card-head) { opacity: 0.5; }
+.wdg-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-5); flex: none; }
+.tone-ok    > .rail-card-head .wdg-dot, .wdg-item.tone-ok .wdg-dot, .wdg-status.tone-ok .wdg-dot    { background: var(--accent); }
+.tone-warn  > .rail-card-head .wdg-dot, .wdg-item.tone-warn .wdg-dot, .wdg-status.tone-warn .wdg-dot  { background: var(--amber); }
+.tone-error > .rail-card-head .wdg-dot, .wdg-item.tone-error .wdg-dot, .wdg-status.tone-error .wdg-dot { background: var(--rose); }
+.tone-info  > .rail-card-head .wdg-dot, .wdg-item.tone-info .wdg-dot, .wdg-status.tone-info .wdg-dot  { background: var(--cyan); }
+.wdg-label { color: var(--fg-4); font-size: var(--d-text-xs); }
+.wdg-value { color: var(--fg-2); font-size: var(--d-text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wdg-status, .wdg-item { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.wdg-number { display: flex; align-items: baseline; gap: 6px; }
+.wdg-number-value { font-size: var(--d-text-lg); color: var(--fg); }
+.wdg-tube { display: flex; width: auto; }
+.wdg-text { color: var(--fg-3); font-size: var(--d-text-sm); white-space: pre-wrap; word-break: break-word; }
+.wdg-kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; }
+.wdg-list { display: flex; flex-direction: column; gap: 3px; max-height: 220px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line-bright) transparent; }
+.wdg-count { margin-left: 6px; color: var(--fg-5); letter-spacing: 0; }
+.wdg-more { justify-content: flex-start; height: 22px; }
+.wdg-item-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.wdg-item-label { color: var(--fg-2); font-size: var(--d-text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wdg-item-detail { color: var(--fg-4); font-size: var(--d-text-xs); }
+/* Hidden by opacity, not display: the buttons stay in the tab order, and
+   keyboard focus reveals them like hover does (same as .tab-close). */
+.wdg-item-actions { display: flex; gap: 2px; flex: none; opacity: 0; transition: opacity 120ms var(--ease-out); }
+.wdg-item:hover .wdg-item-actions, .wdg-item:focus-within .wdg-item-actions { opacity: 1; }
+.wdg-link { justify-content: flex-start; height: 22px; max-width: 100%; min-width: 0; }
+.wdg-link-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wdg-error { color: var(--rose); font-size: var(--d-text-xs); font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word; }
+.wdg-note { color: var(--fg-5); font-size: var(--d-text-xs); }
+.wdg-section { color: var(--fg-3); font-size: var(--d-text-xs); letter-spacing: .04em; text-transform: uppercase; margin-top: 2px; }
+.wdg-item-time { color: var(--fg-4); font-size: var(--d-text-xs); white-space: nowrap; flex: none; }
+.wdg-text-row { display: flex; align-items: flex-start; gap: 4px; }
+.wdg-text-row .wdg-text { flex: 1; }
+/* Approval card: a plugin waiting for the user to approve its exact argv. */
+.rail-card.wdg-approval { border-color: color-mix(in oklab, var(--amber) 32%, var(--line)); }
+.wdg-approval .rail-card-head .wdg-dot { background: var(--amber); }
+.rail-card.wdg-approval-changed { border-color: color-mix(in oklab, var(--rose) 36%, var(--line)); }
+.wdg-approval-changed .rail-card-head .wdg-dot { background: var(--rose); }
+.wdg-approval > .wdg-note { color: var(--fg-3); line-height: var(--d-leading); }
+.wdg-argv {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 6px 8px; border-radius: var(--r-1);
+  background: color-mix(in oklab, var(--bg-input) 80%, transparent);
+  border: 1px solid var(--line);
+  font-size: var(--d-text-xs); color: var(--fg-2);
+  max-height: 160px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line-bright) transparent;
+}
+.wdg-argv-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.wdg-approval-actions { display: flex; justify-content: flex-end; }
+.wdg-approval .btn:disabled { opacity: .5; cursor: default; }

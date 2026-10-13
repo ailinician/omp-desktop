@@ -341,9 +341,13 @@ function SessionMinimap({ messages, hoveredIdx, onHover, onClick }) {
 }
 
 // ── Right rail: ambient peripherals stacked ──────────────────────────
+// `show`: { context, radar, subagents, minimap } — false hides that card
+// (Tweaks → Rail, keys showContext/showRadar/showSubagents/showMinimap);
+// `children` (widget plugin cards) sit between subagents and the minimap.
 function AmbientRail({
   ctx, activity, messages, microcopy, onClose, sparklineValues, hoveredMsgIdx, onMinimapHover, onMinimapClick,
   subagents, subagentPaneOpen, onOpenSubagent, onToggleSubagentPane, onOpenTree,
+  show = {}, children,
 }) {
   // Use live tps samples. Before the first turn, sparklineValues is all zeros
   // which renders as a flat baseline — honest, not fake random data.
@@ -364,44 +368,53 @@ function AmbientRail({
         </span>
       </div>
 
-      <div className="rail-card glass">
-        <TokenGauge used={ctx.used} total={ctx.total} pct={ctx.pct}
-          label={ctx.label} sub={`cost ${ctx.cost} · ${ctx.tokensPerSec} t/s`} />
-        <div className="rail-spark">
-          <Sparkline values={sparkVals} width={210} height={28} />
-          <div className="rail-spark-foot mono">
-            <span style={{ color: "var(--fg-4)" }}>throughput</span>
-            <span style={{ color: "var(--accent)" }}>{ctx.tokensPerSec} t/s</span>
+      {(show.context ?? true) && (
+        <div className="rail-card glass">
+          <TokenGauge used={ctx.used} total={ctx.total} pct={ctx.pct}
+            label={ctx.label} sub={`cost ${ctx.cost} · ${ctx.tokensPerSec} t/s`} />
+          <div className="rail-spark">
+            <Sparkline values={sparkVals} width={210} height={28} />
+            <div className="rail-spark-foot mono">
+              <span style={{ color: "var(--fg-4)" }}>throughput</span>
+              <span style={{ color: "var(--accent)" }}>{ctx.tokensPerSec} t/s</span>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
-      <div className="rail-card glass">
-        <div className="rail-card-head">
-          <Icon name="radar" size={11} color="var(--accent)" />
-          <span className="mono" style={{ color: "var(--fg-2)" }}>agent radar</span>
-          <span className="chip muted mono" style={{ marginLeft: "auto" }}>last 60s</span>
+      {(show.radar ?? true) && (
+        <div className="rail-card glass">
+          <div className="rail-card-head">
+            <Icon name="radar" size={11} color="var(--accent)" />
+            <span className="mono" style={{ color: "var(--fg-2)" }}>agent radar</span>
+            <span className="chip muted mono" style={{ marginLeft: "auto" }}>last 60s</span>
+          </div>
+          <ActivityRadar activity={activity} tps={ctx.tokensPerSec} />
+          <div className="legend">
+            {Object.entries(TOOL_META).filter(([k]) => ["read","search","edit","bash"].includes(k)).map(([k, m]) => (
+              <span key={k} className="legend-item">
+                <span style={{ background: m.color }} /> {m.label}
+              </span>
+            ))}
+          </div>
         </div>
-        <ActivityRadar activity={activity} tps={ctx.tokensPerSec} />
-        <div className="legend">
-          {Object.entries(TOOL_META).filter(([k]) => ["read","search","edit","bash"].includes(k)).map(([k, m]) => (
-            <span key={k} className="legend-item">
-              <span style={{ background: m.color }} /> {m.label}
-            </span>
-          ))}
-        </div>
-      </div>
+      )}
 
-      <SubagentRailCard agents={subagents} paneOpen={subagentPaneOpen}
-        onOpen={onOpenSubagent} onTogglePane={onToggleSubagentPane} />
+      {(show.subagents ?? true) && (
+        <SubagentRailCard agents={subagents} paneOpen={subagentPaneOpen}
+          onOpen={onOpenSubagent} onTogglePane={onToggleSubagentPane} />
+      )}
 
-      <div className="rail-card glass" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 120 }}>
-        <div className="rail-card-head">
-          <Icon name="minimap" size={11} color="var(--fg-3)" />
-          <span className="mono" style={{ color: "var(--fg-2)" }}>minimap</span>
+      {children}
+      {(show.minimap ?? true) && (
+        <div className="rail-card glass" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 120 }}>
+          <div className="rail-card-head">
+            <Icon name="minimap" size={11} color="var(--fg-3)" />
+            <span className="mono" style={{ color: "var(--fg-2)" }}>minimap</span>
+          </div>
+          <SessionMinimap messages={messages} hoveredIdx={hoveredMsgIdx} onHover={onMinimapHover} onClick={onMinimapClick} />
         </div>
-        <SessionMinimap messages={messages} hoveredIdx={hoveredMsgIdx} onHover={onMinimapHover} onClick={onMinimapClick} />
-      </div>
+      )}
     </aside>
   );
 }
