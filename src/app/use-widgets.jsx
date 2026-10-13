@@ -1,181 +1,154 @@
-/* app/use-widgets.jsx — loads widgets.json, decides which plugins apply to
-   the active tab, and runs them on triggers (activate, turn_end, branch,
-   manual, interval). Transitions live in app/widgets-schedule.js; this file
-   only wires effects. */
+/* app/use-widgets.jsx — rail widget plugins (docs/widgets.md). Rust owns
+   config, approval, triggers and scheduling (src-tauri/src/widgets/); this
+   hook only reports what the user sees (`widgetsSetView`), mirrors the
+   backend's snapshot and `widgets://` events, and turns them into card
+   props. Run bookkeeping is pure in app/widgets.js. */
 
-const { OMP_WIDGETS: _UW, OMP_WIDGET_SCHEDULE: _UWS } = window;
+const { OMP_WIDGETS: _UW } = window;
+const _UW_GLOBAL_KEY = "__global__";
+const _UW_NO_IDS = [];
+const _UW_EMPTY_CONFIG = { plugins: [], errors: [], fatal: null, configPath: null };
 
-function useWidgets({ bridge, activeSessionId, activeProjectPath, branch, streaming, sessionIds, tweaks }) {
-  const [config, setConfig] = React.useState({ plugins: [], errors: [], fatal: null, path: "" });
-  // `ctx` carries the session it was read for, so a stale one (tab just
-  // switched, widgetContext still in flight) is never matched against the new tab.
-  const [ctx, setCtx]       = React.useState({ sessionId: null, project: "", remote: "" });
-  const [sched, setSched]   = React.useState(_UWS.EMPTY);
-  const schedRef = React.useRef(sched);
-  schedRef.current = sched;
-  const sessionIdsRef = React.useRef(sessionIds);
-  sessionIdsRef.current = sessionIds;
-  const activeSessionIdRef = React.useRef(activeSessionId);
-  activeSessionIdRef.current = activeSessionId;
+function _uwVisible() {
+  return document.visibilityState === "visible";
+}
 
-  const reload = React.useCallback(async () => {
-    if (!bridge) return;
-    const [cfg, path] = await Promise.all([bridge.widgetConfig(), bridge.widgetConfigPath()]);
-    setConfig({ plugins: cfg.plugins ?? [], errors: cfg.errors ?? [], fatal: cfg.fatal ?? null, path });
-  }, [bridge]);
-  React.useEffect(() => { reload(); }, [reload]);
+/** `activeSessionId` must be the tab the app renders (`activeProject.id`,
+ *  "" when none) — never a closed tab's id. `railVisible`: the rail is on
+ *  screen (layout not focus, conversation tree closed); hidden = nothing runs. */
+function useWidgets({ bridge, activeSessionId, railVisible, tweaks }) {
+  const [config, setConfig] = React.useState(_UW_EMPTY_CONFIG);
+  // sessionId ("" for none) → plugin ids applicable to it, latest per
+  // session, so a late payload for another tab never blanks this one.
+  const [applicable, setApplicable] = React.useState({});
+  // runKey → RunView, mutated in place by OMP_WIDGETS.mergeRun; `runsVersion`
+  // re-renders. parseCache memoises parseOutput per run key and finish.
+  const runsRef = React.useRef(new Map());
+  const parseCacheRef = React.useRef(new Map());
+  const [runsVersion, setRunsVersion] = React.useState(0);
+  const [windowVisible, setWindowVisible] = React.useState(_uwVisible);
 
-  // Context (branch/remote) for the active tab — re-read when the tab, its
-  // project or its branch chip changes.
-  React.useEffect(() => {
-    if (!bridge || !activeSessionId) { setCtx({ sessionId: null, project: "", remote: "" }); return; }
-    let live = true;
-    bridge.widgetContext(activeSessionId, "activate").then(c => {
-      if (live) setCtx({ sessionId: activeSessionId, project: c.project, remote: c.remote });
-    });
-    return () => { live = false; };
-  }, [bridge, activeSessionId, activeProjectPath, branch]);
+  const applyActive = React.useCallback((active) => {
+    if (!active || !Array.isArray(active.applicable)) return;
+    const sid = active.sessionId ?? "";
+    setApplicable(m => ({ ...m, [sid]: active.applicable }));
+  }, []);
 
-  const ctxCurrent = ctx.sessionId === activeSessionId;
-  const plugins = React.useMemo(
-    () => ctxCurrent
-      ? _UW.applicable(config.plugins, ctx).filter(p => (tweaks[_UW.tweakKey(p.id)] ?? true))
-      : [],
-    [config.plugins, ctx, ctxCurrent, tweaks]);
-  // The active tab's context for launch-time `match` checks; null while pending.
-  const ctxRef = React.useRef(null);
-  ctxRef.current = ctxCurrent ? ctx : null;
-
-  // The one place a run is started. `sid` is captured here so a result that
-  // lands after a tab switch still goes to the tab it was started for; a
-  // global plugin's result is keyed by the pseudo-session instead.
-  const launch = React.useCallback((sid, plugin, trigger) => {
-    const key = _UWS.keyFor(plugin, sid);
-    const started = _UWS.start(schedRef.current, key, plugin.id, trigger);
-    setSched(started.state); schedRef.current = started.state;
-    if (!started.run) return;
-    bridge.runWidgetPlugin(plugin.id, sid, trigger).then(res => {
-      let parsed;
-      try {
-        parsed = res.error != null ? { ok: false, error: res.error } : _UW.parseOutput(res.stdout ?? "");
-      } catch (err) {
-        // finish() must always run, or the plugin's slot stays "running" forever.
-        parsed = { ok: false, error: "could not parse plugin output: " + String(err?.message ?? err) };
-      }
-      const done = _UWS.finish(schedRef.current, key, plugin.id, started.seq, { ...parsed, durationMs: res.durationMs });
-      setSched(done.state); schedRef.current = done.state;
-      if (!done.next) return;
-      const global = key === _UWS.GLOBAL;
-      // A tab closed while its run was in flight must not spawn the follow-up;
-      // a global follow-up runs for whichever tab is active now.
-      const nextSid = global ? activeSessionIdRef.current : sid;
-      if (!nextSid || (!global && !sessionIdsRef.current.includes(sid))) return;
-      // A queued interval run was due when it was queued, and a global plugin's
-      // `match` was evaluated for the tab that started it: re-check both now.
-      const env = { visible: document.visibilityState === "visible", sid, activeSid: activeSessionIdRef.current, ctx: ctxRef.current };
-      if (!_UW.followUpAllowed(plugin, done.next, env)) return;
-      launch(nextSid, plugin, done.next);
-    });
-  }, [bridge]);
-
-  const fire = React.useCallback((trigger) => {
-    if (!activeSessionId) return;
-    const now = Date.now();
-    for (const p of plugins) {
-      if (!_UW.wantsTrigger(p, trigger)) continue;
-      // A global plugin already has a fresh result when the tab merely changed.
-      if (trigger === "activate" && !_UWS.activateDue(p, _UWS.runOf(schedRef.current, _UWS.keyFor(p, activeSessionId), p.id), now)) continue;
-      launch(activeSessionId, p, trigger);
+  // `skip`: run keys removed while the snapshot was in flight, which the
+  // (older) snapshot must not bring back.
+  const applySnapshot = React.useCallback((snap, skip) => {
+    if (!snap) return;
+    setConfig({ plugins: snap.plugins ?? [], errors: snap.errors ?? [], fatal: snap.fatal ?? null, configPath: snap.configPath ?? null });
+    applyActive(snap.active);
+    let changed = false;
+    for (const run of snap.runs ?? []) {
+      if (skip?.has(_UW.runKey(run.key, run.pluginId))) continue;
+      if (_UW.mergeRun(runsRef.current, run)) changed = true;
     }
-  }, [activeSessionId, plugins, launch]);
+    if (changed) setRunsVersion(v => v + 1);
+  }, [applyActive]);
 
-  // activate: tab/project changed, or the applicable plugin set changed for it.
-  // Plugins are empty until this tab's context has arrived, so the effect
-  // re-runs (pluginKey changes) exactly once with the right plugin set.
-  const pluginKey = plugins.map(p => p.id + ":" + (p.intervalMs ?? 0) + ":" + (p.scope ?? "tab")).join("\0");
+  // Listen first, then fetch: an event landing before the snapshot resolves
+  // is applied at once and the snapshot merges around it by (seq, phase).
   React.useEffect(() => {
-    if (ctxCurrent) fire("activate");
-  }, [activeSessionId, activeProjectPath, pluginKey]); // eslint-disable-line react-hooks/exhaustive-deps
-  // turn_end: streaming true → false within the same tab (a tab switch is not a turn end).
-  const wasStreaming = React.useRef({ sessionId: activeSessionId, streaming });
-  React.useEffect(() => {
-    if (_UWS.turnEnded(wasStreaming.current, { sessionId: activeSessionId, streaming })) fire("turn_end");
-    wasStreaming.current = { sessionId: activeSessionId, streaming };
-  }, [activeSessionId, streaming, fire]);
-  // branch: chip changed (skip the initial mount, activate covers it).
-  const lastBranch = React.useRef(branch);
-  React.useEffect(() => {
-    if (lastBranch.current !== branch && lastBranch.current !== undefined) fire("branch");
-    lastBranch.current = branch;
-  }, [branch, fire]);
-  // Closed tabs drop their results. Goes through schedRef like start/finish
-  // so a result landing in the same tick sees the pruned state.
-  React.useEffect(() => {
-    const next = _UWS.prune(schedRef.current, sessionIds);
-    schedRef.current = next;
-    setSched(next);
-  }, [sessionIds]);
-
-  const refresh = React.useCallback((pluginId) => {
-    const p = plugins.find(x => x.id === pluginId);
-    if (p && activeSessionId) launch(activeSessionId, p, "manual");
-  }, [plugins, activeSessionId, launch]);
-
-  // Interval timers + visibility catch-up for `list`. Paused while the window
-  // is hidden; on return to visible each due plugin fires once and its timer
-  // restarts, so the next tick cannot queue a second run right behind it.
-  const startIntervals = React.useCallback((list) => {
-    const timers = new Map();
-    const runFor = (p) => {
-      const sid = activeSessionIdRef.current;
-      if (!sid) return;
-      // Global plugins are not gated by the active tab's match; check it now.
-      if (p.scope === "global" && _UW.applicable([p], ctxRef.current).length === 0) return;
-      launch(sid, p, "interval");
-    };
-    const arm = (p) => {
-      clearInterval(timers.get(p.id));
-      timers.set(p.id, setInterval(() => { if (document.visibilityState === "visible") runFor(p); }, p.intervalMs));
-    };
-    list.forEach(arm);
-    const onVisible = () => {
-      if (document.visibilityState !== "visible") return;
-      const now = Date.now();
-      for (const p of list) {
-        const run = _UWS.runOf(schedRef.current, _UWS.keyFor(p, activeSessionIdRef.current), p.id);
-        if (!_UWS.dueNow(run, p.intervalMs, now)) continue;
-        runFor(p);
-        arm(p);
+    if (!bridge) return undefined;
+    let live = true;
+    let loading = true;
+    let unlisten = null;
+    const removedWhileLoading = new Set();
+    const onEvent = (kind, payload) => {
+      if (!live || !payload) return;
+      if (kind === "run") {
+        if (_UW.mergeRun(runsRef.current, payload)) setRunsVersion(v => v + 1);
+      } else if (kind === "removed") {
+        const k = _UW.runKey(payload.key, payload.pluginId);
+        if (loading) removedWhileLoading.add(k);
+        parseCacheRef.current.delete(k);
+        if (runsRef.current.delete(k)) setRunsVersion(v => v + 1);
+      } else if (kind === "config") {
+        applySnapshot(payload);
+      } else if (kind === "active") {
+        applyActive(payload);
       }
     };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      for (const t of timers.values()) clearInterval(t);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [launch]);
+    (async () => {
+      const stop = await bridge.onWidgetsEvent(onEvent);
+      if (!live) { stop(); return; }
+      unlisten = stop;
+      const snap = await bridge.widgetsState();
+      loading = false;
+      if (live) applySnapshot(snap, removedWhileLoading);
+    })();
+    return () => { live = false; unlisten?.(); };
+  }, [bridge, applySnapshot, applyActive]);
 
-  // Tab plugins: active tab only; timers restart on a tab switch or when the
-  // plugin set or any intervalMs changes (pluginKey carries the intervals).
-  React.useEffect(
-    () => startIntervals(plugins.filter(p => p.intervalMs && p.scope !== "global")),
-    [activeSessionId, pluginKey, startIntervals]); // eslint-disable-line react-hooks/exhaustive-deps
-  // Global plugins: one timer set for the app, untouched by a tab switch. The
-  // set comes from the config, not from the ctx-gated `plugins`, so it is
-  // stable while a tab's context is pending; `match` is checked per run.
-  const globalTimed = _UW.globalPlugins(config.plugins, tweaks).filter(p => p.intervalMs);
-  // `match` is part of the key: a reload that only changes `matchPath`/
-  // `matchRemote` must replace the timer, whose closure holds the matcher.
-  const globalKey = globalTimed.map(p => [p.id, p.intervalMs, p.matchPath ?? "", p.matchRemote ?? ""].join(":")).join("\0");
-  React.useEffect(
-    () => startIntervals(globalTimed),
-    [globalKey, startIntervals]); // eslint-disable-line react-hooks/exhaustive-deps
+  React.useEffect(() => {
+    const onChange = () => setWindowVisible(_uwVisible());
+    document.addEventListener("visibilitychange", onChange);
+    return () => document.removeEventListener("visibilitychange", onChange);
+  }, []);
+
+  // Plugins whose Tweaks toggle is off: they neither run nor render.
+  const hiddenKey = config.plugins
+    .filter(p => tweaks[_UW.tweakKey(p.id)] === false)
+    .map(p => p.id).join("\0");
+  const sessionId = activeSessionId || null;
+  // Sent only when a field changes: the deps are the view's own values.
+  React.useEffect(() => {
+    if (!bridge) return;
+    bridge.widgetsSetView({ sessionId, railVisible, windowVisible, hidden: hiddenKey ? hiddenKey.split("\0") : [] });
+  }, [bridge, sessionId, railVisible, windowVisible, hiddenKey]);
+
+  const activeIds = applicable[sessionId ?? ""] ?? _UW_NO_IDS;
+  const cards = React.useMemo(() => {
+    const byId = new Map(config.plugins.map(p => [p.id, p]));
+    const hidden = new Set(hiddenKey ? hiddenKey.split("\0") : []);
+    const out = [];
+    for (const id of activeIds) {
+      const p = byId.get(id);
+      if (!p || !p.enabled || p.approval !== "approved" || hidden.has(id)) continue;
+      const key = p.scope === "global" ? _UW_GLOBAL_KEY : sessionId;
+      if (!key) continue;
+      const k = _UW.runKey(key, id);
+      const run = runsRef.current.get(k);
+      const parsed = _UW.parsedLast(parseCacheRef.current, k, run?.last);
+      out.push({ id, title: p.title, resetKey: `${k}:${run?.seq ?? 0}`, run: _UW.cardRun(run, parsed) });
+    }
+    return out;
+  }, [config.plugins, activeIds, hiddenKey, sessionId, runsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Approval is per plugin, not per tab: shown whatever the active project.
+  const approvals = React.useMemo(() => {
+    const hidden = new Set(hiddenKey ? hiddenKey.split("\0") : []);
+    return config.plugins
+      .filter(p => p.enabled && p.approval !== "approved" && !hidden.has(p.id))
+      .map(p => ({ id: p.id, title: p.title, command: p.command, changed: p.approval === "changed" }));
+  }, [config.plugins, hiddenKey]);
+
+  const togglePlugins = React.useMemo(() => config.plugins.filter(p => p.enabled), [config.plugins]);
+
+  const refresh = React.useCallback((pluginId) => bridge?.widgetsRefresh(pluginId), [bridge]);
+  const reload = React.useCallback(async () => {
+    if (bridge) applySnapshot(await bridge.widgetsReload());
+  }, [bridge, applySnapshot]);
+  // Approves the fingerprint the card was rendered for. A stale card (the
+  // command or script changed meanwhile) re-reads the state so the card
+  // shows what would now be approved, and rejects so the card re-enables.
+  const configRef = React.useRef(config);
+  configRef.current = config;
+  const approve = React.useCallback(async (pluginId) => {
+    if (!bridge) return;
+    const fingerprint = configRef.current.plugins.find(p => p.id === pluginId)?.fingerprint;
+    if (!fingerprint) return;
+    const res = await bridge.widgetsApprove(pluginId, fingerprint);
+    if (res.ok) { applySnapshot(res.value); return; }
+    applySnapshot(await bridge.widgetsState());
+    throw new Error(res.error);
+  }, [bridge, applySnapshot]);
 
   return {
-    plugins, configErrors: config.errors, fatal: config.fatal, configPath: config.path,
-    allPlugins: config.plugins,
-    runs: _UWS.runsFor(sched, config.plugins, activeSessionId),
-    refresh, reload,
+    cards, approvals, configErrors: config.errors, fatal: config.fatal, configPath: config.configPath,
+    togglePlugins, refresh, reload, approve,
   };
 }
 

@@ -1,154 +1,80 @@
 //! Run one widget plugin: argv from the validated config, context via env +
-//! stdin JSON, stdout capped, wall-clock timeout, process tree killed on either.
-//! Synchronous and blocking — callers run it on `spawn_blocking`.
+//! stdin JSON, stdout capped and required to be JSON, wall-clock timeout,
+//! process tree killed on timeout, cap, or as soon as the plugin exits.
+//! Synchronous and blocking — the widget host calls it on a worker thread.
 //!
-//! A blocking `read` on the child's stdout cannot observe the deadline while
-//! the plugin is idle, so the pipes are drained on dedicated threads and the
-//! calling thread polls `try_wait` against the deadline every [`POLL`]. The
-//! stdout reader stops and raises a shared flag once [`STDOUT_CAP_BYTES`] is
-//! passed; the poll loop sees the flag and kills the child. Reader results
-//! come back over channels so a grandchild that inherited a pipe and outlives
-//! the plugin can only delay the result until the deadline, never past it.
+//! The pipes are drained on threads and the exit wait polls against the
+//! deadline (`child.rs`). The stdout reader stops and raises a shared flag
+//! past [`STDOUT_CAP_BYTES`]; the wait sees it and kills the tree. When the
+//! plugin itself exits, the tree is killed at once: a background child still
+//! holding stdout (`git fetch & echo '{…}'`) would otherwise hold the result
+//! until the deadline. Bytes already in a pipe survive the writer's death. A
+//! descendant that escaped the tree (`setsid`) can only delay the result until
+//! the deadline, never past it.
 //!
-//! The context is written to stdin on its own thread, started after the
-//! readers, so the caller never waits on the write; the poll loop alone owns
-//! the deadline. That thread is never joined.
-//!
-//! Every [`PluginContext`] string except `project` is bounded to
-//! [`CONTEXT_FIELD_MAX_BYTES`] in [`context`]. Each value is also exported as an
-//! environment variable, and Linux limits one env string to 128 KiB, so an
-//! unbounded value would fail `spawn` with E2BIG. `project` is left intact: it
-//! is the plugin's working directory, so truncating it would change where the
-//! plugin runs, and the OS path limit already bounds it. The stdin payload is
-//! therefore at most `PATH_MAX` + 4 x 2048 bytes plus keys, far below any exec
-//! limit. On timeout or cap the whole process tree is killed (see
-//! [`ProcessSupervisor`]), which closes the plugin's stdin read end, so the
-//! detached stdin writer always fails and returns.
-//! stderr keeps a rolling tail of [`STDERR_KEEP_BYTES`] (the end is what
-//! explains a failure) while the rest is drained and dropped.
-//!
-//! Every thread is created with `thread::Builder`. If the OS refuses one, the
-//! child is killed and reaped and the run fails with
-//! `could not start reader thread: …` instead of panicking out of the caller.
+//! The context goes to stdin from a detached thread; the payload is bounded
+//! (see `context.rs`) and the write fails as soon as the tree is killed.
+//! stderr keeps a rolling tail of [`STDERR_KEEP_BYTES`]. Every thread is
+//! created with `thread::Builder`; if the OS refuses one, the child is killed
+//! and reaped and the run fails instead of panicking.
 
-use std::collections::VecDeque;
-use std::io::{Read, Write};
-use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::ffi::{OsStr, OsString};
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::agent::supervisor::ProcessSupervisor;
+use crate::widgets::child::{recv_until, spawn_drain, terminate, wait_for_exit, WaitError};
 use crate::widgets::config::PluginEntry;
+use crate::widgets::context::PluginContext;
+use crate::widgets::schedule::Outcome;
 
 pub const STDOUT_CAP_BYTES: usize = 256 * 1024;
 /// How much stderr is kept for error messages; the rest is drained and dropped.
 const STDERR_KEEP_BYTES: usize = 64 * 1024;
 /// How much of a failing run's stderr (or stdout) the error keeps.
 const ERR_TAIL_CHARS: usize = 300;
-const POLL: Duration = Duration::from_millis(25);
-/// Upper bound for every [`PluginContext`] string, see the module docs.
-const CONTEXT_FIELD_MAX_BYTES: usize = 2048;
+/// How much of a non-JSON stdout the error shows.
+const NOT_JSON_PREVIEW_CHARS: usize = 120;
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PluginContext {
-    pub project: String,
-    pub branch: String,
-    pub remote: String,
-    pub session: String,
-    pub trigger: String,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunResult {
-    pub plugin_id: String,
-    pub stdout: Option<String>,
-    pub error: Option<String>,
-    pub duration_ms: u64,
-}
-
-/// Branch and default-remote fetch URL for `project` (empty when absent).
-pub fn context(project: &Path, session: &str, trigger: &str) -> PluginContext {
-    let (branch, _) = crate::git::probe(project);
-    let remote = gix::discover(project).ok().and_then(|repo| {
-        let url = repo
-            .find_default_remote(gix::remote::Direction::Fetch)
-            .and_then(Result::ok)
-            .and_then(|r| {
-                r.url(gix::remote::Direction::Fetch)
-                    .map(|u| u.to_bstring().to_string())
-            });
-        url
-    });
-    bounded_context(
-        project.to_string_lossy().into_owned(),
-        branch.unwrap_or_default(),
-        remote.unwrap_or_default(),
-        session.to_string(),
-        trigger.to_string(),
-    )
-}
-
-/// Assemble the context, bounding every string except `project` to
-/// [`CONTEXT_FIELD_MAX_BYTES`]. `project` is the plugin's cwd: truncating it
-/// would change where the plugin runs, and the OS path limit already bounds it.
-fn bounded_context(
-    project: String,
-    branch: String,
-    remote: String,
-    session: String,
-    trigger: String,
-) -> PluginContext {
-    let mut ctx = PluginContext {
-        project,
-        branch,
-        remote,
-        session,
-        trigger,
-    };
-    for field in [
-        &mut ctx.branch,
-        &mut ctx.remote,
-        &mut ctx.session,
-        &mut ctx.trigger,
-    ] {
-        truncate_field(field);
-    }
-    ctx
-}
-
-/// Cut `field` to at most [`CONTEXT_FIELD_MAX_BYTES`] on a char boundary.
-fn truncate_field(field: &mut String) {
-    if field.len() <= CONTEXT_FIELD_MAX_BYTES {
-        return;
-    }
-    let mut end = CONTEXT_FIELD_MAX_BYTES;
-    while !field.is_char_boundary(end) {
-        end -= 1;
-    }
-    field.truncate(end);
-}
-
-pub fn run_plugin(entry: &PluginEntry, ctx: &PluginContext) -> RunResult {
+/// Run `entry` with `ctx`. `on_spawn` receives the run's supervisor right
+/// after spawn so another thread can `kill_tree()` it; the run itself still
+/// reaps the child and returns. Exactly one of `stdout`/`error` is set;
+/// `stdout` is set only when it parses as JSON. All error text is redacted.
+pub fn run_plugin(
+    entry: &PluginEntry,
+    ctx: &PluginContext,
+    on_spawn: impl FnOnce(&Arc<ProcessSupervisor>),
+) -> Outcome {
     let start = Instant::now();
-    let (stdout, error) = match run_inner(entry, ctx) {
-        Ok(s) => (Some(s), None),
-        Err(e) => (None, Some(e)),
-    };
-    RunResult {
-        plugin_id: entry.id.clone(), // the result is keyed by id on the JS side; the entry outlives the call
-        stdout,
-        error,
-        duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+    let result = run_inner(entry, ctx, on_spawn).and_then(require_json);
+    let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match result {
+        Ok(stdout) => Outcome {
+            stdout: Some(stdout),
+            error: None,
+            duration_ms,
+        },
+        Err(error) => Outcome {
+            stdout: None,
+            error: Some(error),
+            duration_ms,
+        },
     }
 }
 
-fn run_inner(entry: &PluginEntry, ctx: &PluginContext) -> Result<String, String> {
+fn run_inner(
+    entry: &PluginEntry,
+    ctx: &PluginContext,
+    on_spawn: impl FnOnce(&Arc<ProcessSupervisor>),
+) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_millis(entry.timeout_ms);
-    let (mut child, supervisor) = spawn(entry, ctx)?;
+    let mut child = spawn(entry, ctx)?;
+    let supervisor = Arc::new(ProcessSupervisor::attach(&child));
+    on_spawn(&supervisor);
 
     let (Some(out_pipe), Some(err_pipe)) = (child.stdout.take(), child.stderr.take()) else {
         terminate(&supervisor, &mut child);
@@ -165,15 +91,18 @@ fn run_inner(entry: &PluginEntry, ctx: &PluginContext) -> Result<String, String>
         .inspect_err(|_| terminate(&supervisor, &mut child))?;
     feed_stdin(&mut child, ctx).inspect_err(|_| terminate(&supervisor, &mut child))?;
 
-    let status = wait_for_exit(
-        &mut child,
-        &supervisor,
-        &overflow,
-        deadline,
-        entry.timeout_ms,
-    )?;
+    let status =
+        wait_for_exit(&mut child, &supervisor, &overflow, deadline).map_err(|e| match e {
+            WaitError::Overflow => cap_error(),
+            WaitError::TimedOut => timeout_error(entry.timeout_ms),
+            WaitError::Failed(e) => e,
+        })?;
+    // The plugin is done; whatever it left behind dies now rather than when
+    // the supervisor drops, so a background holder of a pipe cannot stall
+    // the readers until the deadline.
+    supervisor.kill_tree();
     let out = recv_until(&stdout_rx, deadline)
-        .ok_or_else(|| format!("timed out after {} ms", entry.timeout_ms))?
+        .ok_or_else(|| timeout_error(entry.timeout_ms))?
         .map_err(|e| format!("could not read stdout: {e}"))?;
     if overflow.load(Ordering::Relaxed) {
         return Err(cap_error());
@@ -183,19 +112,30 @@ fn run_inner(entry: &PluginEntry, ctx: &PluginContext) -> Result<String, String>
             .and_then(Result::ok)
             .unwrap_or_default();
         let tail_src = if stderr.is_empty() { &out } else { &stderr };
-        return Err(format!("exit {}: {}", status, tail(tail_src)));
+        // `ExitStatus`'s own Display already says "exit status: N"; a killed
+        // run has no code and keeps the signal text.
+        let how = status
+            .code()
+            .map_or_else(|| status.to_string(), |code| format!("exit {code}"));
+        return Err(format!("{how}: {}", tail(tail_src)));
     }
     String::from_utf8(out).map_err(|_| "stdout is not UTF-8".to_string())
 }
 
-fn spawn(entry: &PluginEntry, ctx: &PluginContext) -> Result<(Child, ProcessSupervisor), String> {
+fn spawn(entry: &PluginEntry, ctx: &PluginContext) -> Result<Child, String> {
     let Some((argv0, rest)) = entry.command.split_first() else {
         return Err("command is empty".to_string());
     };
+    // Never a shared temp dir: an interpreter that puts its cwd on the module
+    // path would load whatever another local user planted there.
     let cwd = if ctx.project.is_empty() {
-        std::env::temp_dir()
+        crate::widgets::config::home_dir()
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                "no working directory: tab has no project and no home directory is set".to_string()
+            })?
     } else {
-        std::path::PathBuf::from(&ctx.project)
+        PathBuf::from(&ctx.project)
     };
     let mut cmd = Command::new(argv0);
     cmd.args(rest)
@@ -210,141 +150,85 @@ fn spawn(entry: &PluginEntry, ctx: &PluginContext) -> Result<(Child, ProcessSupe
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::child_path::apply_child_path(&mut cmd);
+    // A bare program name is looked up on PATH; an empty or relative entry
+    // would resolve it inside the untrusted project directory.
+    let path = cmd
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .and_then(|(_, value)| value.map(OsStr::to_os_string))
+        .or_else(|| std::env::var_os("PATH"));
+    if let Some(path) = path {
+        cmd.env("PATH", absolute_path_entries(&path));
+    }
     ProcessSupervisor::prepare(&mut cmd);
-    let child = cmd.spawn().map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => format!("command not found: {argv0}"),
-        _ => format!("could not start {argv0}: {e}"),
-    })?;
-    let supervisor = ProcessSupervisor::attach(&child);
-    Ok((child, supervisor))
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(crate::agent::spawn::CREATE_NO_WINDOW);
+    }
+    // The OS error names the cause; `NotFound` also means a missing shebang
+    // interpreter or a vanished cwd, not only a missing program.
+    cmd.spawn()
+        .map_err(|e| format!("could not start {argv0}: {e}"))
+}
+
+/// `path` with every empty or relative entry removed.
+fn absolute_path_entries(path: &OsStr) -> OsString {
+    // `split_paths` strips the quotes `join_paths` would reject, so joining its
+    // own output cannot fail; an empty PATH is the safe answer if it ever did.
+    std::env::join_paths(std::env::split_paths(path).filter(|p| p.is_absolute()))
+        .unwrap_or_default()
 }
 
 /// Context on stdin from a detached thread, which closes the pipe when done so
-/// `cat`-style plugins terminate. Never joined. If the plugin never reads, the
-/// write may block, but only until the run ends: timeout and cap kill the whole
-/// process tree, every holder of the pipe's read end dies, and `write_all`
-/// fails and returns.
+/// `cat`-style plugins terminate. Never joined: if the plugin never reads, the
+/// write blocks only until the tree is killed, then fails and returns.
 fn feed_stdin(child: &mut Child, ctx: &PluginContext) -> Result<(), String> {
+    #[derive(serde::Serialize)]
+    struct Payload<'a> {
+        version: u8,
+        #[serde(flatten)]
+        ctx: &'a PluginContext,
+    }
     let Some(mut stdin) = child.stdin.take() else {
         return Ok(());
     };
-    let payload = serde_json::json!({
-        "version": 1, "project": ctx.project, "branch": ctx.branch,
-        "remote": ctx.remote, "session": ctx.session, "trigger": ctx.trigger,
-    })
-    .to_string();
+    let payload = serde_json::to_vec(&Payload { version: 1, ctx })
+        .map_err(|e| format!("could not encode context: {e}"))?;
     std::thread::Builder::new()
         .name("widget-stdin".to_string())
         .spawn(move || {
-            // Invariant: the run never leaves a descendant holding the read end
-            // after it ends (`kill_tree`), so this write cannot block forever.
-            let _ = stdin.write_all(payload.as_bytes()); // a plugin that closed stdin early gives EPIPE; that's fine
+            let _ = stdin.write_all(&payload); // a plugin that closed stdin early gives EPIPE; that's fine
         }) // `stdin` drops at the end of the closure, closing the pipe
         .map(drop) // detached on purpose; the handle is not needed
         .map_err(|e| format!("could not start stdin thread: {e}"))
-}
-
-/// Drain `pipe` on a thread. With `overflow`, at most `keep` bytes are kept
-/// from the start; exceeding that raises the flag and stops reading (the
-/// caller kills the child). Without it the last `keep` bytes are kept and the
-/// rest is read and discarded so the writer never blocks on a full pipe.
-fn spawn_drain(
-    mut pipe: impl Read + Send + 'static,
-    keep: usize,
-    overflow: Option<Arc<AtomicBool>>,
-) -> Result<Receiver<std::io::Result<Vec<u8>>>, String> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("widget-drain".to_string())
-        .spawn(move || {
-            let mut buf: VecDeque<u8> = VecDeque::new();
-            let mut chunk = [0u8; 8192];
-            let result = loop {
-                match pipe.read(&mut chunk) {
-                    Ok(0) => break Ok(Vec::from(buf)),
-                    Ok(n) => {
-                        if let Some(flag) = &overflow {
-                            if buf.len() + n > keep {
-                                flag.store(true, Ordering::Relaxed);
-                                break Ok(Vec::from(buf));
-                            }
-                            buf.extend(&chunk[..n]);
-                        } else {
-                            buf.extend(&chunk[..n]);
-                            let excess = buf.len().saturating_sub(keep);
-                            buf.drain(..excess);
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(e) => break Err(e),
-                }
-            };
-            let _ = tx.send(result); // the receiver is gone after a timeout; nobody wants the bytes then
-        })
-        .map_err(|e| format!("could not start reader thread: {e}"))?;
-    Ok(rx)
-}
-
-/// Poll until the child exits. Kills the process tree and errors on deadline
-/// or when the stdout reader reports the cap was passed.
-fn wait_for_exit(
-    child: &mut Child,
-    supervisor: &ProcessSupervisor,
-    overflow: &AtomicBool,
-    deadline: Instant,
-    timeout_ms: u64,
-) -> Result<ExitStatus, String> {
-    loop {
-        if overflow.load(Ordering::Relaxed) {
-            terminate(supervisor, child);
-            return Err(cap_error());
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
-            Ok(None) if Instant::now() >= deadline => {
-                terminate(supervisor, child);
-                return Err(format!("timed out after {timeout_ms} ms"));
-            }
-            Ok(None) => std::thread::sleep(POLL),
-            Err(e) => {
-                terminate(supervisor, child);
-                return Err(format!("wait failed: {e}"));
-            }
-        }
-    }
-}
-
-/// Result of a drain thread, or `None` if it has not finished by `deadline`
-/// (or died without sending).
-fn recv_until(
-    rx: &Receiver<std::io::Result<Vec<u8>>>,
-    deadline: Instant,
-) -> Option<std::io::Result<Vec<u8>>> {
-    rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        .ok()
-}
-
-/// Kill the plugin's process tree, then reap the direct child.
-///
-/// `ProcessSupervisor::kill_tree` is a no-op when the supervisor could not be
-/// attached (on Windows, creating or assigning the Job Object can fail). The
-/// direct-child `kill` is the fallback so the following `wait` cannot block on a
-/// plugin that is still running. After a successful tree kill it is idempotent:
-/// on an already-dead process `Child::kill` returns `Ok` or `InvalidInput`, and
-/// both are ignored.
-fn terminate(supervisor: &ProcessSupervisor, child: &mut Child) {
-    supervisor.kill_tree();
-    let _ = child.kill();
-    let _ = child.wait(); // reap; nothing useful to do on failure
 }
 
 fn cap_error() -> String {
     format!("stdout exceeds {} KiB", STDOUT_CAP_BYTES / 1024)
 }
 
-/// Last [`ERR_TAIL_CHARS`] of a failing run's output, with credential
-/// shapes masked first (`redact::redact_secrets`) so a CLI that echoes an
-/// `Authorization` header never shows it in the rail.
+fn timeout_error(timeout_ms: u64) -> String {
+    format!("timed out after {timeout_ms} ms")
+}
+
+/// `stdout` if it is one JSON document; otherwise an error with a redacted
+/// preview of its start, so the UI never builds its own unredacted one.
+fn require_json(stdout: String) -> Result<String, String> {
+    if serde_json::from_str::<serde::de::IgnoredAny>(&stdout).is_ok() {
+        return Ok(stdout);
+    }
+    let text = crate::widgets::redact::redact_secrets(stdout.trim());
+    let preview: String = text.chars().take(NOT_JSON_PREVIEW_CHARS).collect();
+    Err(if preview.is_empty() {
+        "stdout is not JSON: it is empty".to_string()
+    } else {
+        format!("stdout is not JSON: {preview}")
+    })
+}
+
+/// Last [`ERR_TAIL_CHARS`] of a failing run's output, redacted before it is
+/// cut so a secret's key is still in view when it is masked.
 fn tail(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
     let s = crate::widgets::redact::redact_secrets(s.trim());
@@ -359,7 +243,7 @@ fn tail(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::config::PluginEntry;
+    use crate::widgets::config::{Scope, Trigger};
 
     fn entry(cmd: &[&str], timeout_ms: u64) -> PluginEntry {
         PluginEntry {
@@ -368,11 +252,11 @@ mod tests {
             command: cmd.iter().map(|s| (*s).to_string()).collect(),
             match_path: None,
             match_remote: None,
-            triggers: vec!["manual".into()],
+            triggers: vec![Trigger::Activate],
             timeout_ms,
             interval_ms: None,
             enabled: true,
-            scope: "tab".into(),
+            scope: Scope::Tab,
         }
     }
 
@@ -386,19 +270,29 @@ mod tests {
         }
     }
 
+    fn run(cmd: &[&str], timeout_ms: u64) -> Outcome {
+        run_plugin(&entry(cmd, timeout_ms), &ctx(), |_| {})
+    }
+
+    fn assert_timed_out(r: &Outcome, timeout_ms: u64) {
+        let want = format!("timed out after {timeout_ms} ms");
+        assert!(
+            r.error.as_deref().is_some_and(|e| e.contains(&want)),
+            "{r:?}"
+        );
+        assert!(r.stdout.is_none(), "{r:?}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn happy_path_returns_stdout_and_env() {
-        let r = run_plugin(
-            &entry(
-                &[
-                    "sh",
-                    "-c",
-                    "echo \"{\\\"trigger\\\":\\\"$OMP_WIDGET_TRIGGER\\\"}\"",
-                ],
-                5_000,
-            ),
-            &ctx(),
+        let r = run(
+            &[
+                "sh",
+                "-c",
+                "echo \"{\\\"trigger\\\":\\\"$OMP_WIDGET_TRIGGER\\\"}\"",
+            ],
+            5_000,
         );
         assert_eq!(r.error, None, "{r:?}");
         assert_eq!(
@@ -410,26 +304,78 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stdin_carries_context_json() {
-        let r = run_plugin(&entry(&["sh", "-c", "cat"], 5_000), &ctx());
+        let r = run(&["sh", "-c", "cat"], 5_000);
         let v: serde_json::Value =
             serde_json::from_str(r.stdout.as_deref().unwrap_or("")).expect("json on stdin");
         assert_eq!(v["session"], "s1");
+        assert_eq!(v["trigger"], "manual");
         assert_eq!(v["version"], 1);
     }
 
     #[cfg(unix)]
     #[test]
+    fn on_spawn_supervisor_kills_the_run_from_another_thread() {
+        let start = Instant::now();
+        let r = run_plugin(&entry(&["sh", "-c", "sleep 30"], 20_000), &ctx(), |sup| {
+            let sup = Arc::clone(sup); // the killer thread outlives this callback
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                sup.kill_tree();
+            });
+        });
+        assert!(start.elapsed() < Duration::from_secs(5), "{r:?}");
+        assert!(r.error.is_some_and(|e| e.starts_with("signal: 9")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn background_child_holding_stdout_does_not_stall_success() {
+        let start = Instant::now();
+        let r = run(&["sh", "-c", "sleep 30 & echo \"{}\""], 5_000);
+        assert!(start.elapsed() < Duration::from_secs(4), "{r:?}");
+        assert_eq!(r.stdout.as_deref(), Some("{}\n"), "{r:?}");
+        assert_eq!(r.error, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_json_stdout_is_a_redacted_error() {
+        let r = run(&["sh", "-c", "echo 'hello token=SYNTHLEAK'"], 5_000);
+        assert!(r.stdout.is_none());
+        let e = r.error.expect("error");
+        assert!(
+            e.starts_with("stdout is not JSON: hello token=[REDACTED]"),
+            "{e}"
+        );
+        assert!(!e.contains("SYNTHLEAK"), "{e}");
+
+        let empty = run(&["true"], 5_000);
+        assert_eq!(
+            empty.error.as_deref(),
+            Some("stdout is not JSON: it is empty")
+        );
+    }
+
+    #[test]
+    fn non_json_preview_is_bounded() {
+        let e = require_json("x".repeat(10_000)).expect_err("not json");
+        assert_eq!(
+            e.len(),
+            "stdout is not JSON: ".len() + NOT_JSON_PREVIEW_CHARS
+        );
+        assert_eq!(require_json("[1]".into()), Ok("[1]".into()));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn failure_tail_redacts_credentials() {
-        let r = run_plugin(
-            &entry(
-                &[
-                    "sh",
-                    "-c",
-                    "echo 'Authorization: Bearer SYNTHETIC123' >&2; exit 2",
-                ],
-                5_000,
-            ),
-            &ctx(),
+        let r = run(
+            &[
+                "sh",
+                "-c",
+                "echo 'Authorization: Bearer SYNTHETIC123' >&2; exit 2",
+            ],
+            5_000,
         );
         let e = r.error.expect("error");
         assert!(e.contains("Bearer [REDACTED]"), "{e}");
@@ -439,44 +385,33 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn nonzero_exit_is_error_even_with_json() {
-        let r = run_plugin(
-            &entry(
-                &["sh", "-c", "echo '{\"version\":1}'; echo boom >&2; exit 3"],
-                5_000,
-            ),
-            &ctx(),
+        let r = run(
+            &["sh", "-c", "echo '{\"version\":1}'; echo boom >&2; exit 3"],
+            5_000,
         );
         assert!(r.stdout.is_none());
         let e = r.error.expect("error");
-        assert!(e.contains("exit") && e.contains("boom"), "{e}");
+        assert_eq!(e, "exit 3: boom");
     }
 
     #[cfg(unix)]
     #[test]
     fn timeout_kills_and_errors() {
-        let start = std::time::Instant::now();
-        let r = run_plugin(&entry(&["sh", "-c", "sleep 30"], 1_000), &ctx());
+        let start = Instant::now();
+        let r = run(&["sh", "-c", "sleep 30"], 1_000);
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
+            start.elapsed() < Duration::from_secs(5),
             "must not wait for sleep"
         );
-        assert!(
-            r.error
-                .as_deref()
-                .is_some_and(|e| e.contains("timed out after 1000 ms")),
-            "{r:?}"
-        );
+        assert_timed_out(&r, 1_000);
     }
 
     #[cfg(unix)]
     #[test]
     fn stdout_cap_kills_and_errors() {
-        let r = run_plugin(
-            &entry(
-                &["sh", "-c", "yes 0123456789abcdef | head -c 1048576"],
-                5_000,
-            ),
-            &ctx(),
+        let r = run(
+            &["sh", "-c", "yes 0123456789abcdef | head -c 1048576"],
+            5_000,
         );
         assert!(
             r.error.as_deref().is_some_and(|e| e.contains("exceeds")),
@@ -488,36 +423,27 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn max_size_context_does_not_block_a_plugin_that_ignores_stdin() {
+        let max = crate::widgets::context::CONTEXT_FIELD_MAX_BYTES;
         let mut full = ctx();
-        full.session = "x".repeat(CONTEXT_FIELD_MAX_BYTES);
-        full.remote = "x".repeat(CONTEXT_FIELD_MAX_BYTES);
-        full.branch = "x".repeat(CONTEXT_FIELD_MAX_BYTES);
-        let start = std::time::Instant::now();
-        let r = run_plugin(&entry(&["sh", "-c", "sleep 30"], 1_000), &full);
+        full.session = "x".repeat(max);
+        full.remote = "x".repeat(max);
+        full.branch = "x".repeat(max);
+        let start = Instant::now();
+        let r = run_plugin(&entry(&["sh", "-c", "sleep 30"], 1_000), &full, |_| {});
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
+            start.elapsed() < Duration::from_secs(5),
             "must not block on stdin"
         );
-        assert!(
-            r.error
-                .as_deref()
-                .is_some_and(|e| e.contains("timed out after 1000 ms")),
-            "{r:?}"
-        );
+        assert_timed_out(&r, 1_000);
     }
 
     #[cfg(unix)]
     #[test]
-    fn timeout_kills_grandchild_and_closes_stdin() {
+    fn timeout_kills_grandchild() {
         let pidfile = std::env::temp_dir().join(format!("omp-widget-gc-{}", std::process::id()));
         let script = format!("sleep 30 & echo $! > '{}'; wait", pidfile.display());
-        let r = run_plugin(&entry(&["sh", "-c", &script], 1_000), &ctx());
-        assert!(
-            r.error
-                .as_deref()
-                .is_some_and(|e| e.contains("timed out after 1000 ms")),
-            "{r:?}"
-        );
+        let r = run(&["sh", "-c", &script], 1_000);
+        assert_timed_out(&r, 1_000);
         let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
             .expect("plugin wrote the sleep pid")
             .trim()
@@ -538,71 +464,16 @@ mod tests {
         assert!(!alive, "sleep grandchild {pid} survived the timeout");
     }
 
-    #[test]
-    fn context_fields_are_bounded() {
-        let mut s = "x".repeat(100 * 1024);
-        truncate_field(&mut s);
-        assert_eq!(s.len(), CONTEXT_FIELD_MAX_BYTES);
-
-        // 2-byte chars, 3000 bytes: the cut must keep only whole chars.
-        let mut umlauts = "ä".repeat(1500);
-        truncate_field(&mut umlauts);
-        assert!(umlauts.len() <= CONTEXT_FIELD_MAX_BYTES);
-        let bytes = umlauts.into_bytes();
-        let text = String::from_utf8(bytes).expect("cut left valid UTF-8");
-        assert_eq!(text.chars().last(), Some('ä'), "last char is complete");
-
-        // 3-byte chars: the cap falls inside a char, so the cut must back off.
-        let mut multi = "€".repeat(CONTEXT_FIELD_MAX_BYTES);
-        truncate_field(&mut multi);
-        assert!(multi.len() <= CONTEXT_FIELD_MAX_BYTES);
-        assert!(multi.chars().all(|c| c == '€'));
-
-        let mut short = "abc".to_string();
-        truncate_field(&mut short);
-        assert_eq!(short, "abc");
-    }
-
-    #[test]
-    fn context_bounds_all_but_project() {
-        let long = || "x".repeat(100 * 1024);
-        // Longer than the field bound: the path is carried through unchanged.
-        let c = bounded_context(
-            "p".repeat(3 * CONTEXT_FIELD_MAX_BYTES),
-            long(),
-            long(),
-            long(),
-            long(),
-        );
-        assert_eq!(
-            c.project.len(),
-            3 * CONTEXT_FIELD_MAX_BYTES,
-            "project is untouched"
-        );
-        assert!(c.project.bytes().all(|b| b == b'p'));
-        for (name, field) in [
-            ("branch", &c.branch),
-            ("remote", &c.remote),
-            ("session", &c.session),
-            ("trigger", &c.trigger),
-        ] {
-            assert_eq!(field.len(), CONTEXT_FIELD_MAX_BYTES, "{name} bounded");
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn stderr_keeps_the_tail_not_the_head() {
-        let r = run_plugin(
-            &entry(
-                &[
-                    "sh",
-                    "-c",
-                    "yes log | head -c 200000 >&2; echo FINAL-MARKER >&2; exit 2",
-                ],
-                5_000,
-            ),
-            &ctx(),
+        let r = run(
+            &[
+                "sh",
+                "-c",
+                "yes log | head -c 200000 >&2; echo FINAL-MARKER >&2; exit 2",
+            ],
+            5_000,
         );
         assert!(
             r.error
@@ -612,37 +483,71 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn missing_executable_is_not_found_error() {
-        let r = run_plugin(&entry(&["omp-widget-does-not-exist-9f3a"], 5_000), &ctx());
-        assert!(
-            r.error
-                .as_deref()
-                .is_some_and(|e| e.contains("command not found")),
+    fn no_project_runs_in_home() {
+        let Some(home) = crate::widgets::config::home_dir() else {
+            return;
+        };
+        let mut c = ctx();
+        c.project = String::new();
+        let r = run_plugin(
+            &entry(&["sh", "-c", "printf '\"%s\"' \"$PWD\""], 5_000),
+            &c,
+            |_| {},
+        );
+        let cwd: String = serde_json::from_str(r.stdout.as_deref().unwrap_or("")).expect("json");
+        assert_eq!(
+            std::fs::canonicalize(cwd).ok(),
+            std::fs::canonicalize(home).ok(),
             "{r:?}"
         );
     }
 
     #[test]
-    fn context_outside_repo_has_empty_branch_and_remote() {
-        let c = context(&std::env::temp_dir(), "s", "activate");
-        assert_eq!(c.branch, "");
-        assert_eq!(c.remote, "");
-        assert_eq!(c.trigger, "activate");
+    fn missing_executable_reports_spawn_error() {
+        let r = run(&["omp-widget-does-not-exist-9f3a"], 5_000);
+        assert!(
+            r.error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("could not start omp-widget-does-not-exist-9f3a: ")),
+            "{r:?}"
+        );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn context_in_repo_has_branch_and_fetch_url() {
-        let dir = std::env::temp_dir().join(format!("omp-widgets-repo-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("tmp dir");
-        gix::init(&dir).expect("git init");
-        let config = dir.join(".git/config");
-        let mut text = std::fs::read_to_string(&config).expect("read config");
-        text.push_str("[remote \"origin\"]\n\turl = https://example.test/o/r.git\n");
-        std::fs::write(&config, text).expect("write config");
-        let c = context(&dir, "s", "activate");
-        assert_eq!(c.remote, "https://example.test/o/r.git");
-        assert!(!c.branch.is_empty(), "{c:?}");
-        let _ = std::fs::remove_dir_all(&dir);
+    fn path_keeps_only_absolute_entries() {
+        let got = absolute_path_entries(OsStr::new("/usr/bin::.:bin:/bin:"));
+        assert_eq!(got, OsString::from("/usr/bin:/bin"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_keeps_only_absolute_entries() {
+        let got = absolute_path_entries(OsStr::new(r"C:\Windows;;.;bin;\rooted;C:\x;"));
+        assert_eq!(got, OsString::from(r"C:\Windows;C:\x"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_happy_path_returns_stdout() {
+        // `[1,2]` needs no quoting: an argument with `"` is escaped for the
+        // MSVC runtime, which `cmd`'s `echo` would print literally.
+        let r = run(&["cmd", "/C", "echo", "[1,2]"], 10_000);
+        assert_eq!(r.error, None, "{r:?}");
+        assert_eq!(r.stdout.as_deref().map(str::trim), Some("[1,2]"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_timeout_kills_and_errors() {
+        let start = Instant::now();
+        let r = run(&["cmd", "/C", "ping", "-n", "30", "127.0.0.1"], 1_000);
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "must not wait for ping"
+        );
+        assert_timed_out(&r, 1_000);
     }
 }

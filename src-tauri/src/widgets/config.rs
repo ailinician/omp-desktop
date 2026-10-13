@@ -1,35 +1,124 @@
 //! `<app_config_dir>/widgets.json`: the only source of plugin commands.
 //! A file-level problem (unreadable, not JSON, unknown version) is an
 //! `Err`; a bad entry is skipped and reported in `WidgetConfig::errors`.
+//! Unknown keys and trigger names are reported there too (typo detection)
+//! without invalidating the entry.
 
+use std::collections::BTreeMap;
 use std::path::Path;
+
+use serde::de::IgnoredAny;
 
 pub const TIMEOUT_DEFAULT_MS: u64 = 10_000;
 pub const TIMEOUT_MIN_MS: u64 = 1_000;
 pub const TIMEOUT_MAX_MS: u64 = 60_000;
 pub const INTERVAL_MIN_MS: u64 = 15_000;
 pub const INTERVAL_MAX_MS: u64 = 3_600_000;
-pub const TRIGGERS: [&str; 5] = ["activate", "turn_end", "branch", "manual", "interval"];
 /// Entries past this many in `widgets.json` are not validated; one error reports them.
 pub const MAX_PLUGINS: usize = 32;
 const SUPPORTED_VERSION: u64 = 1;
+/// The triggers a config may list; also the default when `triggers` is absent.
+/// `manual` is always allowed and `interval` follows `intervalMs`.
+const CONFIG_TRIGGERS: [Trigger; 3] = [Trigger::Activate, Trigger::TurnEnd, Trigger::Branch];
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+/// Why a plugin run was started; passed to the plugin as `OMP_WIDGET_TRIGGER`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Trigger {
+    Activate,
+    TurnEnd,
+    Branch,
+    Manual,
+    Interval,
+}
+
+impl Trigger {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Activate => "activate",
+            Self::TurnEnd => "turn_end",
+            Self::Branch => "branch",
+            Self::Manual => "manual",
+            Self::Interval => "interval",
+        }
+    }
+}
+
+/// `tab`: one result per tab, run with that tab's context. `global`: one
+/// result shared by all tabs, run with the active tab's context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    Tab,
+    Global,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginEntry {
     pub id: String,
     pub title: String,
+    /// `~/` expanded; argv0 is absolute or a bare program name.
     pub command: Vec<String>,
+    /// Directory prefix, `~/` expanded; `None` matches every project.
     pub match_path: Option<String>,
+    /// Substring of the remote URL; `None` matches every remote.
     pub match_remote: Option<String>,
-    pub triggers: Vec<String>,
+    /// Config-settable triggers only (`activate`, `turn_end`, `branch`), no
+    /// duplicates. See [`PluginEntry::wants`] for `manual` and `interval`.
+    pub triggers: Vec<Trigger>,
     pub timeout_ms: u64,
     pub interval_ms: Option<u64>,
     pub enabled: bool,
-    pub scope: String,
+    pub scope: Scope,
 }
 
-#[derive(Debug, Default, serde::Serialize)]
+impl PluginEntry {
+    /// Whether the plugin applies to a tab with this project path and remote:
+    /// `match.path` is a directory prefix (`/a/b` matches `/a/b` and `/a/b/c`,
+    /// never `/a/bc`; `\` and `/` are equivalent; `/` matches every absolute
+    /// project), `match.remote` a substring of the remote URL. Both must hold
+    /// when given.
+    pub fn matches(&self, project: &str, remote: &str) -> bool {
+        self.match_path
+            .as_deref()
+            .is_none_or(|p| p.is_empty() || path_matches(p, project))
+            && self
+                .match_remote
+                .as_deref()
+                .is_none_or(|r| remote.contains(r))
+    }
+
+    /// Whether `trigger` may start this plugin: `manual` always, `interval`
+    /// exactly when `intervalMs` is set, the rest per `triggers`.
+    pub fn wants(&self, trigger: Trigger) -> bool {
+        match trigger {
+            Trigger::Manual => true,
+            Trigger::Interval => self.interval_ms.is_some(),
+            t => self.triggers.contains(&t),
+        }
+    }
+}
+
+const fn is_sep(b: u8) -> bool {
+    b == b'/' || b == b'\\'
+}
+
+/// Directory-prefix match on separator boundaries, without allocating.
+fn path_matches(prefix: &str, project: &str) -> bool {
+    let a = prefix.trim_end_matches(['/', '\\']).as_bytes();
+    let b = project.trim_end_matches(['/', '\\']).as_bytes();
+    if a.is_empty() {
+        // `prefix` was only separators: the root matches any absolute path.
+        return !prefix.is_empty() && project.as_bytes().first().is_some_and(|&c| is_sep(c));
+    }
+    b.len() >= a.len()
+        && a.iter()
+            .zip(b)
+            .all(|(&x, &y)| x == y || (is_sep(x) && is_sep(y)))
+        && b.get(a.len()).is_none_or(|&c| is_sep(c))
+}
+
+#[derive(Debug, Default)]
 pub struct WidgetConfig {
     pub plugins: Vec<PluginEntry>,
     pub errors: Vec<String>,
@@ -49,12 +138,20 @@ struct RawEntry {
     interval_ms: Option<u64>,
     enabled: Option<bool>,
     scope: Option<String>,
+    /// Every key not named above; each is reported as a likely typo. serde's
+    /// `flatten` needs a map; only the key names matter.
+    #[serde(flatten)]
+    #[allow(clippy::zero_sized_map_values)]
+    extra: BTreeMap<String, IgnoredAny>,
 }
 
 #[derive(serde::Deserialize)]
 struct RawMatch {
     path: Option<String>,
     remote: Option<String>,
+    #[serde(flatten)]
+    #[allow(clippy::zero_sized_map_values)]
+    extra: BTreeMap<String, IgnoredAny>,
 }
 
 /// Plugin entries stay raw JSON so one malformed entry cannot fail the file.
@@ -62,6 +159,9 @@ struct RawMatch {
 struct RawFile {
     version: Option<u64>,
     plugins: Option<Vec<serde_json::Value>>,
+    #[serde(flatten)]
+    #[allow(clippy::zero_sized_map_values)]
+    extra: BTreeMap<String, IgnoredAny>,
 }
 
 pub fn load(path: &Path) -> Result<WidgetConfig, String> {
@@ -81,6 +181,10 @@ pub fn load(path: &Path) -> Result<WidgetConfig, String> {
         None => return Err("widgets.json: missing \"version\"".to_string()),
     }
     let mut out = WidgetConfig::default();
+    for key in file.extra.keys() {
+        out.errors
+            .push(format!("widgets.json: unknown key \"{key}\""));
+    }
     let entries = file.plugins.unwrap_or_default();
     if entries.len() > MAX_PLUGINS {
         out.errors.push(format!(
@@ -91,7 +195,7 @@ pub fn load(path: &Path) -> Result<WidgetConfig, String> {
     for (i, value) in entries.into_iter().take(MAX_PLUGINS).enumerate() {
         let result = serde_json::from_value::<RawEntry>(value)
             .map_err(|e| format!("plugin #{i}: {e}"))
-            .and_then(|raw| validate(raw, i, &out.plugins));
+            .and_then(|raw| validate(raw, i, &out.plugins, &mut out.errors));
         match result {
             Ok(entry) => out.plugins.push(entry),
             Err(e) => out.errors.push(e),
@@ -100,23 +204,8 @@ pub fn load(path: &Path) -> Result<WidgetConfig, String> {
     Ok(out)
 }
 
-/// Checks the IPC arguments of `widget_context` / `run_widget_plugin`: a known
-/// trigger, and a project path that is empty (tab without project) or an
-/// absolute existing directory.
-pub fn validate_widget_args(path: &str, trigger: &str) -> Result<(), String> {
-    if !TRIGGERS.contains(&trigger) {
-        return Err("invalid trigger".to_string());
-    }
-    if !path.is_empty() {
-        let p = Path::new(path);
-        if !p.is_absolute() || !p.is_dir() {
-            return Err("project path must be an absolute directory".to_string());
-        }
-    }
-    Ok(())
-}
-
-fn id_ok(id: &str) -> bool {
+/// `[a-z0-9-]{1,32}`: the plugin id grammar, also checked on ids arriving over IPC.
+pub fn id_ok(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 32
         && id
@@ -124,7 +213,9 @@ fn id_ok(id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-fn home_dir() -> Option<String> {
+/// The user's home directory from `HOME` (`USERPROFILE` on Windows); `None`
+/// when unset, empty or not UTF-8.
+pub fn home_dir() -> Option<String> {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(var)
         .and_then(|h| h.into_string().ok())
@@ -144,43 +235,92 @@ fn expand_home(command: &mut [String], home: Option<&str>) -> Result<(), ()> {
     Ok(())
 }
 
-fn validate(raw: RawEntry, index: usize, seen: &[PluginEntry]) -> Result<PluginEntry, String> {
+/// Parses `triggers`; unknown names and `interval` become `warnings`, the
+/// entry stays valid with the rest.
+fn parse_triggers(list: Option<Vec<String>>, id: &str, warnings: &mut Vec<String>) -> Vec<Trigger> {
+    let Some(list) = list else {
+        return Vec::from(CONFIG_TRIGGERS);
+    };
+    let mut out = Vec::with_capacity(list.len().min(CONFIG_TRIGGERS.len()));
+    for name in list {
+        let trigger = match name.as_str() {
+            "activate" => Trigger::Activate,
+            "turn_end" => Trigger::TurnEnd,
+            "branch" => Trigger::Branch,
+            // Always allowed; listing it is harmless.
+            "manual" => continue,
+            "interval" => {
+                warnings.push(format!(
+                    "plugin \"{id}\": \"interval\" is not a valid trigger; set \"intervalMs\" instead"
+                ));
+                continue;
+            }
+            _ => {
+                warnings.push(format!(
+                    "plugin \"{id}\": unknown trigger \"{name}\" (expected activate, turn_end, branch or manual)"
+                ));
+                continue;
+            }
+        };
+        if !out.contains(&trigger) {
+            out.push(trigger);
+        }
+    }
+    out
+}
+
+/// Validates one entry. Problems that keep the entry usable (unknown keys,
+/// unknown triggers) go to `warnings`; the rest reject the entry.
+fn validate(
+    raw: RawEntry,
+    index: usize,
+    seen: &[PluginEntry],
+    warnings: &mut Vec<String>,
+) -> Result<PluginEntry, String> {
     let id = raw.id.unwrap_or_default();
-    if !id_ok(&id) {
+    let valid_id = id_ok(&id);
+    let label = if valid_id {
+        format!("plugin \"{id}\"")
+    } else {
+        format!("plugin #{index}")
+    };
+    for key in raw.extra.keys() {
+        warnings.push(format!("{label}: unknown key \"{key}\""));
+    }
+    if let Some(m) = &raw.matcher {
+        for key in m.extra.keys() {
+            warnings.push(format!("{label}: unknown key \"match.{key}\""));
+        }
+    }
+    if !valid_id {
         return Err(format!(
             "plugin #{index}: id \"{id}\" must match [a-z0-9-]{{1,32}}"
         ));
     }
+    // ≤ MAX_PLUGINS entries: a linear scan per entry is cheaper than a set.
     if seen.iter().any(|p| p.id == id) {
-        return Err(format!("plugin \"{id}\": duplicate id"));
+        return Err(format!("{label}: duplicate id"));
     }
     let mut command = raw.command.unwrap_or_default();
     if command.first().is_none_or(String::is_empty) {
-        return Err(format!(
-            "plugin \"{id}\": command must be a non-empty argv array"
-        ));
+        return Err(format!("{label}: command must be a non-empty argv array"));
     }
-    expand_home(&mut command, home_dir().as_deref())
-        .map_err(|()| format!("plugin \"{id}\": cannot expand ~: no home directory"))?;
+    let home = home_dir();
+    expand_home(&mut command, home.as_deref())
+        .map_err(|()| format!("{label}: cannot expand ~: no home directory"))?;
     // The working directory is the untrusted project: a relative program path
     // (`./x`, `bin/x`) would resolve inside it.
     let argv0 = command.first().map_or("", String::as_str);
     if argv0.contains(['/', '\\']) && !Path::new(argv0).is_absolute() {
         return Err(format!(
-            "plugin \"{id}\": command path must be absolute or a bare program name"
+            "{label}: command path must be absolute or a bare program name"
         ));
     }
-    let mut triggers: Vec<String> = raw.triggers.map_or_else(
-        || TRIGGERS.map(String::from).to_vec(),
-        |list| {
-            list.into_iter()
-                .filter(|t| TRIGGERS.contains(&t.as_str()))
-                .collect()
-        },
-    );
-    if !triggers.iter().any(|t| t == "manual") {
-        triggers.push("manual".to_string());
-    }
+    let scope = match raw.scope.as_deref() {
+        None | Some("tab") => Scope::Tab,
+        Some("global") => Scope::Global,
+        Some(_) => return Err(format!("{label}: scope must be \"tab\" or \"global\"")),
+    };
     let timeout_ms = raw
         .timeout_ms
         .unwrap_or(TIMEOUT_DEFAULT_MS)
@@ -189,25 +329,22 @@ fn validate(raw: RawEntry, index: usize, seen: &[PluginEntry]) -> Result<PluginE
         .interval_ms
         .filter(|&v| v > 0)
         .map(|v| v.clamp(INTERVAL_MIN_MS, INTERVAL_MAX_MS));
-    let (mut match_path, match_remote) = raw.matcher.map_or((None, None), |m| (m.path, m.remote));
+    let (match_path, match_remote) = raw.matcher.map_or((None, None), |m| (m.path, m.remote));
+    // An empty matcher matches everything, exactly like an absent one.
+    let mut match_path = match_path.filter(|p| !p.is_empty());
+    let match_remote = match_remote.filter(|r| !r.is_empty());
     // Same `~/` rule as for the command: a config can describe its folders
     // portably (`~/GIT/work`).
     if let Some(p) = match_path.as_mut() {
-        expand_home(std::slice::from_mut(p), home_dir().as_deref()).map_err(|()| {
-            format!("plugin \"{id}\": cannot expand ~ in match.path: no home directory")
-        })?;
+        expand_home(std::slice::from_mut(p), home.as_deref())
+            .map_err(|()| format!("{label}: cannot expand ~ in match.path: no home directory"))?;
     }
+    let triggers = parse_triggers(raw.triggers, &id, warnings);
     // `title` falls back to the id and the entry keeps both, so one copy is unavoidable.
     let title = match raw.title {
         Some(t) if !t.is_empty() => t,
         _ => id.clone(),
     };
-    let scope = raw.scope.unwrap_or_else(|| "tab".to_string());
-    if scope != "tab" && scope != "global" {
-        return Err(format!(
-            "plugin \"{id}\": scope must be \"tab\" or \"global\""
-        ));
-    }
     Ok(PluginEntry {
         id,
         title,
@@ -225,68 +362,185 @@ fn validate(raw: RawEntry, index: usize, seen: &[PluginEntry]) -> Result<PluginE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
-    fn tmp(name: &str, body: &[u8]) -> std::path::PathBuf {
+    /// A `widgets.json` in its own temp dir, removed on drop.
+    struct TmpConfig {
+        dir: PathBuf,
+        path: PathBuf,
+    }
+
+    impl Drop for TmpConfig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn tmp(name: &str, body: &[u8]) -> TmpConfig {
         let dir = std::env::temp_dir().join(format!("omp-widgets-{}-{}", std::process::id(), name));
         std::fs::create_dir_all(&dir).expect("tmp dir");
-        let p = dir.join("widgets.json");
-        std::fs::write(&p, body).expect("write");
-        p
+        let path = dir.join("widgets.json");
+        std::fs::write(&path, body).expect("write");
+        TmpConfig { dir, path }
+    }
+
+    fn load_body(name: &str, body: &[u8]) -> Result<WidgetConfig, String> {
+        load(&tmp(name, body).path)
+    }
+
+    fn ids(c: &WidgetConfig) -> Vec<&str> {
+        c.plugins.iter().map(|p| p.id.as_str()).collect()
+    }
+
+    fn plugin(match_path: Option<&str>, match_remote: Option<&str>) -> PluginEntry {
+        PluginEntry {
+            id: "p".into(),
+            title: "P".into(),
+            command: vec!["x".into()],
+            match_path: match_path.map(String::from),
+            match_remote: match_remote.map(String::from),
+            triggers: vec![Trigger::Activate],
+            timeout_ms: TIMEOUT_MIN_MS,
+            interval_ms: None,
+            enabled: true,
+            scope: Scope::Tab,
+        }
     }
 
     #[test]
     fn missing_file_is_empty_config() {
         let p = std::env::temp_dir().join("omp-widgets-does-not-exist/widgets.json");
         let c = load(&p).expect("missing file is ok");
-        assert!(c.plugins.is_empty());
+        assert_eq!(c.plugins, Vec::<PluginEntry>::new());
         assert_eq!(c.errors, Vec::<String>::new());
     }
 
     #[test]
-    fn config_rejects_invalid_json() {
-        let p = tmp("bom", b"\xEF\xBB\xBF{\"version\":1,\"plugins\":[],}");
-        let err = load(&p).expect_err("trailing comma / BOM must fail");
+    fn tmp_config_dir_is_removed_on_drop() {
+        let t = tmp("drop", b"{}");
+        let dir = t.dir.clone();
+        assert!(dir.is_dir());
+        drop(t);
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn config_rejects_a_bom() {
+        let err = load_body("bom", b"\xEF\xBB\xBF{\"version\":1,\"plugins\":[]}")
+            .expect_err("BOM must fail");
+        assert!(err.contains("widgets.json"), "{err}");
+    }
+
+    #[test]
+    fn config_rejects_a_trailing_comma() {
+        let err = load_body("comma", br#"{"version":1,"plugins":[],}"#)
+            .expect_err("trailing comma must fail");
         assert!(err.contains("widgets.json"), "{err}");
     }
 
     #[test]
     fn config_rejects_unknown_version() {
-        let p = tmp("v2", br#"{"version":2,"plugins":[]}"#);
-        let err = load(&p).expect_err("version 2 unsupported");
+        let err = load_body("v2", br#"{"version":2,"plugins":[]}"#).expect_err("version 2");
         assert!(err.contains("version 2"), "{err}");
     }
 
     #[test]
+    fn config_rejects_missing_version() {
+        let err = load_body("nov", br#"{"plugins":[]}"#).expect_err("no version");
+        assert_eq!(err, "widgets.json: missing \"version\"");
+    }
+
+    #[test]
     fn entry_defaults_and_clamps() {
-        let p = tmp("defaults", br#"{"version":1,"plugins":[
+        let c = load_body(
+            "defaults",
+            br#"{"version":1,"plugins":[
             {"id":"git","title":"Git","command":["bash","x.sh"]},
             {"id":"slow","title":"Slow","command":["sleep"],"timeoutMs":999999,"triggers":["branch"],"enabled":false},
             {"id":"int","title":"Interval","command":["date"],"intervalMs":1000},
-            {"id":"big","title":"Big","command":["date"],"intervalMs":1000000000}
-        ]}"#);
-        let c = load(&p).expect("ok");
-        assert_eq!(c.plugins.len(), 4);
+            {"id":"big","title":"Big","command":["date"],"intervalMs":1000000000},
+            {"id":"fast","command":["date"],"timeoutMs":5},
+            {"id":"zero","command":["date"],"intervalMs":0}
+        ]}"#,
+        )
+        .expect("ok");
+        assert_eq!(c.errors, Vec::<String>::new());
+        assert_eq!(c.plugins.len(), 6);
         let git = &c.plugins[0];
         assert_eq!(git.timeout_ms, TIMEOUT_DEFAULT_MS);
-        assert_eq!(git.triggers, TRIGGERS.map(String::from).to_vec());
+        assert_eq!(git.triggers, Vec::from(CONFIG_TRIGGERS));
         assert!(git.enabled);
         assert_eq!(git.interval_ms, None);
+        assert_eq!(git.scope, Scope::Tab);
         let slow = &c.plugins[1];
         assert_eq!(slow.timeout_ms, TIMEOUT_MAX_MS);
-        assert_eq!(
-            slow.triggers,
-            vec!["branch".to_string(), "manual".to_string()]
-        );
+        assert_eq!(slow.triggers, vec![Trigger::Branch]);
         assert!(!slow.enabled);
-        let int = &c.plugins[2];
-        assert_eq!(int.interval_ms, Some(INTERVAL_MIN_MS));
-        let big = &c.plugins[3];
-        assert_eq!(big.interval_ms, Some(INTERVAL_MAX_MS));
+        assert_eq!(c.plugins[2].interval_ms, Some(INTERVAL_MIN_MS));
+        assert_eq!(c.plugins[3].interval_ms, Some(INTERVAL_MAX_MS));
+        assert_eq!(
+            c.plugins[4].timeout_ms, TIMEOUT_MIN_MS,
+            "raised to the minimum"
+        );
+        assert_eq!(c.plugins[4].title, "fast", "title falls back to the id");
+        assert_eq!(c.plugins[5].interval_ms, None, "0 means no interval");
+    }
+
+    #[test]
+    fn interval_and_unknown_triggers_are_reported_and_dropped() {
+        let c = load_body(
+            "triggers",
+            br#"{"version":1,"plugins":[
+            {"id":"a","command":["true"],"triggers":["interval","turnEnd","branch","manual","branch"]},
+            {"id":"b","command":["true"],"triggers":[]}
+        ]}"#,
+        )
+        .expect("ok");
+        assert_eq!(ids(&c), vec!["a", "b"], "the entries stay valid");
+        assert_eq!(c.plugins[0].triggers, vec![Trigger::Branch], "deduplicated");
+        assert_eq!(c.plugins[1].triggers, Vec::<Trigger>::new());
+        assert_eq!(
+            c.errors,
+            vec![
+                "plugin \"a\": \"interval\" is not a valid trigger; set \"intervalMs\" instead"
+                    .to_string(),
+                "plugin \"a\": unknown trigger \"turnEnd\" (expected activate, turn_end, branch or manual)"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_without_dropping_the_entry() {
+        let c = load_body(
+            "keys",
+            br#"{"version":1,"plugin":[],"plugins":[
+            {"id":"a","command":["true"],"timeout":5000,"interval_ms":20000,"match":{"path":"/x","remotes":"y"}},
+            {"id":"Bad","cmd":["true"]}
+        ]}"#,
+        )
+        .expect("ok");
+        assert_eq!(ids(&c), vec!["a"]);
+        let a = &c.plugins[0];
+        assert_eq!(a.timeout_ms, TIMEOUT_DEFAULT_MS, "the typo is not read");
+        assert_eq!(a.interval_ms, None);
+        assert_eq!(a.match_path.as_deref(), Some("/x"));
+        assert_eq!(
+            c.errors,
+            vec![
+                "widgets.json: unknown key \"plugin\"".to_string(),
+                "plugin \"a\": unknown key \"interval_ms\"".to_string(),
+                "plugin \"a\": unknown key \"timeout\"".to_string(),
+                "plugin \"a\": unknown key \"match.remotes\"".to_string(),
+                "plugin #1: unknown key \"cmd\"".to_string(),
+                "plugin #1: id \"Bad\" must match [a-z0-9-]{1,32}".to_string(),
+            ]
+        );
     }
 
     #[test]
     fn bad_entries_are_reported_not_fatal() {
-        let p = tmp(
+        let c = load_body(
             "bad",
             br#"{"version":1,"plugins":[
             {"id":"Bad Id","title":"x","command":["a"]},
@@ -295,12 +549,10 @@ mod tests {
             {"id":"nocmd","title":"x","command":[]},
             {"id":"ok","title":"Ok","command":["true"]}
         ]}"#,
-        );
-        let c = load(&p).expect("ok");
-        assert_eq!(
-            c.plugins.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-            vec!["dup", "ok"]
-        );
+        )
+        .expect("ok");
+        assert_eq!(ids(&c), vec!["dup", "ok"]);
+        assert_eq!(c.plugins[0].title, "x", "first duplicate wins");
         assert_eq!(c.errors.len(), 3, "{:?}", c.errors);
         assert!(c.errors.iter().any(|e| e.contains("Bad Id")));
         assert!(c.errors.iter().any(|e| e.contains("duplicate")));
@@ -323,11 +575,8 @@ mod tests {
             {{"id":"bare","command":["bash"]}}
         ]}}"#
         );
-        let c = load(&tmp("argv0", body.as_bytes())).expect("ok");
-        assert_eq!(
-            c.plugins.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-            vec!["abs", "bare"]
-        );
+        let c = load_body("argv0", body.as_bytes()).expect("ok");
+        assert_eq!(ids(&c), vec!["abs", "bare"]);
         assert_eq!(c.errors.len(), 3, "{:?}", c.errors);
         assert!(
             c.errors
@@ -343,7 +592,7 @@ mod tests {
         let mut cmd = ["~/bin/run", "~/conf.json", "~x", "~", "a~/b"].map(String::from);
         expand_home(&mut cmd, Some("/home/u")).expect("home set");
         assert_eq!(
-            cmd.to_vec(),
+            cmd,
             [
                 Path::new("/home/u").join("bin/run"),
                 Path::new("/home/u").join("conf.json"),
@@ -357,20 +606,23 @@ mod tests {
 
     #[test]
     fn tilde_without_home_is_an_error_but_plain_commands_pass() {
-        let mut cmd = vec!["~/x".to_string()];
+        let mut cmd = ["~/x".to_string()];
         assert!(expand_home(&mut cmd, None).is_err());
-        let mut plain = vec!["bash".to_string(), "~x".to_string()];
+        let mut plain = ["bash".to_string(), "~x".to_string()];
         assert!(expand_home(&mut plain, None).is_ok());
     }
 
     #[test]
     fn tilde_command_passes_the_absolute_check() {
         let Some(home) = home_dir() else { return };
-        let body = br#"{"version":1,"plugins":[
+        let c = load_body(
+            "tilde",
+            br#"{"version":1,"plugins":[
             {"id":"t","command":["~/.omp-desktop/widgets/x","~/arg"]},
             {"id":"u","command":["~x"]}
-        ]}"#;
-        let c = load(&tmp("tilde", body)).expect("ok");
+        ]}"#,
+        )
+        .expect("ok");
         let expected = |rest: &str| Path::new(&home).join(rest).to_string_lossy().into_owned();
         assert_eq!(c.plugins.len(), 2, "{:?}", c.errors);
         assert_eq!(
@@ -384,10 +636,13 @@ mod tests {
     #[test]
     fn tilde_in_match_path_is_expanded() {
         let Some(home) = home_dir() else { return };
-        let body = br#"{"version":1,"plugins":[
+        let c = load_body(
+            "tilde-match",
+            br#"{"version":1,"plugins":[
             {"id":"t","command":["true"],"match":{"path":"~/GIT/work","remote":"~/kept"}}
-        ]}"#;
-        let c = load(&tmp("tilde-match", body)).expect("ok");
+        ]}"#,
+        )
+        .expect("ok");
         assert_eq!(
             c.plugins[0].match_path.as_deref(),
             Some(Path::new(&home).join("GIT/work").to_string_lossy().as_ref())
@@ -397,56 +652,42 @@ mod tests {
     }
 
     #[test]
+    fn empty_matchers_are_absent() {
+        let c = load_body(
+            "empty-match",
+            br#"{"version":1,"plugins":[{"id":"t","command":["true"],"match":{"path":"","remote":""}}]}"#,
+        )
+        .expect("ok");
+        assert_eq!(c.plugins[0].match_path, None);
+        assert_eq!(c.plugins[0].match_remote, None);
+    }
+
+    #[test]
     fn plugin_count_is_capped() {
         let entries: Vec<String> = (0..=MAX_PLUGINS)
             .map(|i| format!(r#"{{"id":"p{i}","command":["true"]}}"#))
             .collect();
         let body = format!(r#"{{"version":1,"plugins":[{}]}}"#, entries.join(","));
-        let c = load(&tmp("cap", body.as_bytes())).expect("ok");
+        let c = load_body("cap", body.as_bytes()).expect("ok");
         assert_eq!(c.plugins.len(), MAX_PLUGINS);
-        assert_eq!(c.errors.len(), 1, "{:?}", c.errors);
-        assert!(
-            c.errors[0].contains("1 plugin entries ignored"),
-            "{:?}",
-            c.errors
-        );
-    }
-
-    #[test]
-    fn widget_args_are_validated() {
-        let dir = std::env::temp_dir();
-        let dir = dir.to_str().expect("utf-8 temp dir");
-        assert_eq!(validate_widget_args(dir, "manual"), Ok(()));
-        assert_eq!(validate_widget_args("", "turn_end"), Ok(()), "no project");
         assert_eq!(
-            validate_widget_args(dir, "rm -rf"),
-            Err("invalid trigger".to_string())
-        );
-        let msg = Err("project path must be an absolute directory".to_string());
-        assert_eq!(validate_widget_args("relative/dir", "manual"), msg);
-        // "." exists, so only the absoluteness check rejects it.
-        assert_eq!(validate_widget_args(".", "manual"), msg);
-        assert_eq!(
-            validate_widget_args(&format!("{dir}/omp-widgets-no-such-dir"), "manual"),
-            msg
+            c.errors,
+            vec!["widgets.json: 1 plugin entries ignored (at most 32 are read)".to_string()]
         );
     }
 
     #[test]
     fn bad_entry_types_are_isolated() {
-        let p = tmp(
+        let c = load_body(
             "types",
             br#"{"version":1,"plugins":[
             {"id":"bad","command":"true"},
             {"id":"ok","command":["true"]},
             {"id":"x","title":5,"command":["a"]}
         ]}"#,
-        );
-        let c = load(&p).expect("entry type errors are not fatal");
-        assert_eq!(
-            c.plugins.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-            vec!["ok"]
-        );
+        )
+        .expect("entry type errors are not fatal");
+        assert_eq!(ids(&c), vec!["ok"]);
         assert_eq!(c.errors.len(), 2, "{:?}", c.errors);
         assert!(c.errors.iter().any(|e| e.contains("#0")), "{:?}", c.errors);
         assert!(c.errors.iter().any(|e| e.contains("#2")), "{:?}", c.errors);
@@ -454,7 +695,7 @@ mod tests {
 
     #[test]
     fn scope_defaults_to_tab_and_rejects_unknown_values() {
-        let p = tmp(
+        let c = load_body(
             "scope",
             br#"{"version":1,"plugins":[
             {"id":"a","command":["true"]},
@@ -462,19 +703,124 @@ mod tests {
             {"id":"c","command":["true"],"scope":"tab"},
             {"id":"d","command":["true"],"scope":"window"}
         ]}"#,
+        )
+        .expect("ok");
+        let scopes: Vec<_> = c.plugins.iter().map(|p| (p.id.as_str(), p.scope)).collect();
+        assert_eq!(
+            scopes,
+            vec![("a", Scope::Tab), ("b", Scope::Global), ("c", Scope::Tab)]
         );
-        let c = load(&p).expect("ok");
-        let scopes: Vec<_> = c
-            .plugins
-            .iter()
-            .map(|p| (p.id.as_str(), p.scope.as_str()))
-            .collect();
-        assert_eq!(scopes, vec![("a", "tab"), ("b", "global"), ("c", "tab")]);
-        assert_eq!(c.errors.len(), 1, "{:?}", c.errors);
+        assert_eq!(
+            c.errors,
+            vec!["plugin \"d\": scope must be \"tab\" or \"global\"".to_string()]
+        );
+    }
+
+    #[test]
+    fn trigger_names_round_trip_with_serde() {
+        for t in [
+            Trigger::Activate,
+            Trigger::TurnEnd,
+            Trigger::Branch,
+            Trigger::Manual,
+            Trigger::Interval,
+        ] {
+            assert_eq!(
+                serde_json::to_value(t).expect("serialize"),
+                serde_json::Value::from(t.as_str())
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(Scope::Global).expect("serialize"),
+            serde_json::Value::from("global")
+        );
+    }
+
+    #[test]
+    fn no_matcher_applies_everywhere() {
+        let p = plugin(None, None);
+        assert!(p.matches("/a", ""));
+        assert!(p.matches("", ""), "tab without a project");
+    }
+
+    #[test]
+    fn path_prefix_and_remote_substring_must_both_match_when_given() {
+        let a = plugin(Some("/Users/me/GIT"), None);
+        let b = plugin(None, Some("gitlab.example"));
+        let c = plugin(Some("/Users/me/GIT"), Some("gitlab.example"));
+        let applicable = |project: &str, remote: &str| {
+            [("a", &a), ("b", &b), ("c", &c)]
+                .into_iter()
+                .filter(|(_, p)| p.matches(project, remote))
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>()
+        };
+        let remote = "git@gitlab.example:g/x.git";
+        assert_eq!(applicable("/Users/me/GIT/x", remote), vec!["a", "b", "c"]);
+        assert_eq!(applicable("/tmp/x", remote), vec!["b"]);
+        assert_eq!(applicable("/Users/me/GIT/x", ""), vec!["a"]);
+    }
+
+    #[test]
+    fn path_match_is_prefix_on_separators_not_characters() {
+        let p = plugin(Some("/Users/me/GIT"), None);
+        assert!(!p.matches("/Users/me/GITHUB/x", ""));
+        assert!(p.matches("/Users/me/GIT", ""), "the folder itself");
+        assert!(p.matches("/Users/me/GIT/", ""), "trailing separator");
+        assert!(!p.matches("/Users/me", ""), "a parent is not inside");
+        assert!(!p.matches("", ""), "tab without a project");
+        assert!(plugin(Some("/Users/me/GIT/"), None).matches("/Users/me/GIT/x", ""));
+    }
+
+    #[test]
+    fn path_match_normalises_backslashes() {
+        let p = plugin(Some("C:\\Users\\me\\GIT"), None);
+        assert!(p.matches("C:\\Users\\me\\GIT\\x", ""));
+        assert!(p.matches("C:/Users/me/GIT/x", ""));
+        assert!(!p.matches("C:\\Users\\me\\GITHUB", ""));
+        assert!(plugin(Some("/a/b"), None).matches("\\a\\b\\c", ""));
+    }
+
+    #[test]
+    fn root_match_path_matches_any_absolute_project_only() {
+        let p = plugin(Some("/"), None);
+        assert!(p.matches("/a/b", ""));
+        assert!(p.matches("/", ""));
+        assert!(p.matches("\\a", ""));
+        assert!(!p.matches("relative/x", ""));
+        assert!(!p.matches("", ""));
+        assert!(plugin(Some("//"), None).matches("/a", ""));
+    }
+
+    #[test]
+    fn remote_match_is_a_plain_substring() {
+        let p = plugin(None, Some("example.com/team"));
+        assert!(p.matches("", "https://example.com/team/x.git"));
+        assert!(!p.matches("", "https://example.com/other/x.git"));
+        assert!(!p.matches("", ""), "no remote");
+    }
+
+    #[test]
+    fn wants_honours_the_list_and_always_allows_manual() {
+        let mut p = plugin(None, None);
+        p.triggers = vec![Trigger::Branch];
+        assert!(p.wants(Trigger::Branch));
+        assert!(!p.wants(Trigger::TurnEnd));
+        assert!(!p.wants(Trigger::Activate));
+        assert!(p.wants(Trigger::Manual));
+        p.triggers.clear();
+        assert!(p.wants(Trigger::Manual));
+    }
+
+    #[test]
+    fn wants_interval_exactly_when_interval_ms_is_set() {
+        let mut p = plugin(None, None);
+        assert!(!p.wants(Trigger::Interval));
+        p.interval_ms = Some(60_000);
+        p.triggers.clear();
         assert!(
-            c.errors[0].contains("\"d\"") && c.errors[0].contains("scope"),
-            "{:?}",
-            c.errors
+            p.wants(Trigger::Interval),
+            "interval ignores the triggers list"
         );
     }
 }

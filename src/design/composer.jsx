@@ -28,7 +28,7 @@ function hintKeyFor(actionId, fallback) {
 }
 
 // ── The composer (input + plan/steer modes + send) ────────────────────
-function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow }) {
+function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, appendInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow }) {
   // Drafts are per tab (issue #28). The composer stays mounted across tab
   // switches and keeps one draft per session id (app/session-ui.js
   // DRAFT_IDLE): text, pending image attachments (sent alongside the next
@@ -235,6 +235,17 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
     const next = trimmed && !trimmed.startsWith("/") ? draftInsert.text + trimmed : draftInsert.text;
     replaceDraft(next);
   }, [draftInsert?.nonce]);
+
+  // Rail widget inserts (app-live.jsx handleWidgetInsert) go *after* the
+  // current draft — never in front of it and never replacing it, a
+  // `/command` draft included (OMP_WIDGETS.appendToDraft). Same `nonce`
+  // keying and no-replay-after-remount rule as promptInsert below.
+  const seenAppendRef = React.useRef(appendInsert?.nonce);
+  React.useEffect(() => {
+    if (!appendInsert || appendInsert.nonce === seenAppendRef.current) return;
+    seenAppendRef.current = appendInsert.nonce;
+    replaceDraft(window.OMP_WIDGETS.appendToDraft(text, appendInsert.text));
+  }, [appendInsert?.nonce]);
 
   // Prompt-history picker (Ctrl+Up modal) hands a pick here the same way
   // ⌘K's draftInsert does — keyed on `nonce` so picking the same prompt

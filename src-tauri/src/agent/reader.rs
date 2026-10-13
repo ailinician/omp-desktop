@@ -8,6 +8,7 @@ use std::thread;
 use tauri::{AppHandle, Emitter};
 
 use crate::approval::{self, RuleBook};
+use crate::redaction::{normalized_key_ends_with, REDACTED_KEYS, REDACTED_PLACEHOLDER};
 
 use super::inner::BridgeInner;
 use super::journal::EventJournal;
@@ -15,39 +16,6 @@ use super::journal::EventJournal;
 /// Hard cap on a single RPC line. Defends the reader thread from runaway
 /// agent output that could otherwise allocate unbounded memory.
 const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
-
-/// Object keys whose values are redacted before a frame ever reaches the
-/// webview. Matched case-insensitively after stripping `_`/`-` separators,
-/// so `Authorization`, `api_key`, `api-key`, and `apiKey` are all caught by
-/// one entry. Matching is by *suffix*, not exact equality, so compound
-/// provider-credential spellings like `x-api-key`, `OPENAI_API_KEY`, and
-/// `client_secret` (normalizing to `xapikey`, `openaiapikey`, and
-/// `clientsecret`) are caught by the `apikey`/`secret` entries without
-/// needing one entry per provider. A few spellings put the sensitive word
-/// anywhere but the suffix (`secretkey`, `accesskey`, `privatekey`,
-/// `apisecret`) — those get their own explicit entries. `headers` is
-/// redacted wholesale (not walked) because a model provider's request
-/// headers routinely carry `Authorization` alongside harmless entries, and
-/// there is no benefit to preserving the harmless ones once the object as
-/// a whole must be treated as sensitive.
-const REDACTED_KEYS: &[&str] = &[
-    "headers",
-    "authorization",
-    "apikey",
-    "accesstoken",
-    "refreshtoken",
-    "idtoken",
-    "password",
-    "secret",
-    "credential",
-    "credentials",
-    "secretkey",
-    "accesskey",
-    "privatekey",
-    "apisecret",
-];
-
-const REDACTED_PLACEHOLDER: &str = "[REDACTED]";
 
 /// One line forwarded to the frontend, stamped with its journal `seq`. Kept
 /// in sync with `replay_events`'s `ReplayEvent` — both sides of the wire
@@ -57,29 +25,6 @@ const REDACTED_PLACEHOLDER: &str = "[REDACTED]";
 struct LineEvent<'a> {
     seq: u64,
     text: &'a str,
-}
-
-/// Whether `key`'s normalized form (ASCII-lowercased, with `_` and `-`
-/// removed) ends with `suffix`.
-///
-/// `suffix` must already be lowercase and separator-free — every
-/// [`REDACTED_KEYS`] entry is. Compares right-to-left over `key`'s bytes so
-/// no normalized `String` is ever materialized: this runs for every object
-/// key of every JSON frame on the stdout reader thread, the hottest path in
-/// the app, where a per-key heap allocation is pure waste.
-///
-/// Non-ASCII bytes can never match a lowercase-ASCII `suffix`, so comparing
-/// ASCII-lowercased bytes is equivalent to the previous `char`-wise
-/// `to_lowercase` fold for every input that could possibly match.
-fn normalized_key_ends_with(key: &str, suffix: &str) -> bool {
-    let mut key_bytes = key.bytes().rev().filter(|b| *b != b'_' && *b != b'-');
-    for want in suffix.bytes().rev() {
-        match key_bytes.next() {
-            Some(got) if got.to_ascii_lowercase() == want => {}
-            _ => return false,
-        }
-    }
-    true
 }
 
 /// Recursively replace the value of any object key matching [`REDACTED_KEYS`]
@@ -325,6 +270,17 @@ pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
                     let seq = journal.lock().map_or(0, |mut j| j.push(shared.clone()));
                     if should_emit(&alive) {
                         let _ = app.emit(&line_event, LineEvent { seq, text: &shared });
+                        // Rail widgets with a `turn_end` trigger rerun after
+                        // the turn's last frame. Reuses the parse above; other
+                        // frames cost one map lookup and a string compare.
+                        if parsed
+                            .as_ref()
+                            .and_then(|frame| frame.get("type"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some("agent_end")
+                        {
+                            crate::widgets::notify_turn_end(&app, &sid);
+                        }
                     }
                 }
                 Err(e) => {
@@ -589,49 +545,6 @@ mod tests {
                 !out.contains("should-not-survive"),
                 "key {key} leaked a secret"
             );
-        }
-    }
-
-    /// The allocation-free matcher must agree with the obvious
-    /// materialize-then-compare form it replaced, including on the
-    /// separator, case, and non-ASCII edge cases.
-    #[test]
-    fn normalized_key_ends_with_matches_reference_normalization() {
-        fn reference(key: &str, suffix: &str) -> bool {
-            let normalized: String = key
-                .chars()
-                .filter(|c| *c != '_' && *c != '-')
-                .flat_map(char::to_lowercase)
-                .collect();
-            normalized.ends_with(suffix)
-        }
-
-        let keys = [
-            "api_key",
-            "api-key",
-            "apiKey",
-            "API_KEY",
-            "x-api-key",
-            "OPENAI_API_KEY",
-            "client_secret",
-            "input_tokens",
-            "output_tokens",
-            "monkey",
-            "key",
-            "",
-            "_-_-",
-            "clé_api_key",
-            "ключ",
-            "aPiKeY",
-        ];
-        for key in keys {
-            for suffix in REDACTED_KEYS {
-                assert_eq!(
-                    normalized_key_ends_with(key, suffix),
-                    reference(key, suffix),
-                    "mismatch for key {key:?} / suffix {suffix:?}"
-                );
-            }
         }
     }
 

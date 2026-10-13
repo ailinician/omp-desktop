@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """omp-desktop rail widget that calls one MCP tool over stdio and shows its
-text result. Run with `uv run --with mcp mcp-tool.py` or install `mcp`.
-Edit SERVER and TOOL in main(); arguments come from the widget context."""
+text result. Run with `uv run --no-project --no-config --with mcp mcp-tool.py`
+(the flags keep uv from reading the untrusted project's pyproject.toml,
+uv.toml or .venv) or install `mcp`. Edit SERVER and TOOL in main();
+arguments come from the widget context. Contract: docs/widgets.md."""
 import asyncio, json, os, sys
 
 async def main():
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
-    SERVER = StdioServerParameters(command="npx", args=["-y", "@modelcontextprotocol/server-everything"])
+    # cwd = home, not the project: npx would otherwise read the project's
+    # .npmrc and prefer its node_modules.
+    SERVER = StdioServerParameters(command="npx", args=["-y", "@modelcontextprotocol/server-everything"],
+                                   cwd=os.path.expanduser("~"))
     TOOL, ARGS = "echo", {"message": f"branch {os.environ.get('OMP_WIDGET_BRANCH','')}"}
 
     async with stdio_client(SERVER) as (r, w):

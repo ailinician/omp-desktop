@@ -341,6 +341,9 @@ function SessionMinimap({ messages, hoveredIdx, onHover, onClick }) {
 }
 
 // ── Right rail: ambient peripherals stacked ──────────────────────────
+// `show`: { context, radar, subagents, minimap } — false hides that card
+// (Tweaks → Rail, keys showContext/showRadar/showSubagents/showMinimap);
+// `children` (widget plugin cards) sit between subagents and the minimap.
 function AmbientRail({
   ctx, activity, messages, microcopy, onClose, sparklineValues, hoveredMsgIdx, onMinimapHover, onMinimapClick,
   subagents, subagentPaneOpen, onOpenSubagent, onToggleSubagentPane, onOpenTree,
@@ -365,7 +368,7 @@ function AmbientRail({
         </span>
       </div>
 
-      {(show.gauge ?? true) && (
+      {(show.context ?? true) && (
         <div className="rail-card glass">
           <TokenGauge used={ctx.used} total={ctx.total} pct={ctx.pct}
             label={ctx.label} sub={`cost ${ctx.cost} · ${ctx.tokensPerSec} t/s`} />

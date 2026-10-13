@@ -5,11 +5,12 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Windows: prevent a console window from flashing when we spawn omp.exe
-/// from a GUI-subsystem parent. omp speaks JSON-RPC over stdio, so it's
-/// almost certainly a console-subsystem binary; without this flag Windows
-/// would attach a fresh console (visible flash) on every spawn.
+/// (or a widget plugin) from a GUI-subsystem parent. omp speaks JSON-RPC
+/// over stdio, so it's almost certainly a console-subsystem binary; without
+/// this flag Windows would attach a fresh console (visible flash) on every
+/// spawn.
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Candidate binary names tried in order. Explicit `.exe` first on Windows
 /// because some systems have unusual PATHEXT handling.

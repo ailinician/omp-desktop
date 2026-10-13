@@ -31,9 +31,10 @@ impl GitWatcherState {
     ///
     /// On every change to the HEAD file (see [`is_head_change`]), re-reads the
     /// current branch via [`crate::git::probe`] and emits
-    /// `"git://branch/{session_id}"` on `app`.  Errors starting the watcher
-    /// are propagated; the caller treats them as non-fatal so the branch
-    /// chip simply won't update live.
+    /// `"git://branch/{session_id}"` on `app`, and tells the widget host
+    /// (which recomputes the session's context and runs `branch` plugins).
+    /// Errors starting the watcher are propagated; the caller treats them as
+    /// non-fatal so the branch chip simply won't update live.
     pub fn start(
         &self,
         session_id: &str,
@@ -53,6 +54,7 @@ impl GitWatcherState {
             if let Some(b) = branch {
                 let _ = app.emit(&format!("git://branch/{sid}"), b);
             }
+            crate::widgets::notify_branch(&app, &sid);
         })
         .map_err(|e| e.to_string())?;
 

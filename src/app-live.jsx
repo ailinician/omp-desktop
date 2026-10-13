@@ -20,8 +20,8 @@
 const {
   Icon, ChatView, Composer, CommandBridge, WindowChrome, TabBar, SubagentPane, ProjectSidebar, EmptyWorkspace,
   StatusBar, AmbientRail, ConversationTree, PlanKanban, HistoryModal, ChangesPanel, ApprovalRulesPanel, UsageStatsPanel, PromptHistoryModal, UpdateModal, useTweaks,
-  TweaksPanel, TweakSection, TweakRow, TweakRadio, TweakToggle, TweakColor, TweakSlider,
-  useWidgets, WidgetCard, WidgetErrorCard,
+  TweaksPanel, TweakSection, TweakRow, TweakRadio, TweakToggle, TweakColor, TweakSlider, TweakButton,
+  useWidgets, WidgetCard, WidgetErrorCard, WidgetApprovalCard, WidgetBoundary,
   TWEAK_DEFAULTS, NULL_MODEL, EMPTY_PROJECT, DEFAULT_PROFILE_ID,
   INTENT_FRAMING, APPROVAL_PROMPT,
   useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, timeNow,
@@ -34,6 +34,7 @@ const {
   PLAN_IDLE, togglePlan, enterPlan, approvePlan, annotatePlan, markPlanSent,
 } = window.OMP_SESSION_UI;
 const { NO_OVERRIDES: NO_COLLAPSE_OVERRIDES, foldModes: _foldModes, overridesForAll: _collapseOverridesForAll } = window.OMP_COLLAPSE;
+const { tweakKey: _widgetTweakKey } = window.OMP_WIDGETS;
 
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
@@ -226,9 +227,11 @@ function App() {
 
   const updater = useUpdater({ bridge, autoCheck: t.updateCheck ?? true, skipped: t.skippedUpdate, setTweak });
 
+  // `activeProject.id`, not `activeSessionId`: the latter keeps a closed
+  // tab's id (see handleSelectProfile below). Widgets only run while the
+  // rail is on screen — not in focus layout, not under the conversation tree.
   const widgets = useWidgets({
-    bridge, activeSessionId, activeProjectPath: activeProject.path, branch: activeProject.branch,
-    streaming, sessionIds, tweaks: t,
+    bridge, activeSessionId: activeProject.id, railVisible: t.layout !== "focus" && !treeOpen, tweaks: t,
   });
 
   // Handler map read through a ref so the dispatch effect never re-subscribes.
@@ -347,10 +350,10 @@ function App() {
   // sends it as a normal prompt, which omp executes.
   const [draftInsert, setDraftInsert] = React.useState(null);
   const handleInsertDraft = (text) => setDraftInsert({ text, nonce: Date.now() });
-  // Widget list items insert at the end of the draft (appends, like the ⌘K
-  // bridge above); the trailing space keeps typing flowing.
-  const handleWidgetInsert = React.useCallback(
-    text => setDraftInsert({ text: text + " ", nonce: Date.now() }), []);
+  // Widget inserts append to the draft (OMP_WIDGETS.appendToDraft) — their
+  // own path, since ⌘K's draftInsert replaces a `/command` draft.
+  const [appendInsert, setAppendInsert] = React.useState(null);
+  const handleWidgetInsert = React.useCallback(text => setAppendInsert({ text, nonce: Date.now() }), []);
 
   // Prompt-history picker (Ctrl+Up modal, issue #16) — same {text, nonce}
   // shape and rationale as draftInsert above, but always *replaces* the
@@ -692,6 +695,7 @@ function App() {
                     onPick={handleCommand}
                     onFollowUp={handleFollowUp}
                     draftInsert={draftInsert}
+                    appendInsert={appendInsert}
                     promptHistory={promptHistory}
                     promptInsert={promptInsert}
                     queue={queue}
@@ -758,13 +762,21 @@ function App() {
                   hoveredMsgIdx={hoveredMsgIdx}
                   onMinimapHover={setHoveredMsgIdx}
                   onMinimapClick={handleMinimapClick}
-                  show={{ gauge: t.railGauge ?? true, radar: t.railRadar ?? true, subagents: t.railSubagents ?? true, minimap: t.railMinimap ?? true }}
+                  show={{ context: t.showContext ?? true, radar: t.showRadar ?? true, subagents: t.showSubagents ?? true, minimap: t.showMinimap ?? true }}
                 >
                   {widgets.fatal && <WidgetErrorCard title="widgets.json" error={widgets.fatal} />}
                   {widgets.configErrors.map((e, i) => <WidgetErrorCard key={i} title="widgets.json" error={e} />)}
-                  {widgets.plugins.map(p => (
-                    <WidgetCard key={p.id} plugin={p} run={widgets.runs[p.id]}
-                      onRefresh={() => widgets.refresh(p.id)} onInsert={handleWidgetInsert} />
+                  {widgets.approvals.map(a => (
+                    <WidgetBoundary key={`approve:${a.id}`} title={a.title}>
+                      <WidgetApprovalCard title={a.title} command={a.command} changed={a.changed}
+                        onApprove={() => widgets.approve(a.id)} />
+                    </WidgetBoundary>
+                  ))}
+                  {widgets.cards.map(c => (
+                    <WidgetBoundary key={c.id} title={c.title} resetKey={c.resetKey}>
+                      <WidgetCard title={c.title} run={c.run}
+                        onRefresh={() => widgets.refresh(c.id)} onInsert={handleWidgetInsert} />
+                    </WidgetBoundary>
                   ))}
                 </AmbientRail>
               )}
@@ -898,16 +910,16 @@ function App() {
           )}
         </TweakSection>
         <TweakSection label="Rail">
-          <TweakToggle label="context gauge" value={t.railGauge ?? true} onChange={v => setTweak("railGauge", v)} />
-          <TweakToggle label="agent radar" value={t.railRadar ?? true} onChange={v => setTweak("railRadar", v)} />
-          <TweakToggle label="subagents" value={t.railSubagents ?? true} onChange={v => setTweak("railSubagents", v)} />
-          <TweakToggle label="minimap" value={t.railMinimap ?? true} onChange={v => setTweak("railMinimap", v)} />
-          {widgets.allPlugins.map(p => (
-            <TweakToggle key={p.id} label={`widget: ${p.title}`} value={t[`widget:${p.id}`] ?? true}
-              onChange={v => setTweak(`widget:${p.id}`, v)} />
+          <TweakToggle label="context gauge" value={t.showContext ?? true} onChange={v => setTweak("showContext", v)} />
+          <TweakToggle label="agent radar" value={t.showRadar ?? true} onChange={v => setTweak("showRadar", v)} />
+          <TweakToggle label="subagents" value={t.showSubagents ?? true} onChange={v => setTweak("showSubagents", v)} />
+          <TweakToggle label="minimap" value={t.showMinimap ?? true} onChange={v => setTweak("showMinimap", v)} />
+          {widgets.togglePlugins.map(p => (
+            <TweakToggle key={p.id} label={`widget: ${p.title}`} value={t[_widgetTweakKey(p.id)] ?? true}
+              onChange={v => setTweak(_widgetTweakKey(p.id), v)} />
           ))}
-          <TweakRow label="plugins" value={widgets.configPath}>
-            <button className="btn outlined" onClick={widgets.reload}>reload widgets</button>
+          <TweakRow label="plugins" value={widgets.configPath ?? "unavailable"}>
+            <TweakButton label="reload widgets" secondary onClick={widgets.reload} />
           </TweakRow>
         </TweakSection>
         <TweakSection label="Session">
