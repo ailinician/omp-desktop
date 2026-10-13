@@ -39,6 +39,23 @@ function WidgetItem({ item, onInsert }) {
   );
 }
 
+function WidgetList({ block, onInsert }) {
+  const [expanded, setExpanded] = React.useState(false);
+  const { items, limit } = block;
+  const shown = limit && !expanded && items.length > limit ? items.slice(0, limit) : items;
+  return (
+    <>
+      {block.title && <div className="wdg-section mono">{block.title}<span className="wdg-count">{items.length}</span></div>}
+      <div className="wdg-list">
+        {shown.map((it, i) => <WidgetItem key={i} item={it} onInsert={onInsert} />)}
+        {shown.length < items.length && (
+          <button className="btn ghost wdg-more" onClick={() => setExpanded(true)}>+{items.length - shown.length} more</button>
+        )}
+      </div>
+    </>
+  );
+}
+
 function WidgetBlock({ block, onInsert }) {
   switch (block.type) {
     case "status":
@@ -89,12 +106,7 @@ function WidgetBlock({ block, onInsert }) {
         </>
       );
     case "list":
-      return (
-        <>
-          {block.title && <div className="wdg-section mono">{block.title}</div>}
-          <div className="wdg-list">{block.items.map((it, i) => <WidgetItem key={i} item={it} onInsert={onInsert} />)}</div>
-        </>
-      );
+      return <WidgetList block={block} onInsert={onInsert} />;
     case "link":
       return (
         <button className="btn ghost wdg-link" title={block.url} onClick={() => _wbOpen(block.url)}>

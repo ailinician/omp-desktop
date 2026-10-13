@@ -17,7 +17,9 @@
 .wdg-fill { height: 100%; background: var(--accent); }
 .wdg-text { color: var(--fg-3); font-size: var(--d-text-sm); white-space: pre-wrap; word-break: break-word; }
 .wdg-kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; }
-.wdg-list { display: flex; flex-direction: column; gap: 3px; }
+.wdg-list { display: flex; flex-direction: column; gap: 3px; max-height: 220px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line-bright) transparent; }
+.wdg-count { margin-left: 6px; color: var(--fg-5); letter-spacing: 0; }
+.wdg-more { justify-content: flex-start; height: 22px; }
 .wdg-item-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .wdg-item-label { color: var(--fg-2); font-size: var(--d-text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wdg-item-detail { color: var(--fg-4); font-size: var(--d-text-xs); }

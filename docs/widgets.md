@@ -128,11 +128,12 @@ Blocks:
 | `progress` | `label`, `value`, `max` |
 | `text` | `text`, `insert` (optional, ≤ 2000; renders a + button to insert the text into the composer) |
 | `kv` | `title` (optional, ≤ 200), `rows`: `[{ "k" (string), "v" (string \| number \| boolean, coerced) }]` |
-| `list` | `title` (optional, ≤ 200), `items`: `[{ "label" (string \| number \| boolean), "detail" (same), "tone", "url", "insert", "time" }]`; only `label` is required |
+| `list` | `title` (optional, ≤ 200; shown with the item count), `limit` (optional, 1–50; show only the first `limit` items plus a „+N more“ button), `items`: `[{ "label" (string \| number \| boolean), "detail" (same), "tone", "url", "insert", "time" }]`; only `label` is required |
 | `link` | `label`, `url` |
 
 - An unknown block `type` is skipped; the rest renders and the card shows a small "1 unsupported block" note.
 - `tone` (on `status` and list items): `ok` | `warn` | `error` | `info` | `neutral`.
+- A `list` scrolls inside a 220 px area, so a long list never makes the card taller than the rail. `limit` collapses it further: only the first `limit` items show, with a "+N more" button that expands the rest until the next run.
 - `url`: only `http:`/`https:` are opened (via the system browser); anything else is rendered as plain text.
 - `insert`: text placed into the composer draft on click (appended to the current draft). Without `insert` the click inserts `label` plus `url` (space-separated, if present). Max 2000 chars; truncated.
 - `time` (list items): ISO 8601 string (`YYYY-MM-DD`, optionally `THH:MM[:SS[.fff]]` and a `Z`/`±HH:MM` zone) or epoch seconds; anything else (e.g. `"March 7"`) is dropped. Shown right of the label as a compact relative label (`now` under a minute, `5m`, `3h`, `2d`, future `in 12m`, a `YYYY-MM-DD` UTC date beyond 30 days); the tooltip is the ISO timestamp.

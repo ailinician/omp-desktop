@@ -318,6 +318,20 @@ check("absent title means no field", () => {
   assert.equal("title" in r.widget.blocks[0], false);
 });
 
+// ── list limit ────────────────────────────────────────────────────────────
+check("list limit: kept when valid, clamped to 50, dropped when unusable", () => {
+  const list = (limit) => out({ version: 1, blocks: [{ type: "list", items: [{ label: "a" }], limit }] }).widget.blocks[0];
+  assert.equal(list(5).limit, 5);
+  assert.equal(list(1).limit, 1);
+  assert.equal(list(99).limit, 50);
+  assert.equal(list(2.7).limit, 2);
+  assert.equal("limit" in list(0), false);
+  assert.equal("limit" in list(-3), false);
+  assert.equal("limit" in list("x"), false);
+  assert.equal("limit" in list(null), false);
+  assert.equal("limit" in list(undefined), false);
+});
+
 // ── item time ─────────────────────────────────────────────────────────────
 check("item time: ISO string and epoch seconds become epoch ms; invalid is dropped", () => {
   const r = out({ version: 1, blocks: [{ type: "list", items: [
