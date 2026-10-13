@@ -356,24 +356,24 @@ fn close_tab_kills_background_jobs() {
     assert!(!out.exited());
 }
 
-/// Closing hangs the shell up before the kill: its `HUP` trap runs (a real
-/// shell saves its history there).
+/// Closing hangs the shell up before the kill: a `HUP` trap of the tab's
+/// leader runs (a real shell saves its history there).
 #[test]
 fn close_tab_hangs_up_the_shell_before_killing_it() {
     let dir = TempDir::new("hup");
     let marker = dir.path().join("hung");
     let (manager, out) = open("hup");
-    // Line editing off: bash (`/bin/sh` on some systems) at a readline
-    // prompt answers a hang-up by saving its history and exiting, without
-    // running the trap this test observes.
-    manager
-        .write("hup", "set +o emacs +o vi 2>/dev/null\n")
-        .unwrap();
+    // The trap is set by a non-interactive `sh` that replaces the prompt
+    // (same pid, so still the session leader) and waits in a foreground
+    // `sleep`: the hang-up ends the `sleep`, and the wait returns into the
+    // trap. A shell waiting at its prompt is no portable witness: dash
+    // retries its interrupted read and runs a trap only once input arrives,
+    // and bash at a readline prompt exits without running it.
     manager
         .write(
             "hup",
             format!(
-                "trap 'echo hung > {}; exit' HUP; echo TR\"\"APPED\n",
+                "exec sh -c 'trap \"echo hung > {}; exit\" HUP; echo TR\"\"APPED; sleep 30'\n",
                 marker.display()
             ),
         )
