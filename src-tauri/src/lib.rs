@@ -7,6 +7,7 @@
 mod agent;
 mod approval;
 mod approval_mode;
+mod browser;
 mod child_path;
 mod conversation_tree;
 mod external_open;
@@ -76,6 +77,9 @@ struct StartSessionArgs {
     /// Which omp profile this tab runs under (`None`/`"default"` = omp's own
     /// `~/.omp/agent` tree); resolved by `profiles::ProfileStore::resolve`.
     profile: Option<String>,
+    /// The user's Chromium choice for the browser panel (`browserPath` tweak);
+    /// `None` or empty = find one automatically (`browser::locate`).
+    browser_path: Option<String>,
 }
 
 /// Register the tab with the terminal, start an omp process for it, then
@@ -110,6 +114,24 @@ fn start_session(
         .state::<Arc<ApprovalModeStore>>()
         .resolve(cwd_opt.map(Path::new));
     terminal.register_tab(&args.session_id, cwd_opt.map(Path::new));
+    // The tab's browser (idempotent: a respawn under the same tab id reuses
+    // it). Without one the session starts without `--config` and omp falls
+    // back to its own browser.
+    let browser_pref = args
+        .browser_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(Path::new);
+    let overlay = app
+        .state::<browser::BrowserManager>()
+        .allocate(&args.session_id, browser_pref)
+        .map_err(|e| {
+            eprintln!(
+                "[omp-desktop] browser unavailable for {}: {e}",
+                args.session_id
+            );
+        })
+        .ok();
     bridge.start_session(
         // Owned by the bridge's map; the widget hook below still needs the id.
         args.session_id.clone(),
@@ -118,6 +140,7 @@ fn start_session(
             resume: args.resume.as_deref(),
             profile,
             mode,
+            config: overlay.as_deref(),
         },
         app,
         Arc::clone(rule_book.inner()),
@@ -302,10 +325,9 @@ async fn conversation_tree(
 /// approval-rule grants (see `approval::RuleBook::clear_session`) and its
 /// widget runs.
 ///
-/// Deliberately does NOT touch the tab's terminal: a profile switch stops and
-/// respawns the omp process under the same tab id while the tab, and with it
-/// its shell, stays. The terminal ends only through [`close_tab`] /
-/// [`close_all_tabs`] and `TerminalManager::shutdown_all`.
+/// Deliberately does NOT touch the tab's terminal or browser: a profile switch
+/// respawns omp while its shell and Chromium stay. Both end only through
+/// [`close_tab`] / [`close_all_tabs`] and [`kill_child_processes`].
 #[tauri::command]
 fn stop_session(
     session_id: String,
@@ -317,8 +339,8 @@ fn stop_session(
     widget_host.session_closed(&session_id);
 }
 
-/// End a tab for good: its omp process (with its session grants), widget
-/// runs, git watcher and terminal shell. The one place a tab ends.
+/// End a tab for good: its omp process (with its session grants), browser,
+/// widget runs, git watcher and terminal shell. The one place a tab ends.
 fn end_tab(app: &AppHandle, session_id: &str) {
     end_tab_but_terminal(app, session_id);
     app.state::<Arc<terminal::TerminalManager>>()
@@ -331,6 +353,7 @@ fn end_tab_but_terminal(app: &AppHandle, session_id: &str) {
     let rule_book = app.state::<Arc<RuleBook>>();
     app.state::<AgentBridge>()
         .stop_session(session_id, &rule_book);
+    app.state::<browser::BrowserManager>().release(session_id);
     app.state::<Arc<widgets::WidgetHost>>()
         .session_closed(session_id);
     app.state::<GitWatcherState>().stop(session_id);
@@ -1156,12 +1179,15 @@ async fn app_update_install(
 }
 
 /// Kill every child process tree the app owns — omp sessions first, then
-/// running widget plugins, then the terminal shells — on the calling thread.
-/// For the exits where managed state is never dropped (app exit, the updater
-/// relaunch); on Unix each tree sits in its own process group or session and
-/// would outlive us. Every step is idempotent.
+/// the tabs' Chromium browsers, running widget plugins and terminal shells —
+/// on the calling thread. For the exits where managed state is never dropped
+/// (app exit, the updater relaunch); on Unix each tree sits in its own process
+/// group or session and would outlive us. Every step is idempotent.
 pub(crate) fn kill_child_processes(app: &AppHandle) {
     app.state::<AgentBridge>().shutdown_all();
+    if let Some(browser) = app.try_state::<browser::BrowserManager>() {
+        browser.shutdown_all();
+    }
     widgets::kill_all(app);
     // Managed in `setup` (it needs the config dir): absent only if the app
     // exits before that ran, when there is no shell to kill either.
@@ -1208,6 +1234,25 @@ fn setup(app: &tauri::App) {
     // startup — approval grants and profiles just won't survive a
     // restart there.
     let config_dir = resolved_config_dir.unwrap_or_else(std::env::temp_dir);
+    // Per-tab headless Chromium + the overlay omp reads its `cdpUrl` from.
+    // It lives under the per-user app cache dir (user-owned, unlike a shared
+    // temp dir); without one the manager is unavailable and sessions start
+    // without a managed browser. An unresolvable home only loses the
+    // Chrome-for-Testing candidates, not the installed browsers.
+    let browser_home = app
+        .path()
+        .home_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let browser = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("no app cache dir: {e}"))
+        .and_then(|dir| browser::BrowserManager::new(dir.join("browser"), browser_home))
+        .unwrap_or_else(|reason| {
+            eprintln!("[omp-desktop] managed browser disabled: {reason}");
+            browser::BrowserManager::unavailable(reason)
+        });
+    app.manage(browser);
     // Approval-rule store: project-scoped grants persist under
     // <app_config_dir>/approval-rules/<project-hash>.json.
     app.manage(Arc::new(RuleBook::new(config_dir.join("approval-rules"))));
@@ -1259,29 +1304,17 @@ fn setup(app: &tauri::App) {
     );
 }
 
-/// Run the Tauri application. Panics if the runtime fails to initialise.
+/// Windows and Linux deliver a folder "Open with" by launching the
+/// executable with the path in argv, so without this a second open would
+/// start a whole second app — a second window, a second set of omp
+/// children — instead of adding a tab to the running one. The forwarded
+/// argv goes through the same queue as a cold start's.
 ///
-/// # Panics
-///
-/// Panics if `tauri::Builder::build` returns an error (e.g. the webview
-/// runtime cannot be initialised). This is a fatal startup condition;
-/// there is no meaningful recovery from inside `main`.
-pub fn run() {
-    let builder = tauri::Builder::default();
-    // Windows and Linux deliver a folder "Open with" by launching the
-    // executable with the path in argv, so without this a second open would
-    // start a whole second app — a second window, a second set of
-    // omp children — instead of adding a tab to the running one. The
-    // forwarded argv goes through the same queue as a cold start's.
-    //
-    // macOS needs none of it: LaunchServices reuses the running instance
-    // and delivers `RunEvent::Opened` to it (see the `app.run` callback).
-    //
-    // Registered first, as the plugin requires. Shadowed rather than
-    // reassigned through a `mut` binding, which would be an `unused_mut`
-    // warning (and so a lint-gate error) on macOS.
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+/// macOS needs none of it: `LaunchServices` reuses the running instance and
+/// delivers `RunEvent::Opened` to it (see [`handle_run_event`]).
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn single_instance_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri_plugin_single_instance::init(|app, argv, cwd| {
         // `cwd` is why the plugin sends it: the second process' argv may hold
         // a relative path (`omp-desktop .` from another shell), and resolving
         // that here would otherwise pick *this* instance's directory.
@@ -1293,7 +1326,23 @@ pub fn run() {
             let _ = win.unminimize();
             let _ = win.set_focus();
         }
-    }));
+    })
+}
+
+/// Run the Tauri application. Panics if the runtime fails to initialise.
+///
+/// # Panics
+///
+/// Panics if `tauri::Builder::build` returns an error (e.g. the webview
+/// runtime cannot be initialised). This is a fatal startup condition;
+/// there is no meaningful recovery from inside `main`.
+pub fn run() {
+    let builder = tauri::Builder::default();
+    // Registered first, as the plugin requires (see `single_instance_plugin`).
+    // Shadowed rather than reassigned through a `mut` binding, which would be
+    // an `unused_mut` warning (and so a lint-gate error) on macOS.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let builder = builder.plugin(single_instance_plugin());
     let app = builder
         .plugin(navigation_guard::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1317,6 +1366,18 @@ pub fn run() {
             terminal_pick_shell,
             close_tab,
             close_all_tabs,
+            browser::commands::browser_open_panel,
+            browser::commands::browser_close_panel,
+            browser::commands::browser_resize,
+            browser::commands::browser_navigate,
+            browser::commands::browser_history,
+            browser::commands::browser_tab_new,
+            browser::commands::browser_tab_close,
+            browser::commands::browser_tab_activate,
+            browser::commands::browser_input,
+            browser::commands::browser_annotate,
+            browser::commands::browser_capture,
+            browser::commands::browser_scroll_to,
             session_status,
             replay_events,
             extension_ui_state,
@@ -1374,19 +1435,22 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
-            kill_child_processes(app);
-        }
-        // macOS' "Open with" for a folder (see `Info.plist`) arrives as a
-        // run-loop event, on launch *and* while already running — the one
-        // delivery path that is neither argv nor a plugin. `RunEvent::Opened`
-        // does not exist on the other targets.
-        #[cfg(target_os = "macos")]
-        if let tauri::RunEvent::Opened { urls } = &event {
-            external_open::ingest_urls(app, urls);
-        }
-    });
+    app.run(handle_run_event);
+}
+
+/// Handle lifecycle and platform file-open events from the Tauri run loop.
+fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
+    if matches!(event, tauri::RunEvent::Exit) {
+        kill_child_processes(app);
+    }
+    // macOS' "Open with" for a folder (see `Info.plist`) arrives as a
+    // run-loop event, on launch *and* while already running — the one
+    // delivery path that is neither argv nor a plugin. `RunEvent::Opened`
+    // does not exist on the other targets.
+    #[cfg(target_os = "macos")]
+    if let tauri::RunEvent::Opened { urls } = &event {
+        external_open::ingest_urls(app, urls);
+    }
 }
 
 #[cfg(test)]
@@ -1403,12 +1467,14 @@ mod tests {
             "cwd": "/home/dev/project",
             "resume": null,
             "profile": "work",
+            "browserPath": "/opt/chromium/chrome",
         });
         let args: StartSessionArgs = serde_json::from_value(payload).expect("deserialize");
         assert_eq!(args.session_id, "session-1");
         assert_eq!(args.cwd, "/home/dev/project");
         assert_eq!(args.resume, None);
         assert_eq!(args.profile.as_deref(), Some("work"));
+        assert_eq!(args.browser_path.as_deref(), Some("/opt/chromium/chrome"));
     }
 
     /// The contract `deny_unknown_fields` exists for (see the attribute's
@@ -1424,6 +1490,7 @@ mod tests {
             "cwd": "/home/dev/project",
             "resume": null,
             "profileId": "work",
+            "browserPath": null,
         });
         assert!(
             serde_json::from_value::<StartSessionArgs>(payload).is_err(),

@@ -182,7 +182,7 @@ function TabBar({
 // ── Status bar (footer): connection, tokens, todos, panels ──────────
 // The model and thinking level are not repeated here: the composer's
 // pills below the prompt box show (and change) both.
-function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRules, approvalMode, onStats, onTree, onTerminal, terminalOpen, autosave, onAutosave }) {
+function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRules, approvalMode, onStats, onTree, onTerminal, terminalOpen, onBrowser, browserOpen = false, autosave, onAutosave }) {
   return (
     <div className="status">
       <span className="status-cell"><span className="dot live" /> connected</span>
@@ -217,6 +217,12 @@ function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRu
       <span className="status-sep">·</span>
       <button className="status-cell btn ghost" onClick={onTree} title="conversation tree (prompt-cache status)" style={{ height: 20, padding: "0 6px" }}>
         <Icon name="branch" size={11} color="var(--fg-3)" />
+      </button>
+      <span className="status-sep">·</span>
+      <button className="status-cell btn ghost" onClick={onBrowser} aria-pressed={browserOpen}
+        title={`browser panel (${hintFor("desktop.browser.toggle", "Ctrl+Shift+B")})`}
+        style={{ height: 20, padding: "0 6px" }}>
+        <Icon name="web" size={11} color={browserOpen ? "var(--accent)" : "var(--fg-3)"} />
       </button>
       <span className="status-sep">·</span>
       <ApprovalModeCell cell={approvalMode} onClick={onRules} />

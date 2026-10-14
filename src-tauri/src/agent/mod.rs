@@ -117,6 +117,9 @@ pub struct Launch<'a> {
     pub profile: Option<&'a str>,
     /// `--approval-mode`, from `approval_mode::ApprovalModeStore::resolve`.
     pub mode: crate::approval_mode::ApprovalMode,
+    /// Settings overlay passed as `--config=<path>` (the tab's browser
+    /// `cdpUrl`, see `crate::browser`); `None` = no overlay.
+    pub config: Option<&'a std::path::Path>,
 }
 
 /// Manages one omp process per tab session.
@@ -182,8 +185,9 @@ impl AgentBridge {
             resume,
             profile,
             mode,
+            config,
         } = launch;
-        let (mut child, supervisor) = match spawn_omp(cwd, resume, profile, mode) {
+        let (mut child, supervisor) = match spawn_omp(cwd, resume, profile, mode, config) {
             Ok(c) => c,
             Err(e) => {
                 // Cached *and* returned: the caller gets the reason now, the
@@ -202,7 +206,10 @@ impl AgentBridge {
             EVENT_JOURNAL_MAX_BYTES,
         )));
         let ext_ui = Arc::new(Mutex::new(ExtUiState::default()));
-        let project_root = cwd.filter(|c| !c.is_empty()).map(std::path::PathBuf::from);
+        let project_root = launch
+            .cwd
+            .filter(|c| !c.is_empty())
+            .map(std::path::PathBuf::from);
         let gen = self.next_gen.fetch_add(1, Ordering::SeqCst);
         // Liveness flag for this incarnation. Cloned into the map entry
         // (so `reap_and_clear_grants`/supersession can clear it) and into
@@ -552,13 +559,13 @@ mod tests {
     #[test]
     fn every_command_live_js_sends_is_allowed() {
         // Argument prefixes of the call sites that carry no literal type:
-        // the two helper definitions and `_sendWithResponse`'s forwarder.
-        const NON_LITERAL: &[&str] = &["cmd){", "cmd,timeout", "{...cmd,id})"];
+        // the helper definitions and the forwarders inside them.
+        const NON_LITERAL: &[&str] = &["cmd){", "cmd,timeout", "{...cmd,id})", "cmd).then("];
         let flat: String = include_str!("../../../src/live.js")
             .split_whitespace()
             .collect();
         let mut checked = 0;
-        for callee in ["_send(", "_sendWithResponse("] {
+        for callee in ["_send(", "_sendWithResponse(", "_sendPromptAck("] {
             for (idx, _) in flat.match_indices(callee) {
                 let args = &flat[idx + callee.len()..];
                 if let Some(rest) = args.strip_prefix("{type:\"") {
