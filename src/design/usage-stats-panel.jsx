@@ -6,7 +6,7 @@
    merged across every profile — omp itself resolves one profile per
    invocation), and to the installed omp CLI's rolling last-24-hours
    window (the `--json` path has no flag to request more). Unlike
-   changes-panel.jsx/approval-rules-panel.jsx it is not scoped to the
+   approval-rules-panel.jsx it is not scoped to the
    active tab's *project* — a tab switch that stays on the same profile
    does not refetch, only the panel's own refresh button does. A tab
    switch that changes profile DOES refetch: app-live.jsx keys this
@@ -59,7 +59,7 @@ const EMPTY = { overall: null, byModel: [], byFolder: [], byAgentType: [] };
 
 // Mounted only while open (app-live.jsx gates on `statsOpen`), so there
 // is no `open` prop and no early return for it — see the matching note
-// in changes-panel.jsx.
+// in approval-rules-panel.jsx.
 function UsageStatsPanel({ onClose, profileLabel }) {
   const bridge = window.OMP_BRIDGE;
   const [data, setData]       = React.useState(EMPTY);

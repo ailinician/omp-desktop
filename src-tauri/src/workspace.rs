@@ -1,25 +1,15 @@
-//! Git working-tree introspection for the "Changes" panel — bounded,
-//! validated status/diff/accept/reject operations on a single repository.
+//! Git working-tree mutation for the git browser — validated, single-file
+//! stage (`accept`) and discard (`reject`) operations on one repository.
+//! Every read (status, diffs, history) lives in [`crate::git_browser`], on
+//! gix.
 //!
-//! ### gix vs `git` — where each is used
+//! [`validate_relative_path`] and repository discovery ([`discover`]) use
+//! the filesystem and [`gix`] (the same `gix::discover` pattern as
+//! [`crate::git`]); the git browser's reads resolve paths through them too.
 //!
-//! [`validate_relative_path`] and repository discovery/validation use the
-//! filesystem and [`gix`] (the same `gix::discover` pattern as [`crate::git`]),
-//! matching the established pattern in this codebase.
-//!
-//! [`status`] and [`diff`] shell out to the `git` binary for the actual
-//! data. Both are read-only operations, invoked with a fully static argv
-//! (never a shell string, never an interpolated shell command) via
-//! [`std::process::Command`]. See the doc comment on each function for the
-//! specific justification — in short, gix's status/diff building blocks
-//! (`gix::status::Iter`'s mix of `index_worktree::Item` and
-//! `gix_diff::index::Change`, and `gix_diff::blob`'s line-diff primitives)
-//! would require re-implementing git's own status-merge and unified-diff
-//! formatting logic by hand, whereas `git status --porcelain=v1` and
-//! `git diff` already do this correctly and stably.
-//!
-//! [`accept`] and [`reject`] also shell out, for the same reason: gix's
-//! index-writing/checkout support is far less mature than its read
+//! [`accept`] and [`reject`] shell out to the `git` binary, invoked with a
+//! fully static argv (never a shell string) via [`std::process::Command`]:
+//! gix's index-writing/checkout support is far less mature than its read
 //! APIs, and `git add` / `git checkout` / `git reset` already implement
 //! safe, atomic index and worktree mutation.
 
@@ -29,31 +19,21 @@ use std::process::Command;
 
 // ── path validation ─────────────────────────────────────────────────────────
 
-/// Validate that `rel` is a plain, traversal-free path relative to
-/// `repo_root`, and return its canonicalized absolute form.
+/// The textual half of [`validate_relative_path`], touching no disk: check
+/// that `rel` is a plain, traversal-free relative path and return it with
+/// `/` separators.
 ///
 /// Rejects:
 /// - an empty string,
 /// - an absolute path (`/etc/passwd`),
 /// - a UNC path (`\\server\share\...` or `//server/share/...`),
 /// - a Windows drive-letter path (`C:\...`),
-/// - any path containing a `..` component.
+/// - any path containing a `..` or empty component,
+/// - any path with a `.git` component (case-insensitive).
 ///
-/// Separators are normalized to `/` before joining onto `repo_root`. The
-/// joined candidate's parent directory is then resolved and checked to
-/// still live inside `repo_root`, guarding against symlink escapes:
-/// components of the parent path that exist on disk are fully
-/// canonicalized (resolving any symlinks), and only the non-existent
-/// tail (which by definition cannot be a symlink) is joined on
-/// lexically. The final path component itself is deliberately *never*
-/// canonicalized/resolved — if it is a symlink, callers must operate on
-/// the link itself (matching what `git status` reports), not silently
-/// follow it to some other tracked file elsewhere in the repository.
-/// This lets validation succeed for paths that don't exist yet — e.g. a
-/// working-tree file already deleted, pending a `reject`-triggered
-/// restore from `HEAD` — while still defeating symlink escapes for
-/// every directory segment.
-pub fn validate_relative_path(repo_root: &Path, rel: &str) -> Result<(PathBuf, String), String> {
+/// On its own this suits a path looked up inside a stored tree, which must
+/// not be resolved against today's file system.
+pub fn validate_path_text(rel: &str) -> Result<String, String> {
     if rel.is_empty() {
         return Err("path must not be empty".to_string());
     }
@@ -83,7 +63,29 @@ pub fn validate_relative_path(repo_root: &Path, rel: &str) -> Result<(PathBuf, S
     {
         return Err("path must not reference the .git directory".to_string());
     }
+    Ok(normalized)
+}
 
+/// Validate that `rel` is a plain, traversal-free path relative to
+/// `repo_root`, and return its canonicalized absolute form.
+///
+/// First the textual checks of [`validate_path_text`], whose `/`-separated
+/// result is joined onto `repo_root`. The joined candidate's parent
+/// directory is then resolved and checked to
+/// still live inside `repo_root`, guarding against symlink escapes:
+/// components of the parent path that exist on disk are fully
+/// canonicalized (resolving any symlinks), and only the non-existent
+/// tail (which by definition cannot be a symlink) is joined on
+/// lexically. The final path component itself is deliberately *never*
+/// canonicalized/resolved — if it is a symlink, callers must operate on
+/// the link itself (matching what `git status` reports), not silently
+/// follow it to some other tracked file elsewhere in the repository.
+/// This lets validation succeed for paths that don't exist yet — e.g. a
+/// working-tree file already deleted, pending a `reject`-triggered
+/// restore from `HEAD` — while still defeating symlink escapes for
+/// every directory segment.
+pub fn validate_relative_path(repo_root: &Path, rel: &str) -> Result<(PathBuf, String), String> {
+    let normalized = validate_path_text(rel)?;
     let canonical_root = std::fs::canonicalize(repo_root)
         .map_err(|e| format!("failed to canonicalize repository root: {e}"))?;
     let candidate = canonical_root.join(&normalized);
@@ -127,7 +129,7 @@ pub fn validate_relative_path(repo_root: &Path, rel: &str) -> Result<(PathBuf, S
 /// escape guarantee of [`std::fs::canonicalize`] for every segment that
 /// is actually resolvable, while still returning a usable path for
 /// not-yet-existing targets.
-fn weakly_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+pub fn weakly_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
     let mut existing = path;
     let mut missing_tail: Vec<&std::ffi::OsStr> = Vec::new();
     while !existing.exists() {
@@ -156,14 +158,14 @@ fn weakly_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
 ///   a pathspec expression; without this a file literally named `*.rs` or
 ///   `:(exclude)x` would be interpreted as a glob/magic pathspec.
 /// - `--no-optional-locks` — never take a lock git considers optional (the
-///   index refresh `git status` would otherwise perform). Mutating commands
-///   still take the locks they genuinely require, so this is safe to apply
-///   uniformly.
+///   index refresh a read like `git diff` would otherwise perform). Mutating
+///   commands still take the locks they genuinely require, so this is safe
+///   to apply uniformly.
 /// - [`apply_child_path`] — a per-user `git` (winget `--scope user`, scoop)
 ///   is on the user PATH, which an MSI-update relaunch doesn't carry (#34).
 ///
 /// Every `git` invocation in this module goes through here. Subcommand-level
-/// flags (`--no-ext-diff`, `--cached`, …) stay at their call sites.
+/// flags (`--cached`, `-M`, …) stay at their call sites.
 fn git(work_dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     apply_child_path(&mut cmd);
@@ -188,90 +190,6 @@ fn git_output(work_dir: &Path, args: &[&str], label: &str) -> Result<Vec<u8>, St
     Ok(output.stdout)
 }
 
-/// Cap on how much of a child `git`'s stderr is retained for an error
-/// message. Error output is a line or two in practice.
-const STDERR_MAX_BYTES: usize = 64 * 1024;
-
-/// How much of `git diff`'s stdout [`diff`] reads before giving up.
-///
-/// Larger than [`DIFF_MAX_BYTES`] because the cap that matters to the user is
-/// applied by [`cap_diff_text`] *after* line/char clipping: reading a healthy
-/// margin past the final budget means a diff whose early lines are clipped
-/// still has later content available, while a runaway file is still bounded.
-const DIFF_READ_MAX_BYTES: usize = 4 * 1024 * 1024;
-
-/// Run a `git` subcommand, reading at most `cap` bytes of its stdout.
-///
-/// Unlike [`git_output`] (which is `Command::output()`, and so buffers the
-/// child's *entire* stdout before any cap can apply), this stops reading at
-/// `cap`. `git diff` on a single multi-hundred-megabyte generated file would
-/// otherwise materialize that whole diff in memory — plus a same-size
-/// `String` copy — only for [`cap_diff_text`] to throw all but 256 KiB away.
-///
-/// Returns `(stdout, hit_cap)`. When `hit_cap` is `true` the child is killed
-/// and its exit status deliberately ignored: closing the pipe early makes
-/// `git` die of `SIGPIPE`/`EPIPE`, which is the expected outcome here, not a
-/// failure to report.
-///
-/// stderr is drained concurrently on its own thread (itself bounded). Reading
-/// the two streams in sequence would deadlock if the child ever filled the
-/// stderr pipe buffer while we were still draining stdout.
-fn git_output_capped(
-    work_dir: &Path,
-    args: &[&str],
-    label: &str,
-    cap: usize,
-) -> Result<(Vec<u8>, bool), String> {
-    use std::io::Read as _;
-
-    let mut child = git(work_dir)
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to run git {label}: {e}"))?;
-
-    let stderr = child.stderr.take();
-    let stderr_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(e) = stderr {
-            // Bounded too — a pathological error stream must not be the new
-            // unbounded allocation.
-            let _ = e.take(STDERR_MAX_BYTES as u64).read_to_end(&mut buf);
-        }
-        buf
-    });
-
-    let mut stdout = Vec::new();
-    let read_result = child.stdout.take().map_or(Ok(0), |out| {
-        // One byte past the cap distinguishes "exactly cap bytes" from
-        // "there was more".
-        out.take(cap as u64 + 1).read_to_end(&mut stdout)
-    });
-    let hit_cap = stdout.len() > cap;
-    if hit_cap {
-        stdout.truncate(cap);
-        let _ = child.kill();
-    }
-
-    let status = child.wait();
-    let stderr_bytes = stderr_reader.join().unwrap_or_default();
-
-    if hit_cap {
-        // Early close killed the child; its status says nothing useful.
-        return Ok((stdout, true));
-    }
-    read_result.map_err(|e| format!("failed to read git {label} output: {e}"))?;
-    let status = status.map_err(|e| format!("failed to run git {label}: {e}"))?;
-    if !status.success() {
-        return Err(format!(
-            "git {label} failed: {}",
-            String::from_utf8_lossy(&stderr_bytes)
-        ));
-    }
-    Ok((stdout, false))
-}
-
 /// Run a `git` subcommand purely for its exit status, discarding both
 /// streams. For probes where a non-zero exit is an expected, non-error
 /// answer (an unborn `HEAD`, a path absent from `HEAD`) rather than a
@@ -287,292 +205,18 @@ fn git_succeeds(work_dir: &Path, args: &[&str], label: &str) -> Result<bool, Str
         .map_err(|e| format!("failed to run git {label}: {e}"))
 }
 
-/// Open `repo_root` with gix (same discovery pattern as [`crate::git::probe`])
-/// and return its working-tree root, failing clearly for bare repositories
-/// or paths that aren't inside a git repository at all.
-fn discover_work_dir(repo_root: &Path) -> Result<PathBuf, String> {
-    let repo = gix::discover(repo_root).map_err(|e| format!("not a git repository: {e}"))?;
-    repo.workdir()
+/// Discover the repository containing `path` with gix (same discovery
+/// pattern as [`crate::git::probe`]) and return it with its working-tree
+/// root — the root every project-relative path is resolved against —
+/// failing clearly for bare repositories or paths that aren't inside a git
+/// repository at all. Shared with [`crate::git_browser`].
+pub fn discover(path: &Path) -> Result<(gix::Repository, PathBuf), String> {
+    let repo = gix::discover(path).map_err(|e| format!("not a git repository: {e}"))?;
+    let work_dir = repo
+        .workdir()
         .map(Path::to_path_buf)
-        .ok_or_else(|| "repository has no working tree".to_string())
-}
-
-// ── status ───────────────────────────────────────────────────────────────────
-
-/// Maximum number of files reported by [`status`]; beyond this the result
-/// is marked `truncated` rather than growing unbounded for huge repos.
-const STATUS_CAP: usize = 200;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum StatusKind {
-    Modified,
-    Added,
-    Deleted,
-    Renamed,
-    Untracked,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct FileStatus {
-    pub path: String,
-    pub kind: StatusKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct StatusResult {
-    pub files: Vec<FileStatus>,
-    pub truncated: bool,
-}
-
-/// Report working-tree status (`HEAD` vs index vs worktree, combined),
-/// capped at [`STATUS_CAP`] entries.
-///
-/// ### Why shell out to `git` here
-///
-/// gix's [`gix::status::Platform`] iterator yields two independent kinds
-/// of low-level items — `index_worktree::Item` (worktree vs index,
-/// itself with tracked-change, rewrite, and untracked/directory-contents
-/// sub-variants) and `gix_diff::index::Change` (index vs `HEAD` tree) —
-/// which must be merged and reduced to git's familiar single `XY` status
-/// classification (including rename-pair merging) ourselves.
-/// `git status --porcelain=v1 -z` already performs exactly that
-/// merge-and-classify step in a stable, machine-parseable format, so we
-/// shell out rather than re-implement git's own status-merge logic on
-/// top of gix's raw building blocks.
-pub fn status(repo_root: &Path) -> Result<StatusResult, String> {
-    let work_dir = discover_work_dir(repo_root)?;
-
-    let stdout = git_output(
-        &work_dir,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-        "status",
-    )?;
-
-    Ok(parse_porcelain_z(&stdout))
-}
-
-/// Parse `git status --porcelain=v1 -z` output into a capped, classified
-/// file list. The whole output is walked (git has already paid the cost
-/// of enumerating every change to produce it), so `truncated` reflects
-/// the exact presence of entries beyond the cap, not an approximation.
-fn parse_porcelain_z(bytes: &[u8]) -> StatusResult {
-    let mut files = Vec::new();
-    let mut truncated = false;
-    let mut fields = bytes.split(|&b| b == 0).filter(|f| !f.is_empty());
-
-    while let Some(entry) = fields.next() {
-        if entry.len() < 3 {
-            continue; // malformed/short record; skip defensively
-        }
-        let x = entry[0];
-        let y = entry[1];
-        let path = String::from_utf8_lossy(&entry[3..]).into_owned();
-        if x == b'R' || x == b'C' || y == b'R' || y == b'C' {
-            // Rename/copy entries carry a paired original path in the
-            // next NUL-delimited field; consume and discard it (only the
-            // current path is part of our `FileStatus` surface).
-            let _orig_path = fields.next();
-        }
-
-        if files.len() < STATUS_CAP {
-            files.push(FileStatus {
-                path,
-                kind: classify(x, y),
-            });
-        } else {
-            truncated = true;
-        }
-    }
-
-    StatusResult { files, truncated }
-}
-
-/// Map a porcelain `XY` status pair to our simplified [`StatusKind`].
-const fn classify(x: u8, y: u8) -> StatusKind {
-    if x == b'?' || y == b'?' {
-        StatusKind::Untracked
-    } else if x == b'R' || y == b'R' || x == b'C' || y == b'C' {
-        StatusKind::Renamed
-    } else if x == b'A' || y == b'A' {
-        StatusKind::Added
-    } else if x == b'D' || y == b'D' {
-        StatusKind::Deleted
-    } else {
-        StatusKind::Modified
-    }
-}
-
-// ── diff ─────────────────────────────────────────────────────────────────────
-
-/// Hard caps applied to diff text so a single huge file can never blow up
-/// IPC payload size or renderer memory.
-const DIFF_MAX_BYTES: usize = 256 * 1024;
-const DIFF_MAX_LINES: usize = 2000;
-const DIFF_MAX_LINE_CHARS: usize = 500;
-
-/// How many leading lines are scanned for git's `Binary files ...` marker.
-/// git writes it in the diff header; a handful of lines is ample headroom
-/// over the `diff --git`/`index`/mode preamble.
-const BINARY_MARKER_SCAN_LINES: usize = 8;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum DiffKind {
-    Text,
-    Binary,
-    Untracked,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct DiffResult {
-    pub kind: DiffKind,
-    pub path: String,
-    pub content: Option<String>,
-    pub truncated: bool,
-}
-
-/// Diff a single file against `HEAD` (combined index + worktree changes,
-/// matching `git diff HEAD -- <path>`), hard-capped in size.
-///
-/// ### Why shell out to `git` here
-///
-/// Producing unified-diff text and detecting binary content are both
-/// substantial, already-correct pieces of logic in `git diff` (xdiff-based
-/// unified-hunk formatting, plus git's own binary-content heuristic).
-/// Re-implementing this on gix's blob-diff primitives (`gix_diff::blob`,
-/// backed by `imara-diff`) would mean hand-rolling unified-diff hunk
-/// formatting and a binary-sniffing heuristic ourselves for no behavioral
-/// benefit, so we shell out for this specific operation.
-pub fn diff(repo_root: &Path, rel_path: &str) -> Result<DiffResult, String> {
-    let work_dir = discover_work_dir(repo_root)?;
-    let (_abs, rel_norm) = validate_relative_path(&work_dir, rel_path)?;
-
-    // `HEAD` may not resolve yet (a freshly initialized repo with zero
-    // commits, i.e. "unborn HEAD") — `git diff HEAD` fails outright in
-    // that case, so diff against git's well-known empty-tree object
-    // instead, which makes every staged/worktree file show up as a
-    // plain addition, exactly like a first-ever diff should.
-    let head_resolved = git_succeeds(
-        &work_dir,
-        &["rev-parse", "--verify", "--quiet", "HEAD"],
-        "rev-parse",
-    )?;
-    let diff_target = if head_resolved {
-        "HEAD"
-    } else {
-        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-    };
-
-    // `git diff` (without `--exit-code`) only returns non-zero on a real
-    // error, never merely because differences exist.
-    let (stdout, read_capped) = git_output_capped(
-        &work_dir,
-        &[
-            "diff",
-            diff_target,
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--",
-            &rel_norm,
-        ],
-        "diff",
-        DIFF_READ_MAX_BYTES,
-    )?;
-
-    if stdout.is_empty() {
-        // `git diff HEAD` silently ignores untracked paths, so empty
-        // output is ambiguous between "untracked" and "unmodified
-        // tracked file" — disambiguate with a cheap `ls-files` check.
-        return if is_tracked(&work_dir, &rel_norm)? {
-            Ok(DiffResult {
-                kind: DiffKind::Text,
-                path: rel_norm,
-                content: Some(String::new()),
-                truncated: false,
-            })
-        } else {
-            Ok(DiffResult {
-                kind: DiffKind::Untracked,
-                path: rel_norm,
-                content: None,
-                truncated: false,
-            })
-        };
-    }
-
-    let text = String::from_utf8_lossy(&stdout);
-    // git emits the binary marker in the diff header, so only the first few
-    // lines can carry it — scanning the whole (capped, but still large) text
-    // for it is wasted work.
-    if text
-        .lines()
-        .take(BINARY_MARKER_SCAN_LINES)
-        .any(|line| line.starts_with("Binary files "))
-    {
-        return Ok(DiffResult {
-            kind: DiffKind::Binary,
-            path: rel_norm,
-            content: None,
-            truncated: false,
-        });
-    }
-
-    let (content, truncated) = cap_diff_text(&text);
-    Ok(DiffResult {
-        kind: DiffKind::Text,
-        path: rel_norm,
-        content: Some(content),
-        // Stopping the read early is itself a truncation, even in the
-        // (impossible in practice) case where the retained prefix happened
-        // to fit every cap_diff_text budget.
-        truncated: truncated || read_capped,
-    })
-}
-
-/// Whether `rel_norm` is currently tracked by git (present in the index).
-fn is_tracked(work_dir: &Path, rel_norm: &str) -> Result<bool, String> {
-    let stdout = git_output(work_dir, &["ls-files", "--", rel_norm], "ls-files")?;
-    Ok(!stdout.is_empty())
-}
-
-/// Cap diff text at [`DIFF_MAX_BYTES`] / [`DIFF_MAX_LINES`] /
-/// [`DIFF_MAX_LINE_CHARS`], truncating on line and `char` boundaries only
-/// (never mid-UTF-8-character) so the result is always valid UTF-8.
-/// Returns the capped text and whether any cap was actually hit.
-fn cap_diff_text(text: &str) -> (String, bool) {
-    let mut out = String::with_capacity(DIFF_MAX_BYTES.min(text.len()));
-    let mut truncated = false;
-
-    for (line_idx, line) in text.lines().enumerate() {
-        if line_idx >= DIFF_MAX_LINES {
-            truncated = true;
-            break;
-        }
-        // Clip to DIFF_MAX_LINE_CHARS on a char boundary, then to whatever
-        // of the global byte budget is left — both as byte offsets, so the
-        // line is appended with one bulk copy rather than a push per char.
-        let mut end = line.len();
-        if let Some((offset, _)) = line.char_indices().nth(DIFF_MAX_LINE_CHARS) {
-            end = offset;
-            truncated = true;
-        }
-        let remaining = DIFF_MAX_BYTES.saturating_sub(out.len());
-        if end > remaining {
-            // Back off to the last char boundary that fits in the budget.
-            end = crate::text::prefix_within(line, remaining).len();
-            out.push_str(&line[..end]);
-            truncated = true;
-            break;
-        }
-        out.push_str(&line[..end]);
-        if out.len() + 1 > DIFF_MAX_BYTES {
-            truncated = true;
-            break;
-        }
-        out.push('\n');
-    }
-
-    (out, truncated)
+        .ok_or_else(|| "repository has no working tree".to_string())?;
+    Ok((repo, work_dir))
 }
 
 // ── accept / reject ─────────────────────────────────────────────────────────
@@ -588,7 +232,7 @@ fn resolve_file_target(
     repo_root: &Path,
     rel_path: &str,
 ) -> Result<(PathBuf, PathBuf, String), String> {
-    let work_dir = discover_work_dir(repo_root)?;
+    let (_, work_dir) = discover(repo_root)?;
     let (abs, rel_norm) = validate_relative_path(&work_dir, rel_path)?;
     if std::fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
         return Err(format!("{rel_norm} is a directory, not a file"));
@@ -761,11 +405,7 @@ fn find_rename_source(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        accept, cap_diff_text, classify, diff, git_output_capped, parse_porcelain_z, reject,
-        status, validate_relative_path, DiffKind, StatusKind, DIFF_MAX_BYTES, DIFF_MAX_LINES,
-        DIFF_MAX_LINE_CHARS,
-    };
+    use super::{accept, reject, validate_relative_path};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -803,7 +443,8 @@ mod tests {
     }
 
     /// Build a real throwaway git repo with one committed file, so `HEAD`
-    /// exists and later worktree edits produce genuine status/diff output.
+    /// exists and later worktree edits give `accept` (stage) and `reject`
+    /// (restore from `HEAD`) real changes to act on.
     /// Returns `None` (soft-skip) if `git` isn't on `PATH`.
     fn init_repo(tag: &str) -> Option<PathBuf> {
         if !git_available() {
@@ -878,285 +519,6 @@ mod tests {
         assert!(validate_relative_path(&repo, "escape/x").is_err());
 
         std::fs::remove_dir_all(&outside).ok();
-        std::fs::remove_dir_all(&repo).ok();
-    }
-
-    // ── status ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn classify_maps_porcelain_codes() {
-        assert_eq!(classify(b'?', b'?'), StatusKind::Untracked);
-        assert_eq!(classify(b' ', b'M'), StatusKind::Modified);
-        assert_eq!(classify(b'A', b' '), StatusKind::Added);
-        assert_eq!(classify(b' ', b'D'), StatusKind::Deleted);
-        assert_eq!(classify(b'R', b'M'), StatusKind::Renamed);
-    }
-
-    #[test]
-    fn parse_porcelain_z_consumes_rename_pair_and_caps_output() {
-        // "RM bar.txt\0foo.txt\0??  baz.txt\0" — a rename plus an
-        // untracked file, matching real `git status --porcelain=v1 -z`
-        // byte layout (verified against a real git binary).
-        let raw = b"RM bar.txt\0foo.txt\0?? baz.txt\0";
-        let result = parse_porcelain_z(raw);
-        assert!(!result.truncated);
-        assert_eq!(result.files.len(), 2);
-        assert_eq!(result.files[0].path, "bar.txt");
-        assert_eq!(result.files[0].kind, StatusKind::Renamed);
-        assert_eq!(result.files[1].path, "baz.txt");
-        assert_eq!(result.files[1].kind, StatusKind::Untracked);
-    }
-
-    #[test]
-    fn status_reports_untracked_and_modified_files() {
-        let Some(repo) = init_repo("status-basic") else {
-            return;
-        };
-        std::fs::write(repo.join("committed.txt"), "changed content\n")
-            .expect("modify tracked file");
-        std::fs::write(repo.join("new_file.txt"), "new\n").expect("write untracked file");
-
-        let result = status(&repo).expect("status should succeed");
-        assert!(!result.truncated);
-        let untracked = result
-            .files
-            .iter()
-            .find(|f| f.path == "new_file.txt")
-            .expect("untracked file reported");
-        assert_eq!(untracked.kind, StatusKind::Untracked);
-        let modified = result
-            .files
-            .iter()
-            .find(|f| f.path == "committed.txt")
-            .expect("modified file reported");
-        assert_eq!(modified.kind, StatusKind::Modified);
-
-        std::fs::remove_dir_all(&repo).ok();
-    }
-
-    #[test]
-    fn status_caps_at_200_and_reports_truncated() {
-        let Some(repo) = init_repo("status-cap") else {
-            return;
-        };
-        for i in 0..201 {
-            std::fs::write(repo.join(format!("untracked_{i}.txt")), "x").expect("write file");
-        }
-
-        let result = status(&repo).expect("status should succeed");
-        assert_eq!(result.files.len(), 200);
-        assert!(result.truncated);
-
-        std::fs::remove_dir_all(&repo).ok();
-    }
-
-    // ── diff ──────────────────────────────────────────────────────────────
-
-    #[test]
-    fn cap_diff_text_truncates_long_lines_and_many_lines() {
-        let long_line = "a".repeat(600);
-        let text = std::iter::repeat_n(long_line.as_str(), 3)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let (capped, truncated) = cap_diff_text(&text);
-        assert!(truncated);
-        for line in capped.lines() {
-            assert!(line.chars().count() <= 500);
-        }
-        assert!(capped.is_char_boundary(capped.len()));
-    }
-
-    /// Reference implementation: the original per-`char`-push form of
-    /// [`cap_diff_text`], kept verbatim so the bulk-`push_str` rewrite can
-    /// be proven byte-for-byte equivalent rather than merely "still passes
-    /// the two hand-written cases".
-    fn cap_diff_text_reference(text: &str) -> (String, bool) {
-        let mut out = String::new();
-        let mut truncated = false;
-        'lines: for (line_idx, line) in text.lines().enumerate() {
-            if line_idx >= DIFF_MAX_LINES {
-                truncated = true;
-                break;
-            }
-            for (char_idx, ch) in line.chars().enumerate() {
-                if char_idx >= DIFF_MAX_LINE_CHARS {
-                    truncated = true;
-                    break;
-                }
-                if out.len() + ch.len_utf8() > DIFF_MAX_BYTES {
-                    truncated = true;
-                    break 'lines;
-                }
-                out.push(ch);
-            }
-            if out.len() + 1 > DIFF_MAX_BYTES {
-                truncated = true;
-                break;
-            }
-            out.push('\n');
-        }
-        (out, truncated)
-    }
-
-    #[test]
-    fn cap_diff_text_matches_reference_implementation() {
-        // Each case targets a distinct cap: none, line-char cap, line-count
-        // cap, global byte cap, and the byte cap landing mid-multibyte-char.
-        let big_line = "x".repeat(DIFF_MAX_LINE_CHARS + 37);
-        let many_lines = (0..DIFF_MAX_LINES + 5)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        // Multibyte content sized so the byte budget runs out part-way
-        // through a 3-byte character — the case a naive byte-slice would
-        // panic on.
-        let multibyte = "€".repeat(DIFF_MAX_BYTES);
-        let mixed = format!("+ok\n-{big_line}\n {multibyte}\n+tail");
-
-        let cases: [&str; 7] = [
-            "",
-            "short\ndiff\n",
-            &big_line,
-            &many_lines,
-            &multibyte,
-            &mixed,
-            "no trailing newline",
-        ];
-
-        for (i, case) in cases.iter().enumerate() {
-            let (got, got_trunc) = cap_diff_text(case);
-            let (want, want_trunc) = cap_diff_text_reference(case);
-            assert_eq!(got, want, "content mismatch for case {i}");
-            assert_eq!(
-                got_trunc, want_trunc,
-                "truncated flag mismatch for case {i}"
-            );
-            assert!(got.len() <= DIFF_MAX_BYTES, "case {i} exceeded byte cap");
-        }
-    }
-
-    #[test]
-    fn cap_diff_text_leaves_small_input_untouched() {
-        let (capped, truncated) = cap_diff_text("short\ndiff\n");
-        assert!(!truncated);
-        assert_eq!(capped, "short\ndiff\n");
-    }
-
-    #[test]
-    fn diff_reports_untracked_for_new_file() {
-        let Some(repo) = init_repo("diff-untracked") else {
-            return;
-        };
-        std::fs::write(repo.join("new_file.txt"), "hello\n").expect("write untracked file");
-
-        let result = diff(&repo, "new_file.txt").expect("diff should succeed");
-        assert_eq!(result.kind, DiffKind::Untracked);
-        assert!(result.content.is_none());
-
-        std::fs::remove_dir_all(&repo).ok();
-    }
-
-    #[test]
-    fn diff_reports_text_with_content_for_modified_file() {
-        let Some(repo) = init_repo("diff-modified") else {
-            return;
-        };
-        std::fs::write(repo.join("committed.txt"), "changed content\n")
-            .expect("modify tracked file");
-
-        let result = diff(&repo, "committed.txt").expect("diff should succeed");
-        assert_eq!(result.kind, DiffKind::Text);
-        let content = result.content.expect("text diff has content");
-        assert!(content.contains("changed content"));
-        assert!(!result.truncated);
-
-        std::fs::remove_dir_all(&repo).ok();
-    }
-
-    #[test]
-    fn diff_truncates_output_exceeding_caps() {
-        let Some(repo) = init_repo("diff-truncate") else {
-            return;
-        };
-        // Rewrite the tracked file with far more than 2000 lines so the
-        // generated unified diff exceeds `DIFF_MAX_LINES`.
-        let big = (0..3000)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(repo.join("committed.txt"), big).expect("write large file");
-
-        let result = diff(&repo, "committed.txt").expect("diff should succeed");
-        assert_eq!(result.kind, DiffKind::Text);
-        assert!(result.truncated);
-        let content = result.content.expect("text diff has content");
-        assert!(content.lines().count() <= 2000);
-
-        std::fs::remove_dir_all(&repo).ok();
-    }
-
-    /// A diff far larger than `DIFF_READ_MAX_BYTES` must still return
-    /// promptly, stay bounded, and be flagged truncated — the read now stops
-    /// early instead of buffering the whole thing.
-    #[test]
-    fn diff_stops_reading_past_the_read_cap_and_reports_truncated() {
-        let Some(repo) = init_repo("diff-read-cap") else {
-            return;
-        };
-        // ~12 MiB of changed content: comfortably past DIFF_READ_MAX_BYTES
-        // (4 MiB), so the early-stop path is the one exercised.
-        let huge = "abcdefghijklmnopqrstuvwxyz0123456789\n".repeat(340_000);
-        std::fs::write(repo.join("committed.txt"), huge).expect("write huge file");
-
-        let result = diff(&repo, "committed.txt").expect("diff should succeed");
-        assert_eq!(result.kind, DiffKind::Text);
-        assert!(
-            result.truncated,
-            "an early-stopped read must report truncated"
-        );
-        let content = result.content.expect("text diff has content");
-        assert!(
-            content.len() <= DIFF_MAX_BYTES,
-            "content {} exceeded the user-facing cap",
-            content.len()
-        );
-
-        std::fs::remove_dir_all(&repo).ok();
-    }
-
-    /// The capped runner must still surface a real git failure (non-zero exit
-    /// with a stderr message) rather than silently returning empty output.
-    #[test]
-    fn git_output_capped_reports_failure_from_stderr() {
-        let Some(repo) = init_repo("capped-error") else {
-            return;
-        };
-        let err = git_output_capped(
-            &repo,
-            &["rev-parse", "--verify", "definitely-not-a-ref"],
-            "rev-parse",
-            1024,
-        )
-        .expect_err("an unknown ref must be an error");
-        assert!(
-            err.starts_with("git rev-parse failed:"),
-            "unexpected error text: {err}"
-        );
-
-        std::fs::remove_dir_all(&repo).ok();
-    }
-
-    /// The happy path must report `hit_cap == false` and return stdout intact.
-    #[test]
-    fn git_output_capped_returns_full_output_under_the_cap() {
-        let Some(repo) = init_repo("capped-ok") else {
-            return;
-        };
-        let (out, hit_cap) =
-            git_output_capped(&repo, &["ls-files"], "ls-files", 1 << 20).expect("ls-files");
-        assert!(!hit_cap);
-        assert!(String::from_utf8_lossy(&out).contains("committed.txt"));
-
         std::fs::remove_dir_all(&repo).ok();
     }
 
@@ -1270,47 +632,7 @@ mod tests {
         std::fs::remove_dir_all(&repo).ok();
     }
 
-    // ── status/diff/accept/reject path-root consistency ─────────────────
-
-    #[test]
-    fn status_then_diff_succeed_when_project_path_is_repo_subdirectory() {
-        if !git_available() {
-            return;
-        }
-        let parent = unique_temp_dir("subdir-repo-parent");
-        std::fs::create_dir_all(&parent).expect("create parent repo dir");
-        run_git(&parent, &["init", "-q"]);
-        run_git(&parent, &["config", "user.email", "test@example.com"]);
-        run_git(&parent, &["config", "user.name", "Test"]);
-
-        let child = parent.join("child");
-        std::fs::create_dir_all(&child).expect("create child dir");
-        std::fs::write(child.join("foo.txt"), "base\n").expect("write child file");
-        run_git(&parent, &["add", "."]);
-        run_git(&parent, &["commit", "-q", "-m", "init"]);
-
-        std::fs::write(child.join("foo.txt"), "changed\n").expect("modify child file");
-
-        // `status` discovers the real repo root (`parent`) and reports
-        // paths relative to it, e.g. "child/foo.txt" — not relative to
-        // the "project path" (`child`) passed in by the caller.
-        let result = status(&child).expect("status should succeed");
-        let reported = result
-            .files
-            .iter()
-            .find(|f| f.path == "child/foo.txt")
-            .expect("modified child file reported relative to repo root");
-        assert_eq!(reported.kind, StatusKind::Modified);
-
-        // `diff` must resolve that same reported path successfully even
-        // though `child` (not `parent`) is the "project path" argument.
-        let diff_result = diff(&child, &reported.path).expect("diff should succeed");
-        assert_eq!(diff_result.kind, DiffKind::Text);
-        let content = diff_result.content.expect("text diff has content");
-        assert!(content.contains("changed"));
-
-        std::fs::remove_dir_all(&parent).ok();
-    }
+    // ── accept/reject path guards ───────────────────────────────────────
 
     #[test]
     fn accept_and_reject_refuse_path_traversal() {
@@ -1336,60 +658,18 @@ mod tests {
     }
 
     #[test]
-    fn accept_reject_diff_refuse_dot_git_paths() {
+    fn accept_reject_refuse_dot_git_paths() {
         let Some(repo) = init_repo("dot-git-guard") else {
             return;
         };
         for p in [".git/config", ".git/HEAD", ".git"] {
             assert!(accept(&repo, p).is_err(), "accept({p}) should be rejected");
             assert!(reject(&repo, p).is_err(), "reject({p}) should be rejected");
-            assert!(diff(&repo, p).is_err(), "diff({p}) should be rejected");
         }
         // The real git index must be untouched by the rejected attempts
         // above — this is the actual data-loss scenario the guard
         // prevents (`reject(repo, ".git/index")` used to delete it).
         assert!(repo.join(".git").join("index").exists());
-
-        std::fs::remove_dir_all(&repo).ok();
-    }
-
-    // ── Y-column rename parsing (bug #2) ─────────────────────────────────
-
-    #[test]
-    fn parse_porcelain_z_consumes_y_column_rename_pair() {
-        // " R renamed.txt\0committed.txt\0" — a rename detected only in
-        // the worktree-vs-index comparison (Y column), matching real
-        // `git status --porcelain=v1 -z` output for `mv a b; git add -N
-        // b` (verified against a real git binary). Before the fix, only
-        // the X column was checked, so the paired source path
-        // "committed.txt" was left unconsumed and re-parsed as its own
-        // bogus status record.
-        let raw = b" R renamed.txt\0committed.txt\0";
-        let result = parse_porcelain_z(raw);
-        assert!(!result.truncated);
-        assert_eq!(result.files.len(), 1, "phantom entry: {:?}", result.files);
-        assert_eq!(result.files[0].path, "renamed.txt");
-        assert_eq!(result.files[0].kind, StatusKind::Renamed);
-    }
-
-    #[test]
-    fn status_handles_y_column_rename_without_phantom_entries() {
-        let Some(repo) = init_repo("status-y-column-rename") else {
-            return;
-        };
-        std::fs::rename(repo.join("committed.txt"), repo.join("renamed.txt"))
-            .expect("rename tracked file on disk");
-        run_git(&repo, &["add", "-N", "renamed.txt"]);
-
-        let result = status(&repo).expect("status should succeed");
-        assert_eq!(
-            result.files.len(),
-            1,
-            "unconsumed rename-source field produced a phantom entry: {:?}",
-            result.files
-        );
-        assert_eq!(result.files[0].path, "renamed.txt");
-        assert_eq!(result.files[0].kind, StatusKind::Renamed);
 
         std::fs::remove_dir_all(&repo).ok();
     }
@@ -1429,32 +709,6 @@ mod tests {
             status_output.stdout.is_empty(),
             "git status should be clean, got: {}",
             String::from_utf8_lossy(&status_output.stdout)
-        );
-
-        std::fs::remove_dir_all(&repo).ok();
-    }
-
-    // ── diff on unborn HEAD (bug #4) ─────────────────────────────────────
-
-    #[test]
-    fn diff_succeeds_on_unborn_head() {
-        if !git_available() {
-            return;
-        }
-        let repo = unique_temp_dir("diff-unborn-head");
-        std::fs::create_dir_all(&repo).expect("create repo dir");
-        run_git(&repo, &["init", "-q"]);
-        run_git(&repo, &["config", "user.email", "test@example.com"]);
-        run_git(&repo, &["config", "user.name", "Test"]);
-        std::fs::write(repo.join("new_file.txt"), "hello\n").expect("write file");
-        run_git(&repo, &["add", "new_file.txt"]);
-
-        let result = diff(&repo, "new_file.txt").expect("diff should succeed on unborn HEAD");
-        assert_eq!(result.kind, DiffKind::Text);
-        let content = result.content.expect("text diff has content");
-        assert!(
-            content.contains("+hello"),
-            "diff should show the file as an addition: {content}"
         );
 
         std::fs::remove_dir_all(&repo).ok();
@@ -1508,35 +762,6 @@ mod tests {
         // subtree from a single call.
         let content = std::fs::read_to_string(repo.join("subdir/file.txt")).expect("read back");
         assert_eq!(content, "changed\n");
-
-        std::fs::remove_dir_all(&repo).ok();
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn diff_does_not_execute_external_textconv_driver() {
-        let Some(repo) = init_repo("diff-no-textconv") else {
-            return;
-        };
-        let marker = repo.join("textconv_ran.marker");
-        std::fs::write(repo.join(".gitattributes"), "committed.txt diff=marker\n")
-            .expect("write .gitattributes");
-        run_git(
-            &repo,
-            &[
-                "config",
-                "diff.marker.textconv",
-                &format!("touch {}", marker.display()),
-            ],
-        );
-        std::fs::write(repo.join("committed.txt"), "changed content\n").expect("modify file");
-
-        diff(&repo, "committed.txt").expect("diff should succeed");
-
-        assert!(
-            !marker.exists(),
-            "a repository-configured textconv driver must not execute"
-        );
 
         std::fs::remove_dir_all(&repo).ok();
     }

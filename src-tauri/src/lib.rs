@@ -12,6 +12,7 @@ mod conversation_tree;
 mod external_open;
 mod files;
 mod git;
+mod git_browser;
 mod git_watcher;
 mod goal_config;
 mod json_store;
@@ -776,34 +777,69 @@ fn open_url_external(url: String) -> Result<(), String> {
     navigation_guard::open_external(&url)
 }
 
-/// Bounded `git status` for the Changes panel — see `workspace::status`.
+/// The project tree with status marks and the repo header — see
+/// `git_browser::status`.
 ///
-/// Runs `async` + `spawn_blocking`: `workspace::status` shells out to one
-/// or more `git` subprocesses via `Command::output()`, which can take
-/// long enough on a large repository to freeze the webview if run on
-/// Tauri's main command thread.
+/// Runs `async` + `spawn_blocking`: gix's status hashes changed files and
+/// walks the whole work tree for untracked ones, which can take long enough
+/// on a large repository to freeze the webview if run on Tauri's main
+/// command thread. The same holds for every `git_browser_*` command below
+/// (blob diffs, history walks).
 #[tauri::command]
-async fn workspace_status(path: String) -> Result<workspace::StatusResult, String> {
-    tauri::async_runtime::spawn_blocking(move || workspace::status(Path::new(&path)))
+async fn git_browser_status(path: String) -> Result<git_browser::StatusView, String> {
+    tauri::async_runtime::spawn_blocking(move || git_browser::status(Path::new(&path)))
         .await
         .map_err(|e| format!("join error: {e}"))?
 }
 
-/// Bounded diff of one file against HEAD — see `workspace::diff`.
-///
-/// Runs `async` + `spawn_blocking` for the same reason as
-/// `workspace_status` — see its doc comment.
+/// One work-tree file in full with its change against `HEAD` inline — see
+/// `git_browser::file`. `async` + `spawn_blocking`: see `git_browser_status`.
 #[tauri::command]
-async fn workspace_diff(path: String, rel_path: String) -> Result<workspace::DiffResult, String> {
-    tauri::async_runtime::spawn_blocking(move || workspace::diff(Path::new(&path), &rel_path))
+async fn git_browser_file(path: String, rel_path: String) -> Result<git_browser::FileView, String> {
+    tauri::async_runtime::spawn_blocking(move || git_browser::file(Path::new(&path), &rel_path))
         .await
         .map_err(|e| format!("join error: {e}"))?
+}
+
+/// The commit graph with refs and lanes — see `git_browser::log`.
+/// `async` + `spawn_blocking`: see `git_browser_status`.
+#[tauri::command]
+async fn git_browser_log(path: String) -> Result<git_browser::LogView, String> {
+    tauri::async_runtime::spawn_blocking(move || git_browser::log(Path::new(&path)))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
+}
+
+/// A commit's metadata and touched files — see `git_browser::commit`.
+/// `async` + `spawn_blocking`: see `git_browser_status`.
+#[tauri::command]
+async fn git_browser_commit(path: String, sha: String) -> Result<git_browser::CommitView, String> {
+    tauri::async_runtime::spawn_blocking(move || git_browser::commit(Path::new(&path), &sha))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
+}
+
+/// One file as of a commit with the commit's change inline — see
+/// `git_browser::commit_file`. `async` + `spawn_blocking`: see
+/// `git_browser_status`.
+#[tauri::command]
+async fn git_browser_commit_file(
+    path: String,
+    sha: String,
+    rel_path: String,
+) -> Result<git_browser::FileView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_browser::commit_file(Path::new(&path), &sha, &rel_path)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 /// Stage a file's changes — see `workspace::accept`.
 ///
-/// Runs `async` + `spawn_blocking` for the same reason as
-/// `workspace_status` — see its doc comment.
+/// Runs `async` + `spawn_blocking`: `workspace::accept` shells out to
+/// `git add`, which can take long enough on a large repository to freeze
+/// the webview if run on Tauri's main command thread.
 #[tauri::command]
 async fn workspace_accept(path: String, rel_path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || workspace::accept(Path::new(&path), &rel_path))
@@ -815,7 +851,7 @@ async fn workspace_accept(path: String, rel_path: String) -> Result<(), String> 
 /// `workspace::reject`.
 ///
 /// Runs `async` + `spawn_blocking` for the same reason as
-/// `workspace_status` — see its doc comment.
+/// `workspace_accept` — see its doc comment.
 #[tauri::command]
 async fn workspace_reject(path: String, rel_path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || workspace::reject(Path::new(&path), &rel_path))
@@ -1297,8 +1333,11 @@ pub fn run() {
             approval_mode_get,
             approval_mode_set_default,
             approval_mode_set_project,
-            workspace_status,
-            workspace_diff,
+            git_browser_status,
+            git_browser_file,
+            git_browser_log,
+            git_browser_commit,
+            git_browser_commit_file,
             workspace_accept,
             workspace_reject,
             widgets_state,

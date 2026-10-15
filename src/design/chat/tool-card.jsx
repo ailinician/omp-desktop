@@ -4,7 +4,24 @@
 const { Icon: _TC_Icon, TOOL_META: _TC_TOOL_META, EvalCell: _TC_EvalCell, CopyButton: _TC_Copy, CopyHost: _TC_CopyHost, CollapseToggle: _TC_Collapse } = window;
 const { bashPreview: _TC_bashPreview } = window.OMP_COLLAPSE;
 
-function ScrubbableDiff({ msg }) {
+// One open-in-git-browser button per file the edit touched; a card whose
+// paths are not known yet (a running edit in a mode the start frame does
+// not name files for) shows none.
+function DiffPaths({ msg, onOpenFile }) {
+  const paths = msg.targets.filter(Boolean);
+  return (
+    <span className="diff-paths">
+      {paths.map((p, i) => (
+        <React.Fragment key={i}>
+          {i > 0 && ", "}
+          <button type="button" className="diff-path" onClick={() => onOpenFile?.(p)} title="open in the git browser">{p}</button>
+        </React.Fragment>
+      ))}
+    </span>
+  );
+}
+
+function ScrubbableDiff({ msg, onOpenFile }) {
   const total = msg.diff.length;
   const [pos, setPos]     = React.useState(total);
   const [hover, setHover] = React.useState(null);
@@ -33,7 +50,7 @@ function ScrubbableDiff({ msg }) {
   return (
     <div className="diff-wrap">
       <div className="diff-head mono">
-        <span style={{ color: "var(--fg-3)" }}>{msg.target}</span>
+        <DiffPaths msg={msg} onOpenFile={onOpenFile} />
         <span className="diff-counts">
           <span style={{ color: "var(--diff-add-fg)" }}>+{msg.adds}</span>
           <span style={{ color: "var(--diff-rm-fg)" }}>−{msg.rems}</span>
@@ -151,7 +168,7 @@ function TaskPanel({ subagents, onInspect }) {
 // `collapsed`: true/false when the body has a toggle, undefined when it is
 // too short to collapse (app/chat-collapse.js). Collapsed, the body keeps a
 // few lines in view: bash its last ones, everything else its first.
-function ToolCard({ msg, idx, highlighted, onInspectSubagent, collapsed, onToggleCollapse }) {
+function ToolCard({ msg, idx, highlighted, onInspectSubagent, onOpenFile, collapsed, onToggleCollapse }) {
   const meta    = _TC_TOOL_META[msg.tool] || { color: "var(--fg-3)", icon: "circle", label: msg.tool };
   const running = msg.status === "running";
   const bashLines = collapsed && msg.output ? _TC_bashPreview(msg.output) : msg.output;
@@ -206,11 +223,11 @@ function ToolCard({ msg, idx, highlighted, onInspectSubagent, collapsed, onToggl
             </div>
           )}
 
-          {msg.tool === "edit" && msg.diff && <ScrubbableDiff msg={msg} />}
+          {msg.tool === "edit" && msg.diff && <ScrubbableDiff msg={msg} onOpenFile={onOpenFile} />}
           {msg.tool === "edit" && !msg.diff && (
             <div className="tool-foot mono">
               <span style={{ color: "var(--fg-3)" }}>↳</span>
-              <span style={{ color: "var(--fg-2)" }}>{msg.target}</span>
+              <DiffPaths msg={msg} onOpenFile={onOpenFile} />
               <span style={{ color: "var(--diff-add-fg)", marginLeft: 8 }} className="mono">+{msg.adds || 0}</span>
               <span style={{ color: "var(--diff-rm-fg)", marginLeft: 4 }} className="mono">−{msg.rems || 0}</span>
               {running && <span className="shimmer-text" style={{ marginLeft: "auto" }}>writing patch…</span>}

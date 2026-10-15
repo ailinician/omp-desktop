@@ -395,6 +395,14 @@
     }
   }
 
+  // Git browser reads: `cmd` for the active tab's project folder, as
+  // `_invokeResult`'s `{ok, value | error}`; null with no project open.
+  async function _gitBrowserInvoke(cmd, args) {
+    const path = _activeProjectPath();
+    if (!path) return null;
+    return _invokeResult(cmd, { path, ...args });
+  }
+
   // Rail widgets: the `WidgetsSnapshot` `cmd` returns, or an empty one that
   // carries the rejection as `fatal` (browser mode: empty, no fatal).
   // app/use-widgets.jsx's applySnapshot defaults every missing field.
@@ -2794,7 +2802,7 @@
 
   // Project path (cwd) of the active tab, or null for a pathless tab (a
   // resumed session with no recorded cwd) — used to scope project-level
-  // approval rules and workspace status/diff to the right repo.
+  // approval rules and the git browser to the right repo.
   function _activeProjectPath() {
     const entry = sessionRegistry.get(activeSessionId);
     return entry?.path || null;
@@ -3570,23 +3578,36 @@
       return rules || [];
     },
 
-    // ── Workspace changes (git status/diff for the active tab's project) ────
-    // Backed by src-tauri/src/workspace.rs. Bounded/capped server-side —
-    // see that module's doc comments for the exact caps.
+    // ── Git browser + working-tree actions (active tab's project) ───────────
+    // Reads are src-tauri/src/git_browser/ (gix, bounded server-side — see
+    // that module for the caps); stage/discard are workspace.rs. The reads
+    // resolve to `{ok: true, value}` or `{ok: false, error}` so the overlay
+    // can show why (e.g. not a git repository); no project → null.
 
-    /** Bounded `git status` for the active tab's project. */
-    async workspaceStatus() {
-      const path = _activeProjectPath();
-      const empty = { files: [], truncated: false };
-      if (!path) return empty;
-      return _invokeSafe("workspace_status", { path }, empty);
+    /** Tree with git status marks, repo/branch info: `StatusView`. */
+    gitBrowserStatus() {
+      return _gitBrowserInvoke("git_browser_status", {});
     },
 
-    /** Bounded diff of one file (relative to the project root) against HEAD. */
-    async workspaceDiff(relPath) {
-      const path = _activeProjectPath();
-      if (!path) return null;
-      return _invokeSafe("workspace_diff", { path, relPath }, null);
+    /** One working-tree file with its change against HEAD inline: `FileView`.
+     *  `relPath` may be absolute inside the project (an edit card's target). */
+    gitBrowserFile(relPath) {
+      return _gitBrowserInvoke("git_browser_file", { relPath });
+    },
+
+    /** Commit graph of every ref plus the working-tree row: `LogView`. */
+    gitBrowserLog() {
+      return _gitBrowserInvoke("git_browser_log", {});
+    },
+
+    /** One commit and the files it touched: `CommitView`. */
+    gitBrowserCommit(sha) {
+      return _gitBrowserInvoke("git_browser_commit", { sha });
+    },
+
+    /** A file as of commit `sha` with that commit's change inline: `FileView`. */
+    gitBrowserCommitFile(sha, relPath) {
+      return _gitBrowserInvoke("git_browser_commit_file", { sha, relPath });
     },
 
     /** Stage a file's changes (`git add`). */

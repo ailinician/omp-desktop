@@ -227,13 +227,48 @@
     text = _dropLastLineIf(text, line => /^\[raw output: artifact:\/\/\d+\]$/.test(line));
     return text === "(no output)" ? "" : text;
   }
+  // The files an edit names before it runs. omp's edit tool has five
+  // variants (`edit.mode`): `replace` and `patch` take a `path` argument;
+  // `hashline` (the default), `apply_patch` and `sloppy` take one `input`
+  // script whose file headers differ — `[path#TAG]` (TAG = the 4-hex
+  // snapshot tag of a read), `*** Add|Update|Delete File: path`, and
+  // `*** Edit File: path`, whose path may carry a trailing ` all` flag
+  // (every match) or be a bare `all` / nothing (continue the previous
+  // file), and may be JSON-quoted when ambiguous. The paths are relative
+  // to omp's cwd, the tab's folder. Unique, in order of appearance. Best
+  // effort: the finished card takes its paths from the result's details,
+  // which every variant fills; a failed edit has none and keeps these.
+  const _EDIT_HEADERS = [
+    /^\[(.+?)#[0-9A-Fa-f]{4}\]\s*$/gm,
+    /^\*\*\* (?:Add|Update|Delete) File:[ \t]*(\S.*?)\s*$/gm,
+    /^[ \t]*\*{3}[ \t]+Edit[ \t]+File:[ \t]*(?!all[ \t]*\r?$)(\S.*?)(?:[ \t]+all)?[ \t]*\r?$/gim,
+  ];
+  function _editHeaderPath(raw) {
+    if (raw.length > 1 && raw.startsWith('"') && raw.endsWith('"')) {
+      try { return String(JSON.parse(raw)); } catch { /* keep the quoted text */ }
+    }
+    return raw;
+  }
+  function _editInputPaths(input) {
+    const paths = [];
+    for (const re of _EDIT_HEADERS) {
+      for (const m of String(input).matchAll(re)) {
+        const p = _editHeaderPath(m[1]);
+        if (p && !paths.includes(p)) paths.push(p);
+      }
+    }
+    return paths;
+  }
+
   // ── tool_execution_start → running tool card ──────────────────────────────
   // Verified fields: ev.toolName, ev.toolCallId, ev.args (object), ev.intent
   function buildToolStartCard(event, time) {
     const tool = normalizeToolName(event.toolName ?? "");
     // args is a plain object; extract a display target from common arg names
     const args   = (typeof event.args === "object" && event.args !== null) ? event.args : {};
-    const target = args.path ?? args.pattern ?? args.command ?? args.query
+    const editPaths = tool === "edit" && typeof args.input === "string" ? _editInputPaths(args.input) : [];
+    const target = (editPaths.length ? editPaths.join(", ") : undefined)
+                ?? args.path ?? args.pattern ?? args.command ?? args.query
                 ?? args.expression ?? args.url
                 // omp's goal tool: the operation (create, get, complete…).
                 ?? (tool === "goal" ? args.op : undefined)
@@ -247,6 +282,8 @@
     return {
       kind: "tool", tool, title,
       target: String(target),
+      // One entry per file for the edit card's open-in-git-browser buttons.
+      ...(tool === "edit" ? { targets: editPaths.length ? editPaths : (args.path ? [String(args.path)] : []) } : {}),
       summary: "",
       status: "running",
       duration: null,
@@ -283,9 +320,16 @@
         extra.adds = 0;
         extra.rems = 0;
       }
-      // Target path from args (richer than the generic target field)
-      if (details?.perFileResults?.length > 0) {
-        extra.target = details.perFileResults.map(r => r.path).join(", ");
+      // The files the edit touched, one per open-in-git-browser button, and
+      // joined for display: omp's EditToolDetails carries an absolute
+      // `path` for a single file (a `perFileResults` list for several);
+      // without either the card keeps the paths parsed from `args.input`.
+      const paths = details?.perFileResults?.length > 0 ? details.perFileResults.map(r => r.path)
+                  : details?.path ? [details.path]
+                  : card.targets;
+      if (paths.length) {
+        extra.targets = paths;
+        extra.target = paths.join(", ");
       }
     }
     // omp's BashToolDetails carries no output; the result content does. The

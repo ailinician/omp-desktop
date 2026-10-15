@@ -25,8 +25,8 @@
   // ``` fence lets an embedded ``` line end the block early, and everything
   // after it would be parsed as markdown. A backtick run longer than any
   // run inside is always safe. For callers that build markdown source
-  // (changes-panel.jsx's diffs, message-queue.js's refusal notes); defined
-  // before the guard below so it needs neither library.
+  // (message-queue.js's refusal notes); defined before the guard below so it
+  // needs neither library.
   function fenceCode(text, lang = '') {
     const longest = (text.match(/`+/g) ?? []).reduce((n, r) => Math.max(n, r.length), 0);
     const fence = '`'.repeat(Math.max(3, longest + 1));

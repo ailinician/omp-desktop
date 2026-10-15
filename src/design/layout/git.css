@@ -1,0 +1,189 @@
+/* Git browser — full-window three-pane view (design/git/*.jsx): files
+   tree, file with its working-tree change inline, commit graph. Shares
+   chat.css's .diff-mark/.diff-counts and the status colours of the tool
+   cards. */
+
+/* ── Shell ──────────────────────────────────────────────────────────────── */
+.gitb-scrim {
+  position: fixed; inset: 0;
+  background: color-mix(in oklab, var(--bg-app) 75%, transparent);
+  backdrop-filter: blur(10px);
+  display: flex; align-items: stretch; justify-content: stretch;
+  padding: 18px;
+  z-index: 90;
+}
+.gitb {
+  flex: 1; min-width: 0; min-height: 0;
+  background: var(--bg-window);
+  border: 1px solid var(--line-bright);
+  border-radius: 14px;
+  box-shadow: var(--shadow-window);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+/* Focused programmatically on open (keystrokes stay off the composer), not a control. */
+.gitb:focus { outline: none; }
+.gitb-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--d-text-sm);
+}
+.gitb-title { font-weight: 600; color: var(--fg); }
+.gitb-project { color: var(--fg-2); }
+.gitb-head-stats { margin-left: auto; display: flex; gap: 10px; font-size: var(--d-text-xs); color: var(--fg-3); }
+.gitb-head .btn { height: 22px; padding: 0 6px; }
+.gitb-body {
+  flex: 1; min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(220px, 20%) minmax(0, 1fr) minmax(280px, 26%);
+}
+.gitb-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.gitb-pane + .gitb-pane { border-left: 1px solid var(--line); }
+.gitb-pane-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  min-height: 36px;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--d-text-xs);
+}
+.gitb-pane-title { font-weight: 600; color: var(--fg-2); text-transform: uppercase; letter-spacing: .06em; font-size: 10px; }
+.gitb-pane-sub { color: var(--fg-4); }
+.gitb-empty { padding: 14px 12px; color: var(--fg-4); font-size: var(--d-text-sm); }
+.gitb-empty.tall { flex: 1; display: flex; align-items: center; justify-content: center; }
+.gitb-error { color: var(--rose); }
+.gitb-empty.gitb-error { white-space: pre-wrap; text-align: center; }
+
+/* ── Chips and refs ─────────────────────────────────────────────────────── */
+.gitb-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 0 7px; height: 18px;
+  border: 1px solid var(--line); border-radius: var(--r-pill);
+  font-size: 10px; color: var(--fg-3);
+  white-space: nowrap;
+}
+.gitb-ref {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 0 6px; height: 16px;
+  border: 1px solid var(--line-bright); border-radius: var(--r-pill);
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--fg-2);
+  white-space: nowrap; flex: none;
+  max-width: 180px; overflow: hidden; text-overflow: ellipsis;
+}
+/* Mirrors .btn.primary's text-on-accent, Daylight variant included. */
+.gitb-ref.head { color: #06241B; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+.theme-daylight .gitb-ref.head { color: #FAF7EF; }
+.gitb-ref.branch { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, var(--line)); }
+.gitb-ref.remote { color: var(--fg-3); }
+.gitb-ref.none { color: var(--fg-4); border-color: var(--line); font-style: italic; }
+.gitb-ref.tag { color: var(--amber); border-color: color-mix(in oklab, var(--amber) 45%, var(--line)); }
+
+/* ── Files pane ─────────────────────────────────────────────────────────── */
+.gitb-toggle { margin-left: auto; height: 20px; padding: 0 6px; gap: 4px; font-size: 10px; }
+.gitb-toggle.on { color: var(--accent); background: var(--accent-soft); }
+.gitb-filter {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.gitb-filter .btn.icon { height: 18px; width: 18px; }
+.gitb-filter-input {
+  flex: 1; min-width: 0;
+  background: var(--bg-input); color: var(--fg);
+  border: 1px solid var(--line); border-radius: var(--r-1);
+  padding: 2px 6px; height: 22px;
+  font-size: var(--d-text-xs);
+}
+.gitb-filter-input::placeholder { color: var(--fg-4); }
+.gitb-tree { flex: 1; min-height: 0; overflow: auto; padding: 4px 0 8px; font-size: var(--d-text-sm); }
+.gitb-row {
+  display: flex; align-items: center; gap: 5px;
+  height: 24px; padding-right: 8px;
+  cursor: pointer; white-space: nowrap;
+  color: var(--fg-2);
+}
+.gitb-row:hover { background: var(--bg-hover); }
+.gitb-row.active { background: var(--bg-active); color: var(--fg); }
+.gitb-row.dir { color: var(--fg-3); }
+.gitb-row.inert { cursor: default; }
+.gitb-row.deleted .gitb-row-name { text-decoration: line-through; opacity: .8; }
+.gitb-row-pad { width: 11px; flex: none; }
+.gitb-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.gitb-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--amber); flex: none; margin-right: 4px; }
+.gitb-mark { width: 12px; text-align: center; font-size: 10px; font-weight: 600; flex: none; }
+
+/* ── File view ──────────────────────────────────────────────────────────── */
+.gitb-view-head { gap: 10px; }
+.gitb-view-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gitb-view-dir { color: var(--fg-4); }
+.gitb-view-name { color: var(--fg); }
+.gitb-view-head .diff-counts { margin-left: 0; }
+.gitb-view-commit { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 40%; flex: none; }
+.gitb-view-subject { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); font-family: var(--font-sans); }
+.gitb-hunks { display: inline-flex; align-items: center; gap: 2px; color: var(--fg-3); margin-left: auto; }
+.gitb-hunks .btn.icon { height: 18px; width: 18px; }
+.gitb-act { height: 20px; padding: 0 7px; gap: 4px; font-size: 10px; border: 1px solid var(--line); }
+.gitb-copy { position: static; opacity: 1; }
+.gitb-view-body {
+  flex: 1; min-height: 0; overflow: auto;
+  background: var(--bg-input);
+  font-size: var(--d-text-sm); line-height: 1.5;
+  padding: 4px 0;
+}
+.gitb-lines { display: inline-block; min-width: 100%; vertical-align: top; }
+.gitb-line {
+  display: grid;
+  grid-template-columns: 40px 40px 14px auto;
+  align-items: center;
+  padding: 0 0 0 4px;
+  white-space: pre;
+}
+.gitb-line.k-add { background: var(--diff-add-bg); }
+.gitb-line.k-rem { background: var(--diff-rm-bg); }
+.gitb-ln { text-align: right; padding-right: 8px; color: var(--fg-5); font-size: var(--d-text-xs); border-right: 1px solid var(--line); }
+/* Over `.selectable *` (the view body): copying code leaves the numbers out. */
+.selectable .gitb-ln { user-select: none; }
+.gitb-line.k-add .gitb-ln, .gitb-line.k-rem .gitb-ln { color: var(--fg-4); }
+.gitb-line.k-add .diff-mark { color: var(--diff-add-fg); }
+.gitb-line.k-rem .diff-mark { color: var(--diff-rm-fg); }
+.gitb-code { padding: 0 12px; color: var(--fg-2); }
+.gitb-line.k-add .gitb-code { color: var(--diff-add-fg); }
+.gitb-line.k-rem .gitb-code { color: var(--diff-rm-fg); }
+
+/* ── History pane ───────────────────────────────────────────────────────── */
+.gitb-log { flex: 1; min-height: 0; overflow: auto; }
+.gitb-log-inner { position: relative; }
+/* Above the rows: an active/hovered row's background must not cover the graph. */
+.gitb-graph { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 1; }
+.gitb-commit {
+  position: absolute; left: 0; right: 0;
+  display: flex; flex-direction: column; justify-content: center; gap: 2px;
+  padding-right: 10px;
+  cursor: pointer; white-space: nowrap; overflow: hidden;
+  border-left: 2px solid transparent;
+}
+.gitb-commit:hover { background: var(--bg-hover); }
+.gitb-commit.active { background: var(--bg-active); border-left-color: var(--accent); }
+.gitb-commit.worktree { color: var(--fg-3); font-style: italic; }
+.gitb-commit-top { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.gitb-commit-subject { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--d-text-sm); color: var(--fg); }
+.gitb-commit.worktree .gitb-commit-subject { color: var(--fg-3); }
+.gitb-commit-meta { display: flex; gap: 8px; font-size: 10px; color: var(--fg-4); }
+
+/* ── Edit card: each path opens the browser ─────────────────────────────── */
+/* A path is a button, one unbreakable box: WebKit's ellipsis on the wrapper
+   would hide the whole box, so each button clips itself (max-width) and
+   sits on the text baseline (vertical-align). Not a .btn, so it carries its
+   own focus ring, inset because the wrapper clips overflow. */
+.diff-paths { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-4); }
+.diff-path {
+  appearance: none; background: none; border: 0; padding: 0;
+  font: inherit; color: var(--fg-3);
+  cursor: pointer; text-decoration: underline dotted transparent; text-underline-offset: 2px;
+  max-width: 100%; vertical-align: bottom;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tool-foot .diff-path { color: var(--fg-2); }
+.diff-path:hover, .diff-path:focus-visible { color: var(--accent); text-decoration-color: currentColor; }
+.diff-path:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

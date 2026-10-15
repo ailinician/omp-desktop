@@ -117,7 +117,7 @@ const JobRow = React.memo(function JobRow({ msg, idx, highlighted }) {
 // `collapseAfter` are the tweaks, `collapseOverrides` this tab's
 // `_id → collapsed` toggles, and `onToggleCollapse(id, collapsed)` flips one
 // (app/chat-collapse.js).
-function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, onAskAnswer, onAskDialogAnswer, onConfirmAsk, onCancelAsk, onGrantApproval, onStopRetry, hasProjectPath, onInspectSubagent, foldModes, collapseAfter, collapseOverrides, onToggleCollapse }) {
+function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, onAskAnswer, onAskDialogAnswer, onConfirmAsk, onCancelAsk, onGrantApproval, onStopRetry, hasProjectPath, onInspectSubagent, onOpenFile, foldModes, collapseAfter, collapseOverrides, onToggleCollapse }) {
   const scrollRef   = React.useRef(null);
   const pinnedRef   = React.useRef(true);   // assume start pinned to bottom
   const prevTopRef  = React.useRef(0);
@@ -222,7 +222,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
             if (m.kind === "goal")    return <_CV_GoalRow         key={m._id ?? i} idx={i} highlighted={hl} msg={m} />;
             if (m.kind === "approval") return <_CV_ApprovalRow    key={m._id ?? i} idx={i} highlighted={hl} msg={m} />;
             if (m.kind === "tool")    return <_CV_ToolCard_M      key={m._id ?? i} idx={i} highlighted={hl} msg={m} onInspectSubagent={onInspectSubagent}
-              collapsed={collapsed[m._id]} onToggleCollapse={onToggleCollapse} />;
+              onOpenFile={onOpenFile} collapsed={collapsed[m._id]} onToggleCollapse={onToggleCollapse} />;
             if (m.kind === "ask")     return <_CV_AskBubble_M     key={m._id ?? i} idx={i} highlighted={hl} msg={m} onAnswer={onAskAnswer} onAnswerDialog={onAskDialogAnswer} onConfirm={onConfirmAsk} onCancelAsk={onCancelAsk} onGrant={onGrantApproval} hasProjectPath={hasProjectPath} />;
             return <_CV_AssistantBubble_M key={m._id ?? i} idx={i} highlighted={hl} msg={m}
               annotable={i === lastAsstIdx}

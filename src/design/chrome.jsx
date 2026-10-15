@@ -211,7 +211,7 @@ function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRu
         </span>
       </button>
       <span className="status-sep">·</span>
-      <button className="status-cell btn ghost" onClick={onChanges} title="changes (git status/diff)" style={{ height: 20, padding: "0 6px" }}>
+      <button className="status-cell btn ghost" onClick={onChanges} title="git browser" style={{ height: 20, padding: "0 6px" }}>
         <Icon name="diff2" size={11} color="var(--fg-3)" />
       </button>
       <span className="status-sep">·</span>

@@ -45,7 +45,7 @@
        marked-setup.js wires marked to hljs and escapes raw HTML / unsafe
        link schemes; it needs both libs defined, so it comes right after.
        It also defines window.OMP_MARKDOWN (fenceCode), which
-       changes-panel.jsx destructures at top level. -->
+       app/message-queue.js calls. -->
   <script src="marked.min.js"></script>
   <script src="highlight.min.js"></script>
   <script src="app/marked-setup.js"></script>
@@ -207,6 +207,12 @@
        read at call time; app/use-terminal.jsx destructures
        window.OMP_TERMINAL_XTERM at top level, so it must load before it. -->
   <script src="app/terminal-xterm.js"></script>
+  <!-- Git browser view helpers over the Rust git_browser_* payloads (tree
+       rows, filter, hunks, ages, edit-card paths). Dependency-free IIFE;
+       design/git/file-tree.jsx, file-view.jsx, history.jsx,
+       app/use-git-browser.jsx and app-live.jsx destructure
+       window.OMP_GIT_BROWSER at top level, so it must load before them. -->
+  <script src="app/git-browser.js"></script>
 
   <!-- Design components (unchanged — from src/design/ copy) -->
   <script src="design/tweaks/style.js"></script>
@@ -292,7 +298,14 @@
        and window.OMP_MATRIX at top level. -->
   <script type="text/babel" src="design/empty-workspace.jsx"></script>
   <script type="text/babel" src="design/panels.jsx"></script>
-  <script type="text/babel" src="design/changes-panel.jsx"></script>
+  <!-- Git browser: the files pane exports window.GitFileTree and
+       GIT_STATUS_META, which file-view.jsx destructures at top level;
+       git-browser.jsx destructures all three panes and calls
+       window.useGitBrowser (app/use-git-browser.jsx, below) at render time. -->
+  <script type="text/babel" src="design/git/file-tree.jsx"></script>
+  <script type="text/babel" src="design/git/file-view.jsx"></script>
+  <script type="text/babel" src="design/git/history.jsx"></script>
+  <script type="text/babel" src="design/git/git-browser.jsx"></script>
   <!-- Approvals panel's mode section (#57); approval-rules-panel.jsx
        destructures window.ApprovalModeSection at top level. -->
   <script type="text/babel" src="design/approval-mode-section.jsx"></script>
@@ -355,6 +368,9 @@
        window.OMP_TERMINAL_XTERM and window.OMP_SESSION_UI at top level. -->
   <script type="text/babel" src="app/use-terminal.jsx"></script>
   <script type="text/babel" src="app/use-conversation-tree.jsx"></script>
+  <!-- Git browser data flow; destructures window.OMP_GIT_BROWSER at top
+       level. -->
+  <script type="text/babel" src="app/use-git-browser.jsx"></script>
 
   <script type="text/babel" src="app-live.jsx"></script>
 </body>

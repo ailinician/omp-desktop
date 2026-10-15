@@ -19,7 +19,7 @@
 
 const {
   Icon, ChatView, Composer, CommandBridge, WindowChrome, TabBar, SubagentPane, ProjectSidebar, EmptyWorkspace,
-  StatusBar, AmbientRail, ConversationTree, PlanKanban, HistoryModal, ChangesPanel, ApprovalRulesPanel, UsageStatsPanel, PromptHistoryModal, UpdateModal, useTweaks,
+  StatusBar, AmbientRail, ConversationTree, PlanKanban, HistoryModal, GitBrowser, ApprovalRulesPanel, UsageStatsPanel, PromptHistoryModal, UpdateModal, useTweaks,
   TweaksPanel, TweakSection, TweakRow, TweakRadio, TweakToggle, TweakColor, TweakSlider, TweakButton,
   useWidgets, WidgetCard, WidgetErrorCard, WidgetApprovalCard, WidgetBoundary,
   TWEAK_DEFAULTS, NULL_MODEL, EMPTY_PROJECT, DEFAULT_PROFILE_ID,
@@ -37,6 +37,7 @@ const { NO_OVERRIDES: NO_COLLAPSE_OVERRIDES, foldModes: _foldModes, overridesFor
 const { tweakKey: _widgetTweakKey } = window.OMP_WIDGETS;
 const { EMPTY: _EXT_EMPTY, cards: _extCards, toggles: _extToggles } = window.OMP_EXT_WIDGETS;
 const { entryOf: _TERM_entryOf } = window.OMP_TERMINAL;
+const { absolutePath: _gitAbsolutePath, finishedEdits: _gitFinishedEdits } = window.OMP_GIT_BROWSER;
 
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
@@ -47,7 +48,9 @@ function App() {
   const [bridgeOpen,  setBridgeOpen]  = React.useState(false);
   const [bridgeView,  setBridgeView]  = React.useState("commands");
   const [historyOpen, setHistoryOpen] = React.useState(false);
-  const [changesOpen, setChangesOpen] = React.useState(false);
+  // Git browser: null, or { path, project } — the file it opens on (null =
+  // the first changed file) and the project that path belongs to.
+  const [gitOpen,     setGitOpen]     = React.useState(null);
   const [rulesOpen,   setRulesOpen]   = React.useState(false);
   const [statsOpen,   setStatsOpen]   = React.useState(false);
   const [promptHistoryOpen, setPromptHistoryOpen] = React.useState(false);
@@ -199,6 +202,18 @@ function App() {
     (id, collapsed) => setCollapseOverrides(m => updateEntry(m, planKey, NO_COLLAPSE_OVERRIDES, o => ({ ...o, [id]: !collapsed }))),
     [planKey]);
   const foldModes = _foldModes(t);
+  // Stable per tab: ToolCard is memoised, an inline closure would re-render
+  // every card. omp reports a tool path relative to the tab's folder, Rust
+  // reads a relative path as repo-root-relative, so it goes over absolute.
+  const gitProject = activeProject.path ?? null;
+  const handleOpenFile = React.useCallback(
+    path => setGitOpen({ path: _gitAbsolutePath(gitProject, path), project: gitProject }),
+    [gitProject]);
+  const closeGit = React.useCallback(() => setGitOpen(null), []);
+  // The git browser refetches when this count rises; counted only while it
+  // is open, and handed over as a number so streaming frames that finish no
+  // edit leave the memoised browser alone.
+  const gitEdits = React.useMemo(() => (gitOpen ? _gitFinishedEdits(messages) : 0), [gitOpen, messages]);
   // Collapse all / Expand all: one toggle per block in this tab, replacing
   // the tab's earlier ones; later blocks follow the modes again.
   const handleCollapseAll = (collapsed) => setCollapseOverrides(m => updateEntry(m, planKey, NO_COLLAPSE_OVERRIDES,
@@ -527,7 +542,7 @@ function App() {
   handlersRef.current = {
     "app.interrupt":           () => {
       // Only abort when no overlay is open (overlays handle Escape themselves).
-      if (bridgeOpen || historyOpen || changesOpen || rulesOpen || statsOpen || promptHistoryOpen || planOpen || shortcutsOpen || updater.open) return;
+      if (bridgeOpen || historyOpen || gitOpen || rulesOpen || statsOpen || promptHistoryOpen || planOpen || shortcutsOpen || updater.open) return;
       if (streaming) handleAbort();
     },
     "app.thinking.cycle":      cycleThinking,
@@ -567,7 +582,7 @@ function App() {
     "desktop.tab.moveLeft":    () => shiftActiveProject(-1),
     "desktop.tab.moveRight":   () => shiftActiveProject(1),
     "desktop.panel.todo":      () => setPlanOpen(v => !v),
-    "desktop.panel.changes":   () => setChangesOpen(v => !v),
+    "desktop.panel.changes":   () => setGitOpen(v => (v ? null : { path: null })),
     "desktop.panel.rules":     () => setRulesOpen(v => !v),
     "desktop.panel.stats":     () => setStatsOpen(v => !v),
     "desktop.composer.promptHistory": () => setPromptHistoryOpen(v => !v),
@@ -686,6 +701,7 @@ function App() {
                     hoveredMsgIdx={hoveredMsgIdx}
                     hasProjectPath={!!activeProject?.path}
                     onInspectSubagent={subagentUi.open}
+                    onOpenFile={handleOpenFile}
                     foldModes={foldModes}
                     collapseAfter={t.collapseAfter}
                     collapseOverrides={tabCollapseOverrides}
@@ -733,7 +749,7 @@ function App() {
                   todoDone={todoCounts.done}
                   todoTotal={todoCounts.total}
                   onTodo={() => setPlanOpen(true)}
-                  onChanges={() => setChangesOpen(true)}
+                  onChanges={() => setGitOpen({ path: null })}
                   onRules={() => setRulesOpen(true)}
                   approvalMode={approvalCell}
                   onStats={() => setStatsOpen(true)}
@@ -844,8 +860,14 @@ function App() {
         />
       )}
 
-      {changesOpen && (
-        <ChangesPanel onClose={() => setChangesOpen(false)} />
+      {gitOpen && (
+        // Remounted per project, so no view state carries across; an
+        // edit-card path preselects only in the project it came from. The
+        // branch and the finished-edit count drive its refetches
+        // (app/use-git-browser.jsx).
+        <GitBrowser key={gitProject ?? ""} bridge={bridge}
+          initialPath={gitOpen.project === gitProject ? gitOpen.path : null}
+          onClose={closeGit} branch={activeProject.branch ?? null} edits={gitEdits} />
       )}
 
       {rulesOpen && (

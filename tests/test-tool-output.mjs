@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// Regression script for finalizeToolCard (src/adapter.js): the bash branch's
-// display lines and the text its copy button puts on the clipboard (issue
-// #33) — the card shows omp's result text as streamed, notices included; the
-// copy text drops the model-facing notices omp appends (exit code, wall
-// time, artifact footer) — and omp's failure flag on any card (#43).
+// Regression script for buildToolStartCard / finalizeToolCard (src/adapter.js):
+// the bash branch's display lines and the text its copy button puts on the
+// clipboard (issue #33) — the card shows omp's result text as streamed,
+// notices included; the copy text drops the model-facing notices omp appends
+// (exit code, wall time, artifact footer) — omp's failure flag on any card
+// (#43), and the edit card's file paths (the git browser's open-file
+// buttons) across omp's five edit modes.
 // Run: node tests/test-tool-output.mjs
 
 import assert from "node:assert/strict";
@@ -16,7 +18,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ctx = vm.createContext({ console });
 ctx.window = ctx;
 vm.runInContext(readFileSync(join(root, "src", "adapter.js"), "utf8"), ctx, { filename: "adapter.js" });
-const { finalizeToolCard } = ctx;
+const { buildToolStartCard, finalizeToolCard } = ctx;
 
 let passed = 0;
 function check(label, fn) {
@@ -86,6 +88,51 @@ check("a call omp reports as failed is marked, so a folded card stays open (#43)
   const event = (isError) => ({ result: { content: [{ type: "text", text: "boom" }], details: { exitCode: 2 } }, isError });
   assert.equal(finalizeToolCard(card, event(true)).isError, true);
   assert.equal(finalizeToolCard(card, event(false)).isError, false);
+});
+
+// Edit cards: the paths the git browser opens. Shapes are omp 18's: the
+// start frame's args per edit mode, the end frame's EditToolDetails
+// (`path` for one file, `perFileResults` for several), as aggregateDetails
+// in oh-my-pi's packages/coding-agent/src/edit/index.ts builds them.
+const start = (args) => buildToolStartCard({ toolName: "edit", toolCallId: "t1", args, intent: "x" }, "12:00");
+const end = (c, details) => finalizeToolCard(c, { result: { content: [{ type: "text", text: "ok" }], details } });
+// Arrays made inside the vm context have their own Array prototype; strict
+// deepEqual compares prototypes, so copy them into this realm first.
+const arr = (a) => Array.from(a);
+check("hashline mode: the [path#TAG] headers name the files while the edit runs", () => {
+  const c = start({ input: "[src/math.js#0000]\nPUT >$:\n+x\n[src/math.js#0000]\nPUT 1.=1:\n+y\n[README.md#A1B2]\nPUT >$:\n+z" });
+  assert.deepEqual(arr(c.targets), ["src/math.js", "README.md"]);
+  assert.equal(c.target, "src/math.js, README.md");
+});
+
+check("apply_patch and sloppy modes: their file headers name the files", () => {
+  const patch = start({ input: "*** Begin Patch\n*** Add File: hello.txt\n+Hello\n*** Update File: src/app.py\n*** Move to: src/main.py\n@@ def greet():\n-a\n+b\n*** Delete File: obsolete.txt\n*** End Patch\n" });
+  assert.deepEqual(arr(patch.targets), ["hello.txt", "src/app.py", "obsolete.txt"]);
+  // sloppy: ` all` is a flag, a bare `all` or nothing continues the previous
+  // file, a JSON-quoted path is unquoted, CRLF and a header-only line are fine.
+  const sloppy = start({ input: "*** Edit File: src/a.ts all\n<<<<<<< SEARCH\nfoo\n=======\nbar\n>>>>>>> REPLACE\n*** Edit File: all\n  *** edit file: lib/b.ts\r\n*** Edit File: \n*** Edit File: \"with space.ts\"\n*** Edit File: tall\n*** Add File: \n" });
+  assert.deepEqual(arr(sloppy.targets), ["src/a.ts", "lib/b.ts", "with space.ts", "tall"]);
+});
+
+check("replace and patch modes: the path argument; no file known otherwise", () => {
+  assert.deepEqual(arr(start({ path: "src/c.ts", old_string: "a", new_string: "b" }).targets), ["src/c.ts"]);
+  assert.deepEqual(arr(start({ input: "nothing that names a file" }).targets), []);
+  assert.equal(start({ input: "nothing that names a file" }).target, "");
+});
+
+check("a finished single-file edit takes the absolute path from its details, whatever the mode", () => {
+  const c = end(start({ input: "[src/math.js#0000]\nPUT >$:\n+x" }), { diff: " 1|a\n+2|x", path: "/tmp/p/src/math.js", op: "update" });
+  assert.deepEqual(arr(c.targets), ["/tmp/p/src/math.js"]);
+  assert.equal(c.target, "/tmp/p/src/math.js");
+  assert.equal(c.adds, 1);
+});
+
+check("a finished multi-file edit lists every perFileResults path; one without details keeps the start paths", () => {
+  const multi = end(start({ input: "x" }), { diff: "", perFileResults: [{ path: "/tmp/p/a.ts", diff: "+1|a" }, { path: "/tmp/p/b.ts", diff: "" }] });
+  assert.deepEqual(arr(multi.targets), ["/tmp/p/a.ts", "/tmp/p/b.ts"]);
+  assert.equal(multi.target, "/tmp/p/a.ts, /tmp/p/b.ts");
+  const kept = end(start({ path: "src/c.ts" }), { diff: "" });
+  assert.deepEqual(arr(kept.targets), ["src/c.ts"]);
 });
 
 console.log(`tool-output: ${passed} checks passed`);

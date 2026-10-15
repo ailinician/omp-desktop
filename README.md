@@ -30,7 +30,7 @@ Built on Tauri 2 (Rust + the system webview). It doesn't bundle Electron, doesn'
 
 ### Watching the agent work
 
-- **Tool cards** for every call: `read`, `grep`, `bash`, `eval` (JS/Python kernel cells), `edit`, `task` and more. Output streams live, code is syntax-highlighted, and edit diffs have a scrubber.
+- **Tool cards** for every call: `read`, `grep`, `bash`, `eval` (JS/Python kernel cells), `edit`, `task` and more. Output streams live, code is syntax-highlighted, edit diffs have a scrubber, and the file path on an edit card opens the git browser on that file.
 - **Approvals.** The tool approval mode is chosen in the approvals panel (status-bar ✓): `always ask`, `write` (the default) or `yolo`, for all projects or one project. Exec-tier tools ask first in `write`. Answer *Approve*, *Allow for this session* or *Always allow in this project*, and review or revoke the saved rules in the same panel. A change restarts the tab's agent, and the conversation continues; a tab that is working switches when its turn ends. The status bar shows the mode in use.
 - **Ambient rail.** Shows the context-window gauge, cost, a tokens/sec sparkline, an agent radar of recent tool activity, and a minimap of the session. Click a minimap cell to jump to that message. Show or hide each card under Tweaks → Rail.
 - **Subagent manager.** Agents started by a `task` call appear in the rail as they run. Open the manager to get totals, a swimlane timeline, agents grouped by the task call that spawned them, and an inspector for each agent's assignment, tools, output and transcript.
@@ -68,14 +68,18 @@ Toggle plan mode (`Shift+Alt+P`, `/plan` or the composer pill) and the agent dra
 
 ![Command bridge (Ctrl+K)](screenshots/command-bridge.webp)
 
+### Git browser
+
+`Ctrl+Shift+G`, the git button in the status bar, or the file path on an edit card opens the tab's repository over the whole window: the project tree with every changed file marked (modified, added, deleted, renamed, untracked; ignored files left out) and a switch to show only those; the selected file in full with its uncommitted change inline — staged and unstaged together, against the last commit — with jump-between-changes, stage, discard and copy; and the commit graph of every branch, remote and tag, your uncommitted work on top and the branch's lead over its upstream. Click a commit to browse it: the files it changed, each shown as of that commit. The view refreshes by itself when the agent edits a file, when the branch changes and after a stage or discard. The app reads the repository itself (through [gix](https://github.com/GitoxideLabs/gitoxide)); only stage and discard run `git`.
+
+![Git browser: project tree with git status, the selected file with its change inline, and the commit graph](screenshots/git-browser.webp)
+
 ### Panels
 
 | | |
 |---|---|
-| **Changes**: `git status`/`git diff` for the tab's project, with per-file accept and reject | **Usage**: requests, cost, tokens and throughput for the last 24 h, by model, folder and agent type (from `omp stats`) |
-| ![Changes panel](screenshots/changes.webp) | ![Usage statistics](screenshots/usage.webp) |
-| **History**: saved conversations for the tab's profile, searchable and resumable | **Shortcuts** (`Ctrl+/`): every action with its chord; rebind, add a second chord, or reset |
-| ![Conversation history](screenshots/history.webp) | ![Keyboard shortcuts](screenshots/shortcuts.webp) |
+| **Usage**: requests, cost, tokens and throughput for the last 24 h, by model, folder and agent type (from `omp stats`) | **History**: saved conversations for the tab's profile, searchable and resumable |
+| ![Usage statistics](screenshots/usage.webp) | ![Conversation history](screenshots/history.webp) |
 
 ### Terminal
 
@@ -122,7 +126,9 @@ Open a folder with the `+` button (or `Ctrl+T`), from the sidebar's recent proje
 
 ### Keyboard shortcuts
 
-On macOS, `Ctrl+K`, `Ctrl+H`, `Ctrl+/`, `Ctrl+B`, `Ctrl+T`, `Ctrl+W`, `` Ctrl+` `` and `Ctrl+↑` also work with `⌘`. All shortcuts can be rebound in `Ctrl+/`. Your overrides are stored in `<app config>/keybindings.json`, and omp's own `~/.omp/agent/keybindings.yml` is used as the base layer. With the terminal focused, only the toggle-terminal and next/previous-tab shortcuts (whatever they are bound to), `⌘` shortcuts and, outside macOS, `Ctrl+Shift` shortcuts reach the app; `Ctrl+T`, `Ctrl+W`, `Ctrl+C`, `Esc` and other `Ctrl`/`Alt` keys stay with the shell. Copy and paste in the terminal with `Ctrl+Shift+C` / `Ctrl+Shift+V` (`⌘C` / `⌘V` on macOS).
+On macOS, `Ctrl+K`, `Ctrl+H`, `Ctrl+/`, `Ctrl+B`, `Ctrl+T`, `Ctrl+W`, `Ctrl+Shift+G`, `` Ctrl+` `` and `Ctrl+↑` also work with `⌘`. All shortcuts can be rebound in `Ctrl+/`: every action with its chord; rebind, add a second chord, or reset. Your overrides are stored in `<app config>/keybindings.json`, and omp's own `~/.omp/agent/keybindings.yml` is used as the base layer. With the terminal focused, only the toggle-terminal and next/previous-tab shortcuts (whatever they are bound to), `⌘` shortcuts and, outside macOS, `Ctrl+Shift` shortcuts reach the app; `Ctrl+T`, `Ctrl+W`, `Ctrl+C`, `Esc` and other `Ctrl`/`Alt` keys stay with the shell. Copy and paste in the terminal with `Ctrl+Shift+C` / `Ctrl+Shift+V` (`⌘C` / `⌘V` on macOS).
+
+![Keyboard shortcuts](screenshots/shortcuts.webp)
 
 | Action | Default |
 |---|---|
@@ -132,6 +138,7 @@ On macOS, `Ctrl+K`, `Ctrl+H`, `Ctrl+/`, `Ctrl+B`, `Ctrl+T`, `Ctrl+W`, `` Ctrl+` 
 | Toggle project sidebar | `Ctrl+B` |
 | New tab / close tab | `Ctrl+T` / `Ctrl+W` |
 | Toggle terminal | `` Ctrl+` `` |
+| Git browser | `Ctrl+Shift+G` |
 | Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
 | Move the tab's project left / right | `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown` |
 | Prompt history picker | `Ctrl+↑` |
@@ -141,7 +148,7 @@ On macOS, `Ctrl+K`, `Ctrl+H`, `Ctrl+/`, `Ctrl+B`, `Ctrl+T`, `Ctrl+W`, `` Ctrl+` 
 | Toggle plan mode | `Shift+Alt+P` |
 | Queue a follow-up | `Ctrl+Enter` or `Ctrl+Q` |
 
-The changes, approvals, usage, kanban, compact, export and update-check actions have no default chord. You can bind one in the shortcuts screen.
+The approvals, usage, kanban, compact, export and update-check actions have no default chord. You can bind one in the shortcuts screen.
 
 ### Slash commands
 

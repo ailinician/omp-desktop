@@ -13,8 +13,9 @@
 
 const { Icon: _RulesIcon, ApprovalModeSection: _RulesModeSection } = window;
 
-// Mounted only while open (app-live.jsx gates on `rulesOpen`) — see the
-// matching note in changes-panel.jsx. `approvalModes` and `sessions` come
+// Mounted only while open (app-live.jsx gates on `rulesOpen`), so there is
+// no `open` prop and no early return for it: mount is open, unmount is
+// closed, and the state below resets with it. `approvalModes` and `sessions` come
 // from the bridge snapshot (app-live.jsx); `activeProject` is the rendered
 // tab's entry, null with no tab open.
 function ApprovalRulesPanel({ onClose, activeProject, sessions, approvalModes }) {
