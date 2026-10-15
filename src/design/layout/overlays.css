@@ -209,7 +209,7 @@
 .kcard.ok .kcard-text { text-decoration: line-through; text-decoration-color: var(--line-bright); color: var(--fg-3); }
 .kcard-head { display: flex; align-items: flex-start; gap: 8px; }
 .kcard-mark {
-  width: 16px; height: 16px;
+  width: 1rem; height: 1rem;
   display: inline-flex; align-items: center; justify-content: center;
   border-radius: 4px;
   background: var(--bg-elevated);
@@ -224,16 +224,16 @@
 .kcard-meta {
   display: flex; align-items: center; gap: 6px;
   font-size: var(--d-text-xs);
-  padding-left: 24px;
+  padding-left: calc(1rem + 8px);
 }
 .kcard-tags {
   display: flex; flex-wrap: wrap; gap: 4px;
-  padding-left: 24px;
+  padding-left: calc(1rem + 8px);
 }
 .kcard-tags .chip { padding: 1px 6px; font-size: 10px; }
 .kcard-why {
   margin-top: 4px;
-  padding: 6px 8px 6px 24px;
+  padding: 6px 8px 6px calc(1rem + 8px);
   background: color-mix(in oklab, var(--lilac) 5%, transparent);
   border-left: 2px solid color-mix(in oklab, var(--lilac) 40%, var(--line));
   border-radius: 0 6px 6px 0;
@@ -242,7 +242,7 @@
 }
 .kcard-live {
   display: flex; align-items: center; gap: 6px;
-  padding: 5px 8px 0 24px;
+  padding: 5px 8px 0 calc(1rem + 8px);
   font-size: var(--d-text-xs);
   border-top: 1px dashed var(--line);
   margin-top: 4px;

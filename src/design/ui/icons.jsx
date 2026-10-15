@@ -65,11 +65,14 @@ const _ICON_PATHS = {
   cog:     { p: ['<circle cx="8" cy="8" r="2"/><path d="M8 1v2m0 10v2M1 8h2m10 0h2M3 3l1.4 1.4M11.6 11.6L13 13M3 13l1.4-1.4M11.6 4.4L13 3"/>'],                                                                                            d: [8,8]     },
   terminal:{ p: ['<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4 6l2 2-2 2"/><path d="M8 10h3"/>'],                                                                                                                   d: [14.5,2.5] },
 };
-const Icon = ({ name, size = 14, color = "currentColor", dotColor = "var(--accent, #ff8a4c)", ...rest }) => {
+// `size` is in px at the default font size; the svg is sized in rem through
+// `.ui-icon` (styles.css), so icons grow with the font-size tweak like the
+// text beside them. A more specific rule (`.collapse-toggle svg`) still wins.
+const Icon = ({ name, size = 14, color = "currentColor", dotColor = "var(--accent, #ff8a4c)", style, ...rest }) => {
   const def = _ICON_PATHS[name];
   if (!def) return null;
   return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none"
+    <svg className="ui-icon" style={{ "--icon-size": `${size / 16}rem`, ...style }} viewBox="0 0 16 16" fill="none"
       stroke={color} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" {...rest}>
       <g dangerouslySetInnerHTML={{ __html: def.p.join("") }} />
       <circle cx={def.d[0]} cy={def.d[1]} r={1.6} fill={dotColor} stroke="none" />

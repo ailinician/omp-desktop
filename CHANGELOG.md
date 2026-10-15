@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Icons now grow and shrink with the font size set in Tweaks, like the text next to them. Until now they stayed the same size, so at a larger font size the icons in the git browser, the session history, the Tweaks panel, the tabs, the sidebar and the chat looked too small and were hard to read. Icon-only buttons and the Tweaks panel grow with them. A crowded status bar no longer squeezes its icons either.
+- The model pill below the prompt box no longer sits lower than the thinking, plan mode and goal pills next to it.
+
 ## [0.9.0] - 2026-10-15
 
 ### Added

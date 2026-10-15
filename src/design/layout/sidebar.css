@@ -34,8 +34,9 @@
 }
 .psb-row:hover { background: var(--bg-hover); color: var(--fg-2); }
 .psb-row.active { background: var(--bg-surface); color: var(--fg); }
-/* Member rows line up under their project's name: chevron + folder icon. */
-.psb-row.psb-tab { padding-left: 43px; }
+/* Member rows line up under their project's name: row padding + chevron +
+   gap + folder icon + gap; the chevron box and the icon are rem-sized. */
+.psb-row.psb-tab { padding-left: calc(18px + 1.5625rem); }
 .psb-main {
   appearance: none; border: 0; background: transparent; padding: 0;
   flex: 1; min-width: 0; height: 100%;
@@ -54,12 +55,12 @@
 .psb-row .tab-profile { font-size: var(--d-text-xs); }
 
 .psb-chev {
-  width: 14px; height: 14px; flex: none; padding: 0; border: 0; background: transparent;
+  width: 0.875rem; height: 0.875rem; flex: none; padding: 0; border: 0; background: transparent;
   display: inline-flex; align-items: center; justify-content: center; color: var(--fg-4);
   transition: transform 120ms;
 }
 .psb-chev.open { transform: rotate(90deg); }
-.psb-chev-spacer { width: 14px; flex: none; }
+.psb-chev-spacer { width: 0.875rem; flex: none; }
 
 /* Hover actions replace the count. `display: none` also takes them out of
    the tab order, so reveal them on focus-within too: tabbing onto a row's
@@ -70,7 +71,7 @@
 .psb-row:hover .psb-count,
 .psb-row:focus-within .psb-count { display: none; }
 .psb-act {
-  width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; flex: none;
+  width: 1.125rem; height: 1.125rem; padding: 0; border: 0; border-radius: 4px; flex: none;
   display: inline-flex; align-items: center; justify-content: center;
   background: transparent; color: var(--fg-3);
 }

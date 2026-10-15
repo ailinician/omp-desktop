@@ -33,7 +33,7 @@
 /* Second and further lines line up under the objective, past the icon.
    They wrap in a narrow session column (sidebar and rail open at the
    window's minimum width) instead of clipping the switch. */
-.goal-meter, .goal-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding-left: 20px; font-size: var(--d-text-xs); }
+.goal-meter, .goal-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding-left: calc(0.75rem + 8px); font-size: var(--d-text-xs); }
 .goal-meter { font-family: var(--font-mono); color: var(--fg-3); }
 .goal-line { color: var(--fg-2); }
 .goal-bar { flex: 0 1 180px; min-width: 60px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
@@ -42,7 +42,7 @@
 .goal-bar.done > span { background: var(--lime); }
 .goal-note { flex: 1; min-width: 0; color: var(--fg-3); }
 .goal-note b { color: var(--fg-2); font-weight: 500; }
-.goal-error { padding-left: 20px; font-size: var(--d-text-xs); color: var(--rose); overflow-wrap: anywhere; }
+.goal-error { padding-left: calc(0.75rem + 8px); font-size: var(--d-text-xs); color: var(--rose); overflow-wrap: anywhere; }
 .goal-error-inline { font-size: var(--d-text-xs); color: var(--rose); }
 
 /* Budget picker (goal mode). */

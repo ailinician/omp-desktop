@@ -34,11 +34,12 @@ function TweakRadio({ label, value, options, onChange }) {
   const valueRef = React.useRef(value);
   valueRef.current = value;
 
-  // Segments wrap mid-word once per-segment width runs out. The track is
-  // ~248px (280 panel − 28 body pad − 4 seg pad), each button loses 12px
-  // to its own padding, and 11.5px system-ui averages ~6.3px/char — so 2
-  // options fit ~16 chars each, 3 fit ~10. Past that (or >3 options), fall
-  // back to a dropdown rather than wrap.
+  // Segments wrap mid-word once per-segment width runs out. At the default
+  // font size the track is ~248px (17.5rem = 280px panel − 28 body pad − 4
+  // seg pad; the panel scales with the font-size tweak like its text), each
+  // button loses 12px to its own padding, and 11.5px system-ui averages
+  // ~6.3px/char — so 2 options fit ~16 chars each, 3 fit ~10. Past that
+  // (or >3 options), fall back to a dropdown rather than wrap.
   const labelLen = (o) => String(typeof o === 'object' ? o.label : o).length;
   const maxLen = options.reduce((m, o) => Math.max(m, labelLen(o)), 0);
   const fitsAsSegments = maxLen <= ({ 2: 16, 3: 10 }[options.length] ?? 0);

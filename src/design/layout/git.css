@@ -87,7 +87,7 @@
   padding: 6px 10px;
   border-bottom: 1px solid var(--line);
 }
-.gitb-filter .btn.icon { height: 18px; width: 18px; }
+.gitb-filter .btn.icon { height: 1.125rem; width: 1.125rem; }
 .gitb-filter-input {
   flex: 1; min-width: 0;
   background: var(--bg-input); color: var(--fg);
@@ -108,7 +108,8 @@
 .gitb-row.dir { color: var(--fg-3); }
 .gitb-row.inert { cursor: default; }
 .gitb-row.deleted .gitb-row-name { text-decoration: line-through; opacity: .8; }
-.gitb-row-pad { width: 11px; flex: none; }
+/* A file row's stand-in for a folder row's size-11 chevron icon. */
+.gitb-row-pad { width: 0.6875rem; flex: none; }
 .gitb-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .gitb-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--amber); flex: none; margin-right: 4px; }
 .gitb-mark { width: 12px; text-align: center; font-size: 10px; font-weight: 600; flex: none; }
@@ -122,7 +123,7 @@
 .gitb-view-commit { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 40%; flex: none; }
 .gitb-view-subject { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); font-family: var(--font-sans); }
 .gitb-hunks { display: inline-flex; align-items: center; gap: 2px; color: var(--fg-3); margin-left: auto; }
-.gitb-hunks .btn.icon { height: 18px; width: 18px; }
+.gitb-hunks .btn.icon { height: 1.125rem; width: 1.125rem; }
 .gitb-act { height: 20px; padding: 0 7px; gap: 4px; font-size: 10px; border: 1px solid var(--line); }
 .gitb-copy { position: static; opacity: 1; }
 .gitb-view-body {

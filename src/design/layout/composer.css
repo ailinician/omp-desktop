@@ -80,7 +80,7 @@
 .queue-note { flex: none; color: var(--fg-4); }
 /* `.btn.icon.ghost` (styles.css), sized down; the inset ring stays inside
    the strip's scroll box. */
-.btn.icon.queue-btn { flex: none; width: 20px; height: 20px; }
+.btn.icon.queue-btn { flex: none; width: 1.25rem; height: 1.25rem; }
 .queue-btn:disabled { opacity: .4; cursor: default; }
 .btn.queue-btn:disabled:hover { background: transparent; color: var(--fg-3); }
 .btn.queue-btn:focus-visible { outline-offset: -2px; }
@@ -107,7 +107,11 @@
 .composer-input textarea::placeholder { color: var(--fg-4); }
 .composer-input textarea:focus-visible { outline: none; }
 
+/* A flex row, not inline flow: inline pills line up on their baselines, and
+   the model pill's first child is an empty dot whose baseline is its bottom
+   edge, so that pill sat lower than the icon-led ones. */
 .composer-foot {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
   padding: 6px 2px 0;
 }
 .composer-pill {

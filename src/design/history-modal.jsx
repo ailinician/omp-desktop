@@ -258,7 +258,7 @@ function HistoryModal({ open, onClose, onResume, activeCwd }) {
                   <div style={{
                     color: "var(--fg-3)", fontSize: "var(--d-text-xs)",
                     lineHeight: "1.35",
-                    paddingLeft: 20,
+                    paddingLeft: "calc(0.75rem + 8px)",
                     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                   }}>
                     {s.preview}

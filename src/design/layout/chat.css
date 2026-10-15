@@ -314,16 +314,16 @@
 .copy-btn {
   --copy-icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><rect x='5' y='5' width='8' height='8' rx='1'/><path d='M3 10V4a1 1 0 0 1 1-1h6'/></svg>");
   display: inline-flex; align-items: center; gap: 4px;
-  height: 20px; min-width: 20px; padding: 0 4px;
+  height: 1.25rem; min-width: 1.25rem; padding: 0 4px;
   border: 1px solid var(--line-bright); border-radius: 4px;
   background: var(--bg-elevated); color: var(--fg-3);
-  font: 500 10px/1 var(--font-mono);
+  font: 500 0.625rem/1 var(--font-mono);
   cursor: pointer; user-select: none;
   opacity: 0;
   transition: opacity 0.1s, color 0.1s;
 }
 .copy-btn::before {
-  content: ""; flex: none; width: 11px; height: 11px;
+  content: ""; flex: none; width: 0.6875rem; height: 0.6875rem;
   background: currentColor;
   -webkit-mask: var(--copy-icon) center / contain no-repeat;
   mask: var(--copy-icon) center / contain no-repeat;
@@ -478,7 +478,7 @@
 .ta-row:last-child { border-bottom: 0; }
 .ta-top { display: flex; align-items: center; }
 .ta-top .ta-hd { flex: 1; min-width: 0; }
-.btn.ta-inspect { width: 22px; height: 22px; margin-right: 4px; flex: none; opacity: 0.55; }
+.btn.ta-inspect { width: 1.375rem; height: 1.375rem; margin-right: 4px; flex: none; opacity: 0.55; }
 .ta-row:hover .ta-inspect { opacity: 1; }
 .ta-inspect:hover { color: var(--accent); }
 .ta-hd {

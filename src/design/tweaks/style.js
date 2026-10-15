@@ -6,7 +6,7 @@
 // document's script-scope lexical environment.
 (function () {
 const __TWEAKS_STYLE = `
-  .twk-panel{position:fixed;right:16px;bottom:16px;z-index:2147483646;width:280px;
+  .twk-panel{position:fixed;right:16px;bottom:16px;z-index:2147483646;width:17.5rem;
     max-height:calc(100vh - 32px);display:flex;flex-direction:column;
     transform:scale(var(--dc-inv-zoom,1));transform-origin:bottom right;
     background:color-mix(in oklab,var(--bg-elevated) 92%,transparent);
@@ -20,10 +20,10 @@ const __TWEAKS_STYLE = `
   .twk-hd{display:flex;align-items:center;justify-content:space-between;
     padding:10px 8px 10px 14px;cursor:move;user-select:none;
     border-bottom:1px solid var(--line)}
-  .twk-hd b{font-size:12px;font-weight:600;letter-spacing:.01em;color:var(--fg)}
+  .twk-hd b{font-size:0.75rem;font-weight:600;letter-spacing:.01em;color:var(--fg)}
 
   .twk-x{appearance:none;border:0;background:transparent;color:var(--fg-3);
-    width:22px;height:22px;border-radius:var(--r-1,6px);cursor:default;font-size:13px;line-height:1}
+    width:1.375rem;height:1.375rem;border-radius:var(--r-1,6px);cursor:default;font-size:0.8125rem;line-height:1}
   .twk-x:hover{background:var(--bg-hover);color:var(--fg)}
 
   .twk-body{padding:2px 14px 14px;display:flex;flex-direction:column;gap:10px;
@@ -45,7 +45,7 @@ const __TWEAKS_STYLE = `
   .twk-path{color:var(--fg-4);font-family:var(--font-mono,ui-monospace,monospace);
     font-size:var(--d-text-xs,10.5px);overflow-wrap:anywhere;user-select:text}
 
-  .twk-sect{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+  .twk-sect{font-size:0.625rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
     color:var(--fg-4);padding:10px 0 0}
   .twk-sect:first-child{padding-top:0}
 
@@ -113,7 +113,7 @@ const __TWEAKS_STYLE = `
   .twk-menu-item:hover{background:var(--bg-hover);color:var(--fg)}
   .twk-menu-item:focus-visible{outline:2px solid var(--accent);outline-offset:-1px}
   .twk-menu-item[aria-checked="true"]{color:var(--fg)}
-  .twk-menu-mark{width:10px;flex:none;align-self:center;display:inline-flex}
+  .twk-menu-mark{width:0.625rem;flex:none;align-self:center;display:inline-flex}
   .twk-menu-name{flex:none;font-family:var(--font-mono,ui-monospace,monospace)}
   .twk-menu-hint{color:var(--fg-4);font-family:var(--font-mono,ui-monospace,monospace)}
 
@@ -136,7 +136,7 @@ const __TWEAKS_STYLE = `
     display:flex;flex-direction:column;border-left:1px solid var(--line)}
   .twk-chip>span>i{flex:1;border-top:1px solid var(--line)}
   .twk-chip>span>i:first-child{border-top:none}
-  .twk-chip svg{position:absolute;top:6px;left:6px;width:13px;height:13px}
+  .twk-chip svg{position:absolute;top:6px;left:6px;width:0.8125rem;height:0.8125rem}
 `;
 
 window.__TWEAKS_STYLE = __TWEAKS_STYLE;

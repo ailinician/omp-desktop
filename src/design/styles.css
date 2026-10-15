@@ -384,6 +384,12 @@ input, textarea { font: inherit; color: inherit; background: transparent; border
   border-radius: var(--r-2);
 }
 
+/* <Icon> (ui/icons.jsx) sets --icon-size in rem: icons follow the font-size
+   tweak. The icon-only boxes around them (.btn.icon, tab close, sidebar
+   actions, …) are rem-sized for the same reason. A crowded flex row (the
+   status bar) squeezes its text, never an icon. */
+.ui-icon { width: var(--icon-size); height: var(--icon-size); flex-shrink: 0; }
+
 /* button base */
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
@@ -409,7 +415,7 @@ input, textarea { font: inherit; color: inherit; background: transparent; border
 .btn.outlined { border-color: var(--line); }
 .btn.outlined:hover { border-color: var(--line-bright); }
 .btn.icon {
-  width: 24px; height: 24px; padding: 0; justify-content: center;
+  width: 1.5rem; height: 1.5rem; padding: 0; justify-content: center;
 }
 .btn.danger { color: var(--rose); }
 .btn.danger:hover { background: color-mix(in oklab, var(--rose) 15%, transparent); }
