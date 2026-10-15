@@ -8,12 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- Browser panel: see and interact with the same Chromium the tab's agent drives, with live agent-follow, page tabs, back/forward/reload and an address field. Open it with the status-bar globe, `Ctrl+Shift+B` / `⌘⇧B` (rebindable) or `/browser [url]`; resize its left edge or use full view. Mouse, scroll, keyboard and text paste reach the page. **Annotate** picks an element or dragged area; add a comment and send its chip with your next message — send, steer, follow-up or goal — as text (comment, URL, selector, HTML) and a screenshot when available. Chips are reserved while sending, removed after omp acknowledges the message, and available again if sending fails. Localhost links in chat open in the panel (`⌘`/`Ctrl`+click opens externally). Tweaks → Browser controls this and the Chromium path. Chromium starts only when needed, uses a throwaway profile and ends with the desktop tab or app; the ambient rail hides while the panel is open. Page-derived annotation fields are fenced as untrusted data with command and skill tokens neutralised, while shared chip delivery, live path preferences, clean restart state, discovery Host protection and lifecycle/tap handling keep browser actions consistent.
+- A browser panel next to the chat (#58): see and use the same browser the tab's agent works in. Open it with the globe button in the status bar, `Ctrl+Shift+B` (`Shift+⌘B` on macOS; rebindable in the shortcuts screen) or `/browser [url]`. The panel follows the page the agent is on and has page tabs, back/forward/reload and an address field; drag its left edge to resize it or switch to full view. Mouse, scroll, keyboard, paste and input methods reach the page, while the app's own panel and tab shortcuts keep working. **Annotate** lets you click an element or drag over an area and add a comment; it goes out with your next message (or the goal you start) as text plus a screenshot of the area. What comes from the page is marked as page content, so a page can't give the agent commands. Localhost links in chat open in the panel (`⌘`/`Ctrl`+click opens your normal browser; switch it off under Tweaks → Browser). The panel uses Google Chrome, Chromium, Edge, Brave or the Chrome for Testing omp downloads; the app finds one itself, and the `chromium` menu under Tweaks → Browser lets you choose another. Each tab gets its own browser with a fresh profile and no extensions, started only when needed and closed with the tab. The agent works in the page you are looking at, so its navigation replaces yours.
+
+### Changed
+
+- The status bar now runs along the whole bottom of the window, under the side panels too, and stays on one line: when space is short it drops the tokens/s, cost and context meter cells, in that order, instead of wrapping or cutting off its buttons.
 
 ### Fixed
 
 - Icons now grow and shrink with the font size set in Tweaks, like the text next to them. Until now they stayed the same size, so at a larger font size the icons in the git browser, the session history, the Tweaks panel, the tabs, the sidebar and the chat looked too small and were hard to read. Icon-only buttons and the Tweaks panel grow with them. A crowded status bar no longer squeezes its icons either.
 - The model pill below the prompt box no longer sits lower than the thinking, plan mode and goal pills next to it.
+- A terminal shell path in `terminal.json` wrapped in quotes, as Windows' "Copy as path" gives it, now works.
 
 ## [0.9.0] - 2026-10-15
 

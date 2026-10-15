@@ -39,11 +39,11 @@ Built on Tauri 2 (Rust + the system webview). It doesn't bundle Electron or load
 
 ### Browser panel
 
-Open the globe button, `Ctrl+Shift+B` / `⌘⇧B`, or `/browser [url]` to see and interact with the same Chromium the tab's agent drives. The panel follows the agent's page, has page tabs, back/forward/reload and an address field, and supports resizing or full view. **Annotate** picks an element or dragged area: add a comment, then send its chip with your next message as text and a screenshot. Chips stay reserved while sending and are removed only after omp acknowledges the message; a failed send makes them available again. Localhost links in chat open in the panel by default (`⌘`/`Ctrl`+click opens externally). Tweaks → Browser controls this and the Chromium path. The ambient rail hides while the panel is open.
+Open the globe button in the status bar, `Ctrl+Shift+B` or `/browser [url]` to see and use the same browser the tab's agent drives. The panel follows the page the agent works in, has page tabs, back/forward/reload and an address field, and can be resized or switched to full view. Mouse, scroll, keyboard, paste and IME input reach the page; the toggle-browser, toggle-terminal and next/previous-tab shortcuts, `⌘` shortcuts and, outside macOS, `Ctrl+Shift` shortcuts still reach the app. **Annotate** picks an element or a dragged area: add a comment, and the chip goes out with your next message, goal included, as text plus a screenshot of the area. Localhost links in chat open in the panel by default (`⌘`/`Ctrl`+click opens your normal browser). The ambient rail hides while the panel is open.
 
-The optional panel requires installed Chrome, Chromium, Edge or an omp-cached Chrome for Testing. It launches lazily with a private throwaway profile, separate from your normal browser; closing a desktop tab or quitting ends it. Pages run in Chromium, never in the app webview. Internals and local CDP trust boundary: [`docs/architecture/browser.md`](docs/architecture/browser.md).
+The panel needs a Chromium-based browser on your computer: Google Chrome, Chromium, Edge, Brave, or the Chrome for Testing omp downloads (snap packages can't be used). The app finds one itself; Tweaks → Browser → `chromium` lists what it found and lets you pick another program. Each tab gets its own headless browser, started the first time the tab needs it, with a fresh throwaway profile: no extensions, nothing from your normal browser profile, and gone when you close the tab or quit. Pages run in that browser, never in the app's own window. The agent drives the page you are looking at: it doesn't open a tab of its own, so its navigation replaces your page. Internals and the local trust boundary: [`docs/architecture/browser.md`](docs/architecture/browser.md).
 
-Annotation comments remain user instructions; page URLs, selectors, text and HTML are framed as untrusted web data inside a fence they cannot close. Page-derived command and skill tokens are neutralised before sending, so hidden page content cannot trigger omp's command dispatch.
+Your annotation comments are instructions; what comes from the page (URL, selector, text, HTML) is marked as untrusted page content, and command or skill names in it are made harmless, so a page can't give the agent commands.
 
 ### Rail widgets
 
@@ -134,7 +134,7 @@ Open a folder with the `+` button (or `Ctrl+T`), from the sidebar's recent proje
 
 ### Keyboard shortcuts
 
-On macOS, `Ctrl+K`, `Ctrl+H`, `Ctrl+/`, `Ctrl+B`, `Ctrl+T`, `Ctrl+W`, `Ctrl+Shift+G`, `` Ctrl+` `` and `Ctrl+↑` also work with `⌘`. All shortcuts can be rebound in `Ctrl+/`: every action with its chord; rebind, add a second chord, or reset. Your overrides are stored in `<app config>/keybindings.json`, and omp's own `~/.omp/agent/keybindings.yml` is used as the base layer. With the terminal focused, only the toggle-terminal and next/previous-tab shortcuts (whatever they are bound to), `⌘` shortcuts and, outside macOS, `Ctrl+Shift` shortcuts reach the app; `Ctrl+T`, `Ctrl+W`, `Ctrl+C`, `Esc` and other `Ctrl`/`Alt` keys stay with the shell. Copy and paste in the terminal with `Ctrl+Shift+C` / `Ctrl+Shift+V` (`⌘C` / `⌘V` on macOS).
+On macOS, `Ctrl+K`, `Ctrl+H`, `Ctrl+/`, `Ctrl+B`, `Ctrl+T`, `Ctrl+W`, `Ctrl+Shift+G`, `Ctrl+Shift+B`, `` Ctrl+` `` and `Ctrl+↑` also work with `⌘`. All shortcuts can be rebound in `Ctrl+/`: every action with its chord; rebind, add a second chord, or reset. Your overrides are stored in `<app config>/keybindings.json`, and omp's own `~/.omp/agent/keybindings.yml` is used as the base layer. With the terminal or a browser-panel page focused, only the toggle-terminal, toggle-browser and next/previous-tab shortcuts (whatever they are bound to), `⌘` shortcuts and, outside macOS, `Ctrl+Shift` shortcuts reach the app; `Ctrl+T`, `Ctrl+W`, `Ctrl+C`, `Esc` and other `Ctrl`/`Alt` keys stay with the shell or the page. Copy and paste in the terminal with `Ctrl+Shift+C` / `Ctrl+Shift+V` (`⌘C` / `⌘V` on macOS).
 
 ![Keyboard shortcuts](screenshots/shortcuts.webp)
 
@@ -144,7 +144,7 @@ On macOS, `Ctrl+K`, `Ctrl+H`, `Ctrl+/`, `Ctrl+B`, `Ctrl+T`, `Ctrl+W`, `Ctrl+Shif
 | Conversation history | `Ctrl+H` |
 | Keyboard shortcuts | `Ctrl+/` |
 | Toggle project sidebar | `Ctrl+B` |
-| Toggle browser panel | `Ctrl+Shift+B` / `⌘⇧B` |
+| Toggle browser panel | `Ctrl+Shift+B` |
 | New tab / close tab | `Ctrl+T` / `Ctrl+W` |
 | Toggle terminal | `` Ctrl+` `` |
 | Git browser | `Ctrl+Shift+G` |

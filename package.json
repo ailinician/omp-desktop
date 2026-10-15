@@ -11,7 +11,7 @@
     "test:approval": "node tests/test-approval.mjs",
     "test:approval-mode": "node tests/test-approval-mode.mjs",
     "test:ask-dialog": "node tests/test-ask-dialog.mjs",
-    "test:browser": "node tests/test-browser.mjs && node tests/test-browser-runtime.mjs",
+    "test:browser": "node tests/test-browser.mjs",
     "test:browser-runtime": "node tests/test-browser-runtime.mjs",
     "test:chat-collapse": "node tests/test-chat-collapse.mjs",
     "test:conversation-tree": "node tests/test-conversation-tree.mjs",
