@@ -1,0 +1,129 @@
+/* ═════════════════════════════════════════════════════════════════════
+   approval-mode-section.jsx — the approvals panel's "tool approval mode"
+   section (#57): omp's `--approval-mode` for the active tab's project
+   (an override, or `default`) and for every project, the chosen mode's
+   description, and what the last change did to the open tabs.
+   Backed by OMP_BRIDGE.setApprovalModeProject / setApprovalModeDefault
+   (Rust `approval_mode.rs` stores the choice; live.js restarts the tabs
+   it changes with `--resume`, idle ones at once and busy ones when their
+   turn ends). Pure helpers: app/approval-mode.js (read late-bound).
+   ═════════════════════════════════════════════════════════════════════ */
+
+// One segmented radio group. `options`: [{ value, label }]; the literal
+// "default" value renders as the muted `inherit` segment.
+function ApprovalModeSeg({ label, options, value, disabled, onPick }) {
+  return (
+    <div className="mode-seg" role="radiogroup" aria-label={label}>
+      {options.map(o => (
+        <button
+          key={o.value}
+          role="radio"
+          aria-checked={o.value === value}
+          data-mode={o.value === "default" ? "inherit" : o.value}
+          disabled={disabled}
+          onClick={() => { if (o.value !== value) onPick(o.value); }}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// What the last change did: `result` is a set's `{ ok, error?, restarted,
+// deferred }`, null before any change in this panel.
+function ApprovalModeApplyLine({ result, busy, hasProject, sessions }) {
+  if (busy) return <div className="mode-apply"><span className="spin">⟳</span> restarting…</div>;
+  if (!result) {
+    return (
+      <div className="mode-apply">
+        {hasProject
+          ? "A change restarts omp in this project's open tabs; the conversation continues. A tab whose agent is working switches when its turn ends."
+          : "Applies to new tabs and to open tabs of projects without their own setting."}
+      </div>
+    );
+  }
+  if (!result.ok) return <div className="mode-apply error">{result.error || "the change could not be saved"}</div>;
+  const n = result.restarted.length;
+  const names = result.deferred
+    .map(id => sessions.find(s => s.id === id)?.name)
+    .filter(Boolean);
+  return (
+    <div className="mode-apply">
+      {n > 0 && <><span className="spin">⟳</span>{n} tab{n === 1 ? "" : "s"} restarted with the new mode.</>}
+      {n === 0 && names.length === 0 && "Saved. No open tab needed a restart."}
+      {names.length > 0 && (
+        <>
+          {n > 0 && " "}
+          <b>{names.join(", ")}</b>
+          {names.length === 1 ? " is working and switches when its turn ends." : " are working and switch when their turns end."}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ApprovalModeSection({ view, activeProject, sessions }) {
+  const bridge = window.OMP_BRIDGE;
+  const AM = window.OMP_APPROVAL_MODE;
+  const [busy, setBusy]     = React.useState(false);
+  const [result, setResult] = React.useState(null);
+
+  const path = activeProject?.path || null;
+  const project = AM.projectRow(view, path);
+  const fallback = AM.effectiveFor(view, null); // the global default
+  const effective = AM.effectiveFor(view, path);
+  const shown = AM.MODES.find(m => m.value === effective);
+  const modeOptions = AM.MODES.map(m => ({ value: m.value, label: m.label }));
+
+  const apply = async call => {
+    if (!bridge || busy) return;
+    setBusy(true);
+    try {
+      setResult(await call());
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="panel-sect-hd">tool approval mode</div>
+      <div className="mode-sect">
+        {project.present && (
+          <div className="mode-row">
+            <div className="mode-lbl">
+              <span>this project</span>
+              <span className="mode-path mono" title={path}>{path}</span>
+            </div>
+            <ApprovalModeSeg
+              label="this project"
+              options={[{ value: "default", label: "default" }, ...modeOptions]}
+              value={project.value}
+              disabled={busy || !view}
+              onPick={v => apply(() => bridge.setApprovalModeProject(path, v === "default" ? null : v))}
+            />
+          </div>
+        )}
+        <div className="mode-row">
+          <div className="mode-lbl"><span>default for every project</span></div>
+          <ApprovalModeSeg
+            label="default for every project"
+            options={modeOptions}
+            value={fallback}
+            disabled={busy || !view}
+            onPick={v => apply(() => bridge.setApprovalModeDefault(v))}
+          />
+        </div>
+        {shown && (
+          <div className={`mode-note${shown.warn ? " warn" : ""}`}>
+            <b>{shown.label}</b> — {shown.blurb}
+          </div>
+        )}
+        <ApprovalModeApplyLine result={result} busy={busy} hasProject={project.present} sessions={sessions ?? []} />
+      </div>
+    </>
+  );
+}
+
+window.ApprovalModeSection = ApprovalModeSection;

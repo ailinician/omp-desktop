@@ -31,7 +31,7 @@ Built on Tauri 2 (Rust + the system webview). It doesn't bundle Electron, doesn'
 ### Watching the agent work
 
 - **Tool cards** for every call: `read`, `grep`, `bash`, `eval` (JS/Python kernel cells), `edit`, `task` and more. Output streams live, code is syntax-highlighted, and edit diffs have a scrubber.
-- **Approvals.** Sessions start in `--approval-mode write`, so exec-tier tools ask first. Answer *Approve*, *Allow for this session* or *Always allow in this project*, and review or revoke the saved rules in the approval-rules panel.
+- **Approvals.** The tool approval mode is chosen in the approvals panel (status-bar ✓): `always ask`, `write` (the default) or `yolo`, for all projects or one project. Exec-tier tools ask first in `write`. Answer *Approve*, *Allow for this session* or *Always allow in this project*, and review or revoke the saved rules in the same panel. A change restarts the tab's agent, and the conversation continues; a tab that is working switches when its turn ends. The status bar shows the mode in use.
 - **Ambient rail.** Shows the context-window gauge, cost, a tokens/sec sparkline, an agent radar of recent tool activity, and a minimap of the session. Click a minimap cell to jump to that message. Show or hide each card under Tweaks → Rail.
 - **Subagent manager.** Agents started by a `task` call appear in the rail as they run. Open the manager to get totals, a swimlane timeline, agents grouped by the task call that spawned them, and an inspector for each agent's assignment, tools, output and transcript.
 
@@ -141,7 +141,7 @@ On macOS, `Ctrl+K`, `Ctrl+H`, `Ctrl+/`, `Ctrl+B`, `Ctrl+T`, `Ctrl+W`, `` Ctrl+` 
 | Toggle plan mode | `Shift+Alt+P` |
 | Queue a follow-up | `Ctrl+Enter` or `Ctrl+Q` |
 
-The changes, approval-rules, usage, kanban, compact, export and update-check actions have no default chord. You can bind one in the shortcuts screen.
+The changes, approvals, usage, kanban, compact, export and update-check actions have no default chord. You can bind one in the shortcuts screen.
 
 ### Slash commands
 

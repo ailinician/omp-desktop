@@ -11,6 +11,7 @@
   color: var(--fg-3);
 }
 .status-cell { display: inline-flex; align-items: center; gap: 5px; }
+.status-mode { font-family: var(--font-mono); font-size: var(--d-text-xs); }
 .status-sep { color: var(--fg-5); }
 .status-bar-tube {
   display: inline-flex;

@@ -106,6 +106,19 @@ const ALLOWED_COMMAND_TYPES: &[&str] = &[
     "goal",
 ];
 
+/// What one omp process is started with (`start_session` → `spawn_omp`).
+#[derive(Clone, Copy)]
+pub struct Launch<'a> {
+    /// Project folder (`None` = omp's default).
+    pub cwd: Option<&'a str>,
+    /// Session file or id to resume, already validated by the caller.
+    pub resume: Option<&'a str>,
+    /// Resolved profile (`None` = the built-in one).
+    pub profile: Option<&'a str>,
+    /// `--approval-mode`, from `approval_mode::ApprovalModeStore::resolve`.
+    pub mode: crate::approval_mode::ApprovalMode,
+}
+
 /// Manages one omp process per tab session.
 ///
 /// # Events
@@ -152,20 +165,25 @@ impl AgentBridge {
     /// auto-answer matching prompts for this session — see
     /// `reader::try_auto_approve`.
     ///
-    /// `profile` selects the omp profile this session's process runs under
-    /// (`None`/`"default"` = omp's own `~/.omp/agent` tree, no flag). It is
-    /// per-session by design: each tab owns one omp process, so two tabs can
-    /// run under different profiles at the same time.
+    /// `launch.profile` selects the omp profile this session's process runs
+    /// under (`None`/`"default"` = omp's own `~/.omp/agent` tree, no flag).
+    /// It is per-session by design: each tab owns one omp process, so two
+    /// tabs can run under different profiles (and approval modes) at the
+    /// same time.
     pub fn start_session(
         &self,
         session_id: String,
-        cwd: Option<&str>,
-        resume: Option<&str>,
-        profile: Option<&str>,
+        launch: Launch<'_>,
         app: AppHandle,
         rule_book: Arc<crate::approval::RuleBook>,
     ) -> Result<(), String> {
-        let (mut child, supervisor) = match spawn_omp(cwd, resume, profile) {
+        let Launch {
+            cwd,
+            resume,
+            profile,
+            mode,
+        } = launch;
+        let (mut child, supervisor) = match spawn_omp(cwd, resume, profile, mode) {
             Ok(c) => c,
             Err(e) => {
                 // Cached *and* returned: the caller gets the reason now, the

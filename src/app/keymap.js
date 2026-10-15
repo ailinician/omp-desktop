@@ -47,7 +47,7 @@
     { id: "desktop.tab.moveRight",   label: "Move tab right",          group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+shift+pagedown"] },
     { id: "desktop.panel.todo",      label: "Plan kanban",             group: "View",    scope: "global",   defaultKeys: [] },
     { id: "desktop.panel.changes",   label: "Working-tree changes",    group: "View",    scope: "global",   defaultKeys: [] },
-    { id: "desktop.panel.rules",     label: "Approval rules",          group: "View",    scope: "global",   defaultKeys: [] },
+    { id: "desktop.panel.rules",     label: "Approvals",               group: "View",    scope: "global",   defaultKeys: [] },
     { id: "desktop.panel.stats",     label: "Usage statistics",        group: "View",    scope: "global",   defaultKeys: [] },
     { id: "desktop.composer.promptHistory", label: "Prompt history",   group: "Session", scope: "global",   defaultKeys: ["ctrl+up", "super+up"] },
     { id: "desktop.session.compact", label: "Compact session",         group: "Session", scope: "global",   defaultKeys: [] },

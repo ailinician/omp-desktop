@@ -1,10 +1,10 @@
 //! Desktop-side tool-approval rules.
 //!
-//! omp's own default approval tier (`always-ask`) is overridden per-session
-//! to `write` (see `agent::spawn::omp_args`) so exec-tier tools stop
-//! auto-approving silently — a desktop product should never inherit that
-//! quietly. That means every such tool call now surfaces an
-//! `extension_ui_request` the human has to click through. A [`RuleBook`]
+//! The desktop always passes `--approval-mode` (see `approval_mode.rs`;
+//! `write` by default, where omp's own default is `yolo`), so in `write` and
+//! `always-ask` every tool call above that tier surfaces an
+//! `extension_ui_request` the human has to click through (in `yolo` omp
+//! sends none, and rules are moot). A [`RuleBook`]
 //! lets the human grant a standing "yes" for one tool name, scoped either
 //! to the current session (in-memory, dies with the process) or to the
 //! project (persisted to disk, survives restarts) — so they don't have to

@@ -18,6 +18,7 @@
   const QUEUE = window.OMP_QUEUE;
   const ASK = window.OMP_ASK_DIALOG;
   const APPROVAL = window.OMP_APPROVAL;
+  const AMODE = window.OMP_APPROVAL_MODE;
   const TURN = window.OMP_TURN_STATUS;
   const GOAL = window.OMP_GOAL;
   const EXT = window.OMP_EXT_WIDGETS;
@@ -152,7 +153,18 @@
   // object so they can't drift apart the way _recordPrompt's own missing
   // normalization once did.
   const PROMPT_NORMALIZE = { framingPrefix: FRAMING_PREFIX, skip: [window.APPROVAL_PROMPT] };
-  const _profileSwitching = new Set(); // session ids with a profile respawn in flight
+  // Session ids with an omp respawn in flight (`_respawnSession`: a profile
+  // switch or an approval-mode restart).
+  const _respawning = new Set();
+  // Tool approval mode (app/approval-mode.js): the `{ default, projects }`
+  // view from Rust (`approval_mode_get`, replaced by every set's response),
+  // null until the boot fetch lands. App-wide like `profiles`.
+  let approvalModes = null;
+  // id → the mode a restart of that tab asked for and did not get (Rust
+  // spawned something else, or the respawn failed). `_applyApprovalModes`
+  // leaves such a tab alone until the target changes, so a frontend/Rust
+  // disagreement can never become a restart loop.
+  const _modeRestartMissed = new Map();
   // Session ids whose cached `session_status` startup error has already been
   // filed into the transcript. The backend keeps that entry until the id's
   // next successful spawn, but `_switchToSession` asks on *every* activation,
@@ -330,23 +342,31 @@
       // Tab list — derived from session registry, not per-session state.
       // runState: active tab reads live state; background tabs read their
       // cached snapshot (never activated yet = "idle" defaults).
-      sessions:        [...sessionRegistry.values()].map(s => ({
-        ...s,
-        runState: runStateCached(
-          s.id === activeSessionId
-            ? state
-            : sessionSnapshots.get(s.id) ?? _EMPTY_SESSION_FIELDS
-        ),
-      })),
+      sessions:        _sessionsView(),
       activeSessionId,
       // Active tab's prompt history only — never persisted, see promptHistories above.
       promptHistory:   promptHistories.get(activeSessionId) ?? [],
       profiles,
       startupProfileId,
+      approvalModes,
       noTabProfileId:  _noTabProfile(),
       recentProjects,
       workspaceNotes,
     };
+  }
+
+  // Snapshot `sessions[]`: the registry entries plus each tab's run state.
+  // Active tab reads live state; background tabs read their cached snapshot
+  // (never activated yet = "idle" defaults).
+  function _sessionsView() {
+    return [...sessionRegistry.values()].map(s => ({
+      ...s,
+      runState: runStateCached(
+        s.id === activeSessionId
+          ? state
+          : sessionSnapshots.get(s.id) ?? _EMPTY_SESSION_FIELDS
+      ),
+    }));
   }
 
   // Invoke a Tauri command, returning `fallback` when there's no Tauri
@@ -1046,7 +1066,7 @@
    *  Side-effectful (Tauri IPC invoke, event listeners), so not unit-tested
    *  directly. */
   async function _spawnSession(id, cwd, { resume = null, profile }) {
-    await window.__TAURI__.core.invoke("start_session", {
+    const approvalMode = await window.__TAURI__.core.invoke("start_session", {
       args: { sessionId: id, cwd: cwd ?? "", resume, profile },
     });
     // A fresh incarnation owns this id now, and `start_session` cleared the
@@ -1060,8 +1080,15 @@
     // Every spawn funnels through here (new tab, resume, launch restore,
     // profile respawn); branch/fork/`new_session` keep the process and so
     // leave it alone. Read the entry afresh: it may have changed during the await.
+    // `approvalMode` is the mode Rust resolved and spawned this incarnation
+    // with (`approval_mode.rs`); the frontend never sends one.
     const spawned = sessionRegistry.get(id);
-    if (spawned) sessionRegistry.set(id, { ...spawned, processStartedAt: Date.now() });
+    if (spawned) {
+      sessionRegistry.set(id, {
+        ...spawned, processStartedAt: Date.now(),
+        approvalMode: AMODE.isMode(approvalMode) ? approvalMode : null,
+      });
+    }
     // Git: read initial branch and arm the HEAD watcher (fire-and-forget errors)
     if (cwd) {
       const branch = await window.__TAURI__.core
@@ -1094,11 +1121,11 @@
   }
 
   /** Kill a session's omp process and everything bound to it (git watcher,
-   *  cached snapshot) for a profile respawn; the tab and its terminal shell
-   *  stay (a tab ends only through `_closeTab`). The registry entry is left
-   *  to the caller.
+   *  cached snapshot) for a respawn (`_respawnSession`); the tab and its
+   *  terminal shell stay (a tab ends only through `_closeTab`). The registry
+   *  entry is left to the caller.
    *
-   *  Returns a promise for the `stop_session` round-trip, which a profile
+   *  Returns a promise for the `stop_session` round-trip, which a
    *  respawn MUST await: `stop_session`'s backend body does an
    *  unconditional `sessions.remove(id)`, so if it were still queued when
    *  `start_session` installed the fresh incarnation under the same id, it
@@ -1117,7 +1144,7 @@
   /** End a tab for good in Rust (`close_tab`: its omp process, git watcher,
    *  widget state and terminal shell) and drop its JS-side bindings. Every
    *  path that removes a tab from `sessionRegistry` goes through here; a
-   *  profile respawn uses `_killSessionProcess`, which keeps the shell. */
+   *  respawn uses `_killSessionProcess`, which keeps the shell. */
   function _closeTab(id) {
     const closed = _invokeSafe("close_tab", { sessionId: id });
     _dropGitListener(id);
@@ -1178,7 +1205,7 @@
    *  conversation's generated title) and auto-rename starts over.
    *  `sessionFile` is cleared too: `resumeSession` matches on it, and
    *  would otherwise focus this tab for a conversation it no longer runs.
-   *  Shared by in-process `new_session` and profile respawn. */
+   *  Shared by in-process `new_session` and a profile switch's respawn. */
   function _freshConversationFields(entry) {
     return {
       name: _tabNameFor(entry.path, "new session"),
@@ -1189,6 +1216,238 @@
       autoRenameLeft: 0,
       autoRenameSessionId: null,
     };
+  }
+
+  /** Replace tab `id`'s omp process under the same id. Shared by a profile
+   *  switch (`fresh: true`: a new conversation under `profile`) and an
+   *  approval-mode restart (`resume: <the tab's sessionFile>`: the same
+   *  conversation continues, under the mode Rust now resolves for the
+   *  folder). The tab's id, name, folder and terminal shell survive.
+   *  Resolves to `{ok}` or `{ok: false, error}` on every path so a caller
+   *  can render a refusal (a respawn already in flight, a failed respawn)
+   *  instead of dropping it silently.
+   *
+   *  Not unit-tested directly: every step is a Tauri IPC call or an event
+   *  listener mutation and there is no fake `__TAURI__` harness in this
+   *  repo. The pure decisions it leans on are extracted and proven
+   *  separately (`_resolveProfile`, `OMP_APPROVAL_MODE.restartPlan`); what
+   *  remains is ordering, and the comments inside state why each await
+   *  sits where it does. */
+  async function _respawnSession(id, { profile, resume = null, fresh = false }) {
+    if (!window.__TAURI__) return { ok: false, error: "not connected" };
+    const entry = sessionRegistry.get(id);
+    if (!entry) return { ok: false, error: "unknown tab" };
+    const what = fresh ? "Profile switch" : "Approval mode change";
+    // Re-entrancy: this call spans two awaits, and a second respawn of the
+    // same tab would read `wasActive` as false (call 1 already nulled the
+    // active slot), so it would never re-activate or `_initFetch` the
+    // process it spawned - leaving the tab attached to a live child whose
+    // opening envelopes were all dropped as `seq <= lastSeq` against the
+    // previous incarnation's journal.
+    if (_respawning.has(id)) {
+      return { ok: false, error: "omp is already restarting in this tab" };
+    }
+    _respawning.add(id);
+    try {
+      // Awaited: `stop_session` must have removed the old incarnation from
+      // the backend's session map before `_spawnSession` installs the new
+      // one under the same id, or the late remove would reap the fresh
+      // process. See `_killSessionProcess`.
+      await _killSessionProcess(id);
+      // The tab may have been closed inside that round-trip: `closeSession`
+      // has no `_respawning` guard, so it can `sessionRegistry.delete`
+      // this id while we are waiting. Writing an entry back below would
+      // then *resurrect* the deleted tab — and the
+      // `!sessionRegistry.has(id)` check after the spawn (which exists for
+      // the very same hazard one window later) would find the resurrected
+      // entry, skip its cleanup, and leave a live omp child bound to a tab
+      // the user closed. `_killSessionProcess` above already released the
+      // process and the git watcher, so bailing here leaks nothing.
+      if (!sessionRegistry.has(id)) {
+        return { ok: false, error: "tab closed" };
+      }
+      // Both re-read *after* that round-trip, never before it. It is a real
+      // IPC gap and `_respawning` only blocks re-entry for this id, so
+      // a click on another tab can run `_switchToSession(other)` inside it —
+      // whose first act is `_saveCurrentSession()`, and `activeSessionId` is
+      // still this id at that moment. That both moves the active slot (so a
+      // `wasActive` captured earlier is stale and would detach the tab the
+      // user just picked) and re-creates the very snapshot
+      // `_killSessionProcess` just deleted.
+      const wasActive = id === activeSessionId;
+      const current = sessionRegistry.get(id);
+      // No process runs this tab until the spawn resolves, and a failed
+      // spawn leaves none: no running approval mode either (`_spawnSession`
+      // sets the new one).
+      sessionRegistry.set(id, fresh
+        // Fresh conversation: folder label and a new auto-rename, same as
+        // `new_session` (`_freshConversationFields`). The killed process
+        // will not deliver an in-flight `/rename` note.
+        ? { ...current, profile, branch: null, approvalMode: null, ..._freshConversationFields(current) }
+        // Same conversation: name, file and auto-rename budget carry over;
+        // only an in-flight `/rename` dies with the process (its note can
+        // never arrive, so the flag would block every later refresh).
+        : { ...current, approvalMode: null, autoRenameInFlight: false });
+      if (wasActive) await _detachActiveSession();
+      // After the detach, which nulls `activeSessionId` synchronously — so no
+      // later `_saveCurrentSession` can re-add it. A resurrected snapshot
+      // would restore the dead incarnation's `lastSeq`, and the respawned
+      // child's journal restarts at seq 1, so `_dispatchEnvelope` would drop
+      // every envelope it ever emits as `seq <= lastSeq`.
+      sessionSnapshots.delete(id);
+      notify();
+
+      // A respawn failure (profile deleted under us, omp not on PATH) must
+      // not strand the tab: `_detachActiveSession` already nulled
+      // `activeSessionId` and reset per-session state, so without
+      // re-activating here the UI keeps rendering an active tab whose
+      // `_send` calls go to `sessionId: null`.
+      let spawnError = null;
+      try {
+        await _spawnSession(id, entry.path, { profile, resume });
+      } catch (e) {
+        spawnError = e?.message ?? String(e);
+      }
+      // omp writes a conversation's file lazily, with its first assistant
+      // message, so a tab that has not had a reply yet names a file that
+      // does not exist and `validate_resume` refuses it. Nothing on disk
+      // means nothing to continue: start the tab's omp without `--resume`
+      // rather than leave it with no process. (Rejected before anything is
+      // spawned or registered, so the second `start_session` starts clean.)
+      if (spawnError && resume && spawnError.includes("resume path does not exist") && sessionRegistry.has(id)) {
+        sessionRegistry.set(id, { ...sessionRegistry.get(id), sessionFile: null });
+        spawnError = null;
+        try {
+          await _spawnSession(id, entry.path, { profile, resume: null });
+        } catch (e) {
+          spawnError = e?.message ?? String(e);
+        }
+      }
+      if (spawnError) console.error(`[live] ${what} respawn failed:`, spawnError);
+
+      // The tab may have been closed during the spawn. `closeSession` ran
+      // its whole teardown against a session whose respawn was still in
+      // flight, so everything below would wire the closed tab back up
+      // *behind* that teardown: a phantom active tab, a leaked
+      // `git://branch/{id}` listener, a `start_git_watch` issued after the
+      // matching `stop_git_watch`, and `_send` routed to an orphaned child
+      // no teardown path can reach. Undo our own spawn instead.
+      if (!sessionRegistry.has(id)) {
+        _closeTab(id);
+        // `closeSession` saw `activeSessionId === null` (this respawn had
+        // already detached) so it never handed focus on. Do it here, or the
+        // app sits with tabs rendered and `_send` routed at `null`.
+        const survivors = [...sessionRegistry.keys()];
+        if (activeSessionId === null && survivors.length > 0) {
+          await _switchToSession(survivors[survivors.length - 1]);
+        } else {
+          notify();
+        }
+        return spawnError ? { ok: false, error: spawnError } : { ok: true };
+      }
+      // The folder is now open under `profile`, so it belongs in that
+      // profile's recents (a mode restart keeps the profile: nothing new).
+      if (fresh && !spawnError && entry.path) void _touchRecent(entry.path, profile);
+
+      if (wasActive && activeSessionId === null) {
+        // Reclaim focus only if nothing else took the active slot while the
+        // spawn was in flight - the user can click another tab during those
+        // awaits, and `_switchGen` can't guard this call because it is the
+        // newer one.
+        await _switchToSession(id);
+        // After re-activation, never before: `_switchToSession` runs
+        // `_resetSessionVars()`, which would wipe the note. And re-checked
+        // *after* the await, not before: `_switchToSession` spans two
+        // `listen` calls plus two round-trips, and a tab click inside them
+        // bumps `_switchGen` so this call bails and leaves the other tab
+        // active - `_pushAssistantNote` would then file this failure in
+        // that tab's transcript, stickily. When we lose the slot, the
+        // reason is still cached by `start_session` and surfaces as
+        // "Agent failed to start" when the tab is next selected.
+        //
+        // Gated on the backend having cached nothing, because the two
+        // failure classes report through different paths and would
+        // otherwise double up: a real spawn failure (omp not on PATH, exec
+        // error) IS cached, so the `_switchToSession` above already pushed
+        // "Agent failed to start" with this same text. A refused profile or
+        // resume value is rejected before the bridge spawns anything, so
+        // nothing is cached and this note is the only report there is.
+        const cached = spawnError && activeSessionId === id
+          ? await _invokeSafe("session_status", { sessionId: id }, null)
+          : null;
+        if (spawnError && activeSessionId === id && !cached) {
+          _pushAssistantNote(`**${what} failed:** ${spawnError}`);
+        }
+      }
+      notify();
+      return spawnError ? { ok: false, error: spawnError } : { ok: true };
+    } finally {
+      _respawning.delete(id);
+    }
+  }
+
+  /** Bring every open tab's omp onto the approval mode its folder now
+   *  resolves to (`OMP_APPROVAL_MODE.restartPlan` over the snapshot's
+   *  `sessions`): idle tabs restart now, with `--resume` so the
+   *  conversation continues; busy ones are left running and picked up at
+   *  their next idle point — the active tab's next applied `get_state`
+   *  (the one its `agent_end` asks for, or the one `_initFetch` sends when
+   *  it is activated; see the `get_state` branch of `_handleResponse`).
+   *  Resolves to `{ restarted, deferred }` tab ids (`restarted`: respawns
+   *  that succeeded).
+   *
+   *  Side-effectful (respawns through `_respawnSession`), so not
+   *  unit-tested directly; which tab restarts when is the pure
+   *  `restartPlan`, proven in tests/test-approval-mode.mjs. */
+  async function _applyApprovalModes() {
+    // No view yet: the frontend cannot know what Rust resolves, and a
+    // guess would restart a tab Rust spawned with a project override.
+    if (!approvalModes) return { restarted: [], deferred: [] };
+    const sessions = _sessionsView();
+    const { now, later } = AMODE.restartPlan(approvalModes, sessions);
+    const byId = new Map(sessions.map(s => [s.id, s]));
+    const todo = now.filter(id => {
+      if (_respawning.has(id)) return false; // its spawn resolves the mode afresh
+      const target = AMODE.effectiveFor(approvalModes, byId.get(id).path || null);
+      return _modeRestartMissed.get(id) !== target;
+    });
+    const results = await Promise.all(todo.map(async id => {
+      const entry = sessionRegistry.get(id);
+      const target = AMODE.effectiveFor(approvalModes, entry?.path || null);
+      const r = entry
+        ? await _respawnSession(id, { profile: entry.profile, resume: entry.sessionFile || null })
+        : { ok: false };
+      const reached = r.ok && sessionRegistry.get(id)?.approvalMode === target;
+      if (reached) _modeRestartMissed.delete(id);
+      else if (sessionRegistry.has(id)) {
+        _modeRestartMissed.set(id, target);
+        console.warn(`[live] approval mode restart of '${id}' did not reach '${target}'`, r.error ?? "");
+      }
+      return reached ? id : null;
+    }));
+    return { restarted: results.filter(Boolean), deferred: later };
+  }
+
+  /** Store a set command's view, notify, and apply it to the open tabs.
+   *  Resolves to `{ ok, error?, restarted, deferred }`. */
+  async function _setApprovalModes(cmd, args) {
+    const r = await _invokeResult(cmd, args);
+    if (!r.ok) return { ok: false, error: r.error, restarted: [], deferred: [] };
+    approvalModes = r.value;
+    notify();
+    const { restarted, deferred } = await _applyApprovalModes();
+    return { ok: true, restarted, deferred };
+  }
+
+  /** Re-read the approval-mode view from Rust (boot, panel open). Keeps the
+   *  last good view when the read fails. */
+  async function _refreshApprovalModes() {
+    const view = await _invokeSafe("approval_mode_get", {}, null);
+    if (view) {
+      approvalModes = view;
+      notify();
+    }
+    return approvalModes;
   }
 
 
@@ -1273,6 +1532,9 @@
     // Register with null branch — chip hidden until git resolves.
     sessionRegistry.set(id, {
       id, name: tabName, path: cwd ?? "", color, branch: null, profile,
+      // The approval mode `start_session` spawned this tab's current omp
+      // with (set by `_spawnSession`); null while no process runs it.
+      approvalMode: null,
       // The conversation's `.jsonl`, same form as `SavedSession.path`: known
       // up front for a resume, filled in from `get_state` otherwise (see
       // `_applyRpcState`). `resumeSession` matches on it to focus instead of
@@ -1616,6 +1878,13 @@
 
     if (command === "get_state") {
       _applyRpcState(data);
+      // The approval-mode idle hook: the active tab's run state is current
+      // now, so a mode change it was too busy for applies here. Every
+      // get_state counts (a busy one simply defers again), which covers both
+      // idle points — the get_state its `agent_end` asks for and the one
+      // `_initFetch` sends when it is activated — without per-request
+      // bookkeeping that an out-of-order response could defeat.
+      void _applyApprovalModes();
 
     } else if (command === "get_messages") {
       const completed = window.adaptAgentMessages(data.messages ?? []);
@@ -3522,18 +3791,18 @@
     async activateSession(id) {
       if (id === activeSessionId) return;
       if (!sessionRegistry.has(id)) return;
-      // A profile respawn for this tab is still in flight (see
-      // switchSessionProfile): the session doesn't exist on the backend yet
-      // (start_session hasn't resolved), so listen/replay_events/get_state
-      // would all target an id nothing is listening on. Drop the click —
-      // switchSessionProfile's own reclaim logic re-activates this tab once
-      // the respawn resolves (or, if the user is on a different tab by
-      // then, it simply stays backgrounded like any other tab). Chosen over
-      // relaxing the `wasActive && activeSessionId === null` reclaim test,
-      // which would let this call and the in-flight respawn's own reclaim
-      // both call _switchToSession(id) for the same tab.
-      if (_profileSwitching.has(id)) {
-        console.warn(`[live] ignoring activateSession('${id}') — profile respawn in flight`);
+      // A respawn for this tab is still in flight (see `_respawnSession`):
+      // the session doesn't exist on the backend yet (start_session hasn't
+      // resolved), so listen/replay_events/get_state would all target an id
+      // nothing is listening on. Drop the click — `_respawnSession`'s own
+      // reclaim logic re-activates this tab once the respawn resolves (or,
+      // if the user is on a different tab by then, it simply stays
+      // backgrounded like any other tab). Chosen over relaxing the
+      // `wasActive && activeSessionId === null` reclaim test, which would
+      // let this call and the in-flight respawn's own reclaim both call
+      // _switchToSession(id) for the same tab.
+      if (_respawning.has(id)) {
+        console.warn(`[live] ignoring activateSession('${id}') — respawn in flight`);
         return;
       }
       await _switchToSession(id);
@@ -3694,14 +3963,8 @@
      *  transcript dropped — it comes back as a fresh session. Resolves to
      *  `{ok}` or `{ok: false, error}` on every path so the menu can render a
      *  refusal (unlisted target profile, a respawn already in flight, a
-     *  failed respawn) instead of dropping it silently.
-     *
-     *  Not unit-tested directly: every step is a Tauri IPC call or an event
-     *  listener mutation and there is no fake `__TAURI__` harness in this
-     *  repo. The pure decisions it leans on are extracted and proven
-     *  separately (`_resolveProfile`); what
-     *  remains is ordering, and the comments inside state why each await
-     *  sits where it does. */
+     *  failed respawn) instead of dropping it silently. The respawn itself
+     *  is `_respawnSession`. */
     async switchSessionProfile(id, profileId) {
       if (!window.__TAURI__) return { ok: false, error: "not connected" };
       const entry = sessionRegistry.get(id);
@@ -3712,133 +3975,24 @@
         console.warn(`[live] ${error} — ignoring switch`);
         return { ok: false, error };
       }
-      // Re-entrancy: this call spans two awaits, and a second pick on the same
-      // tab would read `wasActive` as false (call 1 already nulled the active
-      // slot), so it would never re-activate or `_initFetch` the process it
-      // spawned - leaving the tab attached to a live child whose opening
-      // envelopes were all dropped as `seq <= lastSeq` against the previous
-      // incarnation's journal.
-      if (_profileSwitching.has(id)) {
-        return { ok: false, error: "a profile switch is already in progress for this tab" };
-      }
-      _profileSwitching.add(id);
-      try {
-        // Awaited: `stop_session` must have removed the old incarnation from
-        // the backend's session map before `_spawnSession` installs the new
-        // one under the same id, or the late remove would reap the fresh
-        // process. See `_killSessionProcess`.
-        await _killSessionProcess(id);
-        // The tab may have been closed inside that round-trip: `closeSession`
-        // has no `_profileSwitching` guard, so it can `sessionRegistry.delete`
-        // this id while we are waiting. Writing the captured `entry` back
-        // below would then *resurrect* the deleted tab — and the
-        // `!sessionRegistry.has(id)` check after the spawn (which exists for
-        // the very same hazard one window later) would find the resurrected
-        // entry, skip its cleanup, and leave a live omp child bound to a tab
-        // the user closed. `_killSessionProcess` above already released the
-        // process and the git watcher, so bailing here leaks nothing.
-        if (!sessionRegistry.has(id)) {
-          return { ok: false, error: "tab closed" };
-        }
-        // Both re-read *after* that round-trip, never before it. It is a real
-        // IPC gap and `_profileSwitching` only blocks re-entry for this id, so
-        // a click on another tab can run `_switchToSession(other)` inside it —
-        // whose first act is `_saveCurrentSession()`, and `activeSessionId` is
-        // still this id at that moment. That both moves the active slot (so a
-        // `wasActive` captured earlier is stale and would detach the tab the
-        // user just picked) and re-creates the very snapshot
-        // `_killSessionProcess` just deleted.
-        const wasActive = id === activeSessionId;
-        // Fresh conversation: folder label and a new auto-rename, same as
-        // `new_session` (`_freshConversationFields`). The killed process
-        // will not deliver an in-flight `/rename` note.
-        sessionRegistry.set(id, {
-          ...entry,
-          profile: profileId,
-          branch: null,
-          ..._freshConversationFields(entry),
-        });
-        if (wasActive) await _detachActiveSession();
-        // After the detach, which nulls `activeSessionId` synchronously — so no
-        // later `_saveCurrentSession` can re-add it. A resurrected snapshot
-        // would restore the dead incarnation's `lastSeq`, and the respawned
-        // child's journal restarts at seq 1, so `_dispatchEnvelope` would drop
-        // every envelope it ever emits as `seq <= lastSeq`.
-        sessionSnapshots.delete(id);
-        notify();
+      return _respawnSession(id, { profile: profileId, resume: null, fresh: true });
+    },
 
-        // A respawn failure (profile deleted under us, omp not on PATH) must
-        // not strand the tab: `_detachActiveSession` already nulled
-        // `activeSessionId` and reset per-session state, so without
-        // re-activating here the UI keeps rendering an active tab whose
-        // `_send` calls go to `sessionId: null`.
-        let spawnError = null;
-        try {
-          await _spawnSession(id, entry.path, { profile: profileId });
-        } catch (e) {
-          spawnError = e?.message ?? String(e);
-          console.error("[live] profile respawn failed:", e);
-        }
+    // ── Tool approval mode (app/approval-mode.js, approval_mode.rs) ─────────
 
-        // The tab may have been closed during the spawn. `closeSession` ran
-        // its whole teardown against a session whose respawn was still in
-        // flight, so everything below would wire the closed tab back up
-        // *behind* that teardown: a phantom active tab, a leaked
-        // `git://branch/{id}` listener, a `start_git_watch` issued after the
-        // matching `stop_git_watch`, and `_send` routed to an orphaned child
-        // no teardown path can reach. Undo our own spawn instead.
-        if (!sessionRegistry.has(id)) {
-          _closeTab(id);
-          // `closeSession` saw `activeSessionId === null` (this switch had
-          // already detached) so it never handed focus on. Do it here, or the
-          // app sits with tabs rendered and `_send` routed at `null`.
-          const survivors = [...sessionRegistry.keys()];
-          if (activeSessionId === null && survivors.length > 0) {
-            await _switchToSession(survivors[survivors.length - 1]);
-          } else {
-            notify();
-          }
-          return spawnError ? { ok: false, error: spawnError } : { ok: true };
-        }
-        // The folder is now open under `profileId`, so it belongs in that
-        // profile's recents.
-        if (!spawnError && entry.path) void _touchRecent(entry.path, profileId);
-
-        if (wasActive && activeSessionId === null) {
-          // Reclaim focus only if nothing else took the active slot while the
-          // spawn was in flight - the user can click another tab during those
-          // awaits, and `_switchGen` can't guard this call because it is the
-          // newer one.
-          await _switchToSession(id);
-          // After re-activation, never before: `_switchToSession` runs
-          // `_resetSessionVars()`, which would wipe the note. And re-checked
-          // *after* the await, not before: `_switchToSession` spans two
-          // `listen` calls plus two round-trips, and a tab click inside them
-          // bumps `_switchGen` so this call bails and leaves the other tab
-          // active - `_pushAssistantNote` would then file this failure in
-          // that tab's transcript, stickily. When we lose the slot, the
-          // reason is still cached by `start_session` and surfaces as
-          // "Agent failed to start" when the tab is next selected.
-          //
-          // Gated on the backend having cached nothing, because the two
-          // failure classes report through different paths and would
-          // otherwise double up: a real spawn failure (omp not on PATH, exec
-          // error) IS cached, so the `_switchToSession` above already pushed
-          // "Agent failed to start" with this same text. A refused profile is
-          // rejected by `store.resolve` before the bridge spawns anything, so
-          // nothing is cached and this note is the only report there is.
-          const cached = spawnError && activeSessionId === id
-            ? await _invokeSafe("session_status", { sessionId: id }, null)
-            : null;
-          if (spawnError && activeSessionId === id && !cached) {
-            _pushAssistantNote(`**Profile switch failed:** ${spawnError}`);
-          }
-        }
-        notify();
-        return spawnError ? { ok: false, error: spawnError } : { ok: true };
-      } finally {
-        _profileSwitching.delete(id);
-      }
+    /** Re-fetch the `{ default, projects }` view, store it in the snapshot
+     *  (`approvalModes`) and resolve to it (null before any read worked). */
+    approvalModes() { return _refreshApprovalModes(); },
+    /** Set the global default mode, then restart the open tabs it changes
+     *  (idle now, busy at their next idle point). Resolves to
+     *  `{ ok, error?, restarted: [ids], deferred: [ids] }`. */
+    setApprovalModeDefault(mode) {
+      return _setApprovalModes("approval_mode_set_default", { mode });
+    },
+    /** Set (`mode`) or remove (`null`) the override for project folder
+     *  `path` (a tab's canonical `entry.path`); same result as above. */
+    setApprovalModeProject(path, mode) {
+      return _setApprovalModes("approval_mode_set_project", { projectRoot: path, mode: mode ?? null });
     },
 
     /** Close a tab: Rust ends its omp process, git watcher, widgets and shell. */
@@ -3846,6 +4000,7 @@
       _closeTab(id);
       sessionRegistry.delete(id);
       promptHistories.delete(id);
+      _modeRestartMissed.delete(id);
       if (id === activeSessionId) {
         const remaining = [...sessionRegistry.keys()];
         if (remaining.length > 0) {
@@ -3977,6 +4132,9 @@
     // one — and it should end up the active tab, not be buried under the
     // restored ones. `.finally`, not `.then`: a failed list or restore must
     // not disable folder opens.
+    // The approval-mode view, alongside: the status bar and the restart
+    // plan read it, and spawns never wait for it (Rust resolves the mode).
+    void _refreshApprovalModes();
     _refreshProfiles()
       .catch(e => console.error("[live] startup profile load failed:", e))
       // Tab ids are never reused across a webview reload: anything Rust still

@@ -121,6 +121,9 @@ function App() {
   // while there was no transcript to hold them.
   const [noTabProfileId, setNoTabProfileId] = React.useState(DEFAULT_PROFILE_ID);
   const [workspaceNotes, setWorkspaceNotes] = React.useState([]);
+  // Tool approval mode `{ default, projects }` (app/approval-mode.js), null
+  // until the bridge's boot fetch lands.
+  const [approvalModes, setApprovalModes] = React.useState(null);
 
   // ── Cross-cutting effects ─────────────────────────────────────────────────
   useBridgeSnapshot(bridge, {
@@ -128,7 +131,7 @@ function App() {
     setModels, setActivity, setSparkline,
     setModelState, setThinkingLevel,
     setSessions, setActiveSessionId, setProfiles, setStartupProfileId, setRecentProjects,
-    setNoTabProfileId, setWorkspaceNotes,
+    setNoTabProfileId, setWorkspaceNotes, setApprovalModes,
     setPromptHistory, setSubagents, setSubagentTranscripts, setQueue, setQueueSending, setGoal, setExtWidgets,
   });
   useThemeEffect(t);
@@ -178,6 +181,10 @@ function App() {
   // usage-stats panel's header label, instead of a second copy.
   const activeProfileId    = activeProject.id ? activeProject.profile : noTabProfileId;
   const activeProfileLabel = profiles.find(p => p.id === activeProfileId)?.name ?? activeProfileId;
+  // Status-bar approvals cell: the mode the rendered tab's omp runs, or
+  // `running ⇢ target` while a change waits for its turn to end. Read
+  // late-bound: app/approval-mode.js is a plain module like the others.
+  const approvalCell = window.OMP_APPROVAL_MODE.statusCell(approvalModes, activeProject.id ? activeProject : null);
   // The tab being rendered owns the plan state: keyed on `activeProject.id`
   // for the same reason as `handleSelectProfile` below, and "" with no tab
   // open, which `updateEntry` ignores.
@@ -731,6 +738,7 @@ function App() {
                   onModel={() => openBridge("models")}
                   onChanges={() => setChangesOpen(true)}
                   onRules={() => setRulesOpen(true)}
+                  approvalMode={approvalCell}
                   onStats={() => setStatsOpen(true)}
                   onTree={() => setTreeOpen(v => !v)}
                   onTerminal={() => terminal.toggle(planKey)}
@@ -844,7 +852,12 @@ function App() {
       )}
 
       {rulesOpen && (
-        <ApprovalRulesPanel onClose={() => setRulesOpen(false)} />
+        <ApprovalRulesPanel
+          onClose={() => setRulesOpen(false)}
+          activeProject={activeProject.id ? activeProject : null}
+          sessions={sessions}
+          approvalModes={approvalModes}
+        />
       )}
 
       {statsOpen && (

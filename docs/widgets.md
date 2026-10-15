@@ -282,7 +282,7 @@ A card keeps its previous successful result visible, dimmed, while a new run is 
 - on every interval,
 - for a background tab, on your next switch to it.
 
-**Not covered by omp's approval.** The desktop starts omp with `--approval-mode write`, so the agent's shell commands ask first. Widget plugins are not agent tool calls and do not go through that prompt. Your one-time widget approval is the only gate.
+**Not covered by omp's approval.** The desktop starts omp in the tool approval mode chosen under approvals (`write` by default; `docs/architecture/approval-mode.md`), so in `write` the agent's shell commands ask first. Widget plugins are not agent tool calls and do not go through that prompt in any mode, `yolo` included. Your one-time widget approval is the only gate.
 
 **What approval protects against.** Changes made outside the desktop UI. Examples:
 

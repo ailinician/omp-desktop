@@ -35,6 +35,7 @@ function useBridgeSnapshot(bridge, setters) {
       setters.setRecentProjects(snap.recentProjects ?? []);
       setters.setNoTabProfileId(snap.noTabProfileId ?? _UB_DEFAULT_PROFILE_ID);
       setters.setWorkspaceNotes(snap.workspaceNotes ?? []);
+      setters.setApprovalModes(snap.approvalModes ?? null);
       if (snap.activeSessionId) setters.setActiveSessionId(snap.activeSessionId);
     });
     return unsub;

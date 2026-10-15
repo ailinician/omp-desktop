@@ -6,6 +6,7 @@
 
 mod agent;
 mod approval;
+mod approval_mode;
 mod child_path;
 mod conversation_tree;
 mod external_open;
@@ -32,6 +33,7 @@ mod workspace;
 
 use agent::AgentBridge;
 use approval::RuleBook;
+use approval_mode::{ApprovalModeStore, ApprovalModeView};
 use external_open::OpenProjectState;
 use git_watcher::GitWatcherState;
 use std::ffi::OsString;
@@ -78,8 +80,10 @@ struct StartSessionArgs {
 /// Register the tab with the terminal, start an omp process for it, then
 /// tell the widget host (which computes the project's git context on its own
 /// thread). The terminal comes first so a failed omp spawn still leaves the
-/// tab a working shell; registering an existing tab (a profile switch) keeps
-/// its shell.
+/// tab a working shell; registering an existing tab (a profile switch or an
+/// approval-mode restart) keeps its shell. The approval mode is resolved here
+/// for the tab's folder, never sent by the frontend; `Ok` is the mode omp was
+/// started with (`"always-ask" | "write" | "yolo"`).
 #[tauri::command]
 fn start_session(
     args: StartSessionArgs,
@@ -89,7 +93,7 @@ fn start_session(
     widget_host: State<'_, Arc<widgets::WidgetHost>>,
     terminal: State<'_, Arc<terminal::TerminalManager>>,
     app: tauri::AppHandle,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let profile = store.resolve(args.profile.as_deref())?;
     if let Some(r) = args.resume.as_deref() {
         saved_sessions::validate_resume(&app, r, profile)?;
@@ -99,19 +103,26 @@ fn start_session(
     } else {
         Some(args.cwd.as_str())
     };
+    // Through `app` rather than an eighth `State` parameter (clippy's
+    // `too_many_arguments`); `app` is moved into the bridge below.
+    let mode = app
+        .state::<Arc<ApprovalModeStore>>()
+        .resolve(cwd_opt.map(Path::new));
     terminal.register_tab(&args.session_id, cwd_opt.map(Path::new));
-    // The bridge takes the id by value; the widget hook below still needs it.
-    let session_id = args.session_id.clone();
     bridge.start_session(
-        args.session_id,
-        cwd_opt,
-        args.resume.as_deref(),
-        profile,
+        // Owned by the bridge's map; the widget hook below still needs the id.
+        args.session_id.clone(),
+        agent::Launch {
+            cwd: cwd_opt,
+            resume: args.resume.as_deref(),
+            profile,
+            mode,
+        },
         app,
         Arc::clone(rule_book.inner()),
     )?;
-    widget_host.session_started(&session_id, cwd_opt.map(Path::new));
-    Ok(())
+    widget_host.session_started(&args.session_id, cwd_opt.map(Path::new));
+    Ok(mode.as_str().to_string())
 }
 
 /// Run a blocking operation against a shared `Arc<S>` off the main command
@@ -630,6 +641,38 @@ fn parse_rule_scope(scope: &str) -> Result<approval::RuleScope, String> {
     }
 }
 
+/// The approval-mode default and per-project overrides (a cache read).
+#[tauri::command]
+fn approval_mode_get(modes: State<'_, Arc<ApprovalModeStore>>) -> ApprovalModeView {
+    modes.view()
+}
+
+/// Store the approval mode every project without an override starts omp
+/// with. The frontend restarts the affected tabs; this only writes the file.
+#[tauri::command]
+async fn approval_mode_set_default(
+    mode: String,
+    modes: State<'_, Arc<ApprovalModeStore>>,
+) -> Result<ApprovalModeView, String> {
+    let mode = mode.parse()?;
+    with_blocking(&modes, move |m| m.set_default(mode)).await
+}
+
+/// Store (`Some`) or remove (`None`: follow the default) the approval mode
+/// for the absolute folder `project_root`.
+#[tauri::command]
+async fn approval_mode_set_project(
+    project_root: String,
+    mode: Option<String>,
+    modes: State<'_, Arc<ApprovalModeStore>>,
+) -> Result<ApprovalModeView, String> {
+    let mode = mode.as_deref().map(str::parse).transpose()?;
+    with_blocking(&modes, move |m| {
+        m.set_project(Path::new(&project_root), mode)
+    })
+    .await
+}
+
 /// List project-relative file/directory paths matching `query`, for the
 /// composer's `@`-mention autocomplete.
 ///
@@ -1116,6 +1159,14 @@ fn setup(app: &tauri::App) {
             .as_deref()
             .map(|dir| dir.join("terminal.json")),
     )));
+    // Approval mode: <app_config_dir>/approval-mode.json. No temp-dir
+    // fallback: another account could plant a `yolo` there; without a config
+    // dir the choice stays in memory.
+    app.manage(Arc::new(ApprovalModeStore::load(
+        resolved_config_dir
+            .as_deref()
+            .map(|dir| dir.join("approval-mode.json")),
+    )));
     // Falls back to the temp dir if the config dir can't be resolved
     // (e.g. a locked-down test environment) rather than failing
     // startup — approval grants and profiles just won't survive a
@@ -1243,6 +1294,9 @@ pub fn run() {
             approval_rules_list,
             approval_rules_grant,
             approval_rules_revoke,
+            approval_mode_get,
+            approval_mode_set_default,
+            approval_mode_set_project,
             workspace_status,
             workspace_diff,
             workspace_accept,

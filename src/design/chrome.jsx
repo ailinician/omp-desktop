@@ -180,7 +180,7 @@ function TabBar({
 }
 
 // ── Status bar (footer): connection, model, tokens, todos, extension ─
-function StatusBar({ ctx, model, thinking, todoDone, todoTotal, onTodo, onModel, onTweaks, onChanges, onRules, onStats, onTree, onTerminal, terminalOpen, autosave, onAutosave }) {
+function StatusBar({ ctx, model, thinking, todoDone, todoTotal, onTodo, onModel, onTweaks, onChanges, onRules, approvalMode, onStats, onTree, onTerminal, terminalOpen, autosave, onAutosave }) {
   const thinkLabel = THINKING_LEVELS[thinking]?.short ?? thinking ?? "—";
   return (
     <div className="status">
@@ -225,9 +225,7 @@ function StatusBar({ ctx, model, thinking, todoDone, todoTotal, onTodo, onModel,
         <Icon name="branch" size={11} color="var(--fg-3)" />
       </button>
       <span className="status-sep">·</span>
-      <button className="status-cell btn ghost" onClick={onRules} title="approval rules" style={{ height: 20, padding: "0 6px" }}>
-        <Icon name="check" size={11} color="var(--fg-3)" />
-      </button>
+      <ApprovalModeCell cell={approvalMode} onClick={onRules} />
       <span className="status-sep">·</span>
       <button className="status-cell btn ghost" onClick={onStats} title="usage statistics" style={{ height: 20, padding: "0 6px" }}>
         <Icon name="cost" size={11} color="var(--fg-3)" />
@@ -243,6 +241,24 @@ function StatusBar({ ctx, model, thinking, todoDone, todoTotal, onTodo, onModel,
         <Icon name="cog" size={11} color="var(--fg-3)" />
       </button>
     </div>
+  );
+}
+
+// The approvals button: names the tab's running tool approval mode
+// (`OMP_APPROVAL_MODE.statusCell`). Yolo as the target turns the glyph to
+// `warn` and amber; a change waiting for the turn to end reads
+// `running ⇢ target` muted, with the target coloured.
+function ApprovalModeCell({ cell, onClick }) {
+  const targetColor = cell?.warn ? "var(--amber)" : "var(--fg-3)";
+  return (
+    <button className="status-cell btn ghost" onClick={onClick}
+      title={cell?.pending ? `approvals — switches to ${cell.target} when the agent finishes its turn` : "approvals"}
+      style={{ height: 20, padding: "0 6px" }}>
+      <Icon name={cell?.warn ? "warn" : "check"} size={11} color={targetColor} />
+      {cell && (cell.pending
+        ? <span className="mono status-mode" style={{ color: "var(--fg-4)" }}>{cell.running} ⇢ <span style={{ color: targetColor }}>{cell.target}</span></span>
+        : <span className="mono status-mode" style={{ color: targetColor }}>{cell.label}</span>)}
+    </button>
   );
 }
 
