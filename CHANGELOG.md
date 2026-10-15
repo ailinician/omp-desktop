@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-15
+
 ### Added
 
 - Choose omp's tool approval mode in the app (#57). The approvals panel, opened from the ✓ button in the status bar, sets how often the agent asks before it acts: `always ask` (it asks before every file change and every command; only reads run on their own), `write` (the default: it edits files on its own and asks before shell commands and anything else that runs code) or `yolo` (every tool runs without asking, shell commands included, and omp's own stop for dangerous commands such as `rm -rf /` is skipped too; shown in amber). The mode is a default for all projects, and each project can have its own. A change restarts the agent in the tabs it affects, and the conversation picks up where it was; a tab that is busy switches when its turn ends, and until then the status bar shows both modes (`write ⇢ yolo`). Your saved approval rules are kept.
