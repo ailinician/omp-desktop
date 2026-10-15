@@ -113,51 +113,56 @@ check("the last tab closing leaves nothing behind", () => {
 // ── Prompt-history recall in a tab's draft ───────────────────────────────
 
 const typed = text => ({ ...DRAFT_IDLE, text });
+const recall = (d, hist, dir) => S.recallInDraft(d, hist, dir, step);
 
-check("a recall interleaved across two tabs restores each tab's own unsent draft", () => {
-  const histA = ["sent in A"];
+check("Up on a typed draft never replaces it (#55)", () => {
+  assert.equal(recall(typed("half-typed"), ["sent"], -1), null);
+  assert.equal(recall(typed("line 1\nline 2"), ["sent"], -1), null);
+});
+
+check("Up on an empty composer starts a recall; each tab keeps its own position", () => {
+  const histA = ["sent in A", "older in A"];
   const histB = ["sent in B"];
-  const upA   = S.recallInDraft(typed("foo"), histA, -1, step);
-  const upB   = S.recallInDraft(typed("bar"), histB, -1, step);
+  const upA = recall(typed(""), histA, -1);
+  const upB = recall(typed(""), histB, -1);
   assert.equal(upA.text, "sent in A");
   assert.equal(upB.text, "sent in B");
-  assert.equal(S.recallInDraft(upA, histA, +1, step).text, "foo");
-  assert.equal(S.recallInDraft(upB, histB, +1, step).text, "bar");
+  assert.equal(recall(upA, histA, -1).text, "older in A");
+  assert.equal(recall(upB, histB, -1), null);
 });
 
-check("walking down past the newest entry ends the recall", () => {
+check("walking down past the newest entry empties the composer and ends the recall", () => {
   const hist = ["newest", "older"];
-  const up2  = S.recallInDraft(S.recallInDraft(typed("draft"), hist, -1, step), hist, -1, step);
+  const up2  = recall(recall(typed(""), hist, -1), hist, -1);
   assert.equal(up2.text, "older");
-  const down1 = S.recallInDraft(up2, hist, +1, step);
+  const down1 = recall(up2, hist, +1);
   assert.equal(down1.text, "newest");
-  const down2 = S.recallInDraft(down1, hist, +1, step);
-  assert.equal(down2.text, "draft");
-  assert.equal(S.recallInDraft(down2, hist, +1, step), null);
+  const down2 = recall(down1, hist, +1);
+  assert.equal(down2.text, "");
+  assert.equal(down2.historyNav, null);
+  assert.equal(recall(down2, hist, +1), null);
+  assert.equal(recall(down2, hist, -1).text, "newest", "a recall can start again");
 });
 
-check("a recall whose text was edited behind its back restarts from the current text", () => {
-  // e.g. a paste-token collapse rewrote the recalled entry without setText.
+check("an edited recall is a draft: Up moves the caret instead of recalling", () => {
+  // Text changed under a kept recall position (every edit path resets it today).
   const hist   = ["one", "two"];
-  const edited = { ...S.recallInDraft(typed("mine"), hist, -1, step), text: "one [paste #1 +9 lines]" };
-  const up     = S.recallInDraft(edited, hist, -1, step);
-  assert.equal(up.text, "one");
-  assert.equal(S.recallInDraft(up, hist, +1, step).text, "one [paste #1 +9 lines]");
+  const edited = { ...recall(typed(""), hist, -1), text: "one [paste #1 +9 lines]" };
+  assert.equal(recall(edited, hist, -1), null);
+  assert.equal(recall(edited, hist, +1), null);
 });
 
-check("a recall position past a shrunken history restarts instead of reading past the end", () => {
-  const long  = ["a", "b", "c"];
-  let d = typed("mine");
-  for (let i = 0; i < 3; i++) d = S.recallInDraft(d, long, -1, step);
+check("a recall position past a shrunken history is dropped, not read past the end", () => {
+  let d = typed("");
+  for (let i = 0; i < 3; i++) d = recall(d, ["a", "b", "c"], -1);
   assert.equal(d.text, "c");
-  const up = S.recallInDraft(d, ["a"], -1, step);
-  assert.equal(up.text, "a");
-  assert.equal(S.recallInDraft(up, ["a"], +1, step).text, "c");
+  assert.equal(recall(d, ["a"], -1), null);
+  assert.equal(recall(d, ["a"], +1), null);
 });
 
-check("nothing to recall leaves the draft alone", () => {
-  assert.equal(S.recallInDraft(typed("x"), [], -1, step), null);
-  assert.equal(S.recallInDraft(typed("x"), ["h"], +1, step), null);
+check("nothing to recall leaves the composer alone", () => {
+  assert.equal(recall(typed(""), [], -1), null);
+  assert.equal(recall(typed(""), ["h"], +1), null);
 });
 
 // ── Collapsed pastes (#31) ───────────────────────────────────────────────
@@ -207,7 +212,7 @@ check("each new paste gets its own id, and the strip lists each still-referenced
 check("expanding one paste inlines every copy of it and leaves the others collapsed", () => {
   let d = collapse(typed("x  y"), lines(6), 1, 1).draft;           // x[paste #1]  y
   d = collapse(d, lines(8), d.text.length, d.text.length).draft;   // …y[paste #2]
-  d = { ...d, text: `${d.text} [paste #2 +8 lines]`, historyNav: { index: 0, stash: "" } };
+  d = { ...d, text: `${d.text} [paste #2 +8 lines]`, historyNav: 0 };
   const r = S.inlinePaste(d, "2");
   const head = "x[paste #1 +6 lines]  y";
   assert.equal(r.patch.text, `${head}${lines(8)} ${lines(8)}`);
@@ -219,7 +224,7 @@ check("expanding one paste inlines every copy of it and leaves the others collap
 
 check("a paste edit keeps a concurrent image preparation, and ends a history recall", () => {
   const att = [{ id: 1 }];
-  const busy = { ...typed("ab"), attachments: att, pendingImages: 2, historyNav: { index: 0, stash: "" } };
+  const busy = { ...typed("ab"), attachments: att, pendingImages: 2, historyNav: 0 };
   const collapsed = { ...busy, ...S.collapsePaste(busy, lines(6), 1, 1).patch };
   assert.equal(collapsed.pendingImages, 2);
   assert.equal(collapsed.attachments, att);

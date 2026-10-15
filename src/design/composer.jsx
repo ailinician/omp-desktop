@@ -64,10 +64,10 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   React.useEffect(() => { setDrafts(m => pruneDrafts(m, sessionIds)); }, [sessionIds]);
   const [activeIdx, setActiveIdx] = React.useState(0);
   const taRef   = React.useRef(null);
-  // Prompt-history recall (issue #16, Arrow Up/Down): the recall position
-  // and the stashed unsent draft live in the tab's draft entry
-  // (`historyNav`, null = idle), so a recall started in one tab can never
-  // restore that stash into another. onKey steps it via recallInDraft.
+  // Prompt-history recall (issues #16, #55, Arrow Up/Down): the recall
+  // position lives in the tab's draft entry (`historyNav`, an index into the
+  // tab's history, null = not recalling), so each tab keeps its own recall.
+  // onKey steps it via recallInDraft.
   const listRef = React.useRef(null);
   const attachCounterRef = React.useRef(0);
   const fileInputRef     = React.useRef(null);
@@ -495,13 +495,13 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
       if (e.key === "Escape")     { e.preventDefault(); if (midSlash) setSlashDismissedKey(slashKey); else setText(""); return; }
       if (e.key === "Tab")        { e.preventDefault(); setActiveIdx(i => (i + 1) % filtered.length); return; }
     }
-    // Prompt-history recall (issue #16) — only when neither popup owns the
-    // arrows, no modifier is held (a modified arrow is a different chord,
-    // e.g. the Ctrl+Up picker handled globally by use-keymap.jsx, and
-    // Shift+Up/Down is the native select-to-start/end gesture), and the
-    // caret sits on the first/last line respectively — mirrors a shell's
-    // "only recall when there's nothing to navigate past" behavior so a
-    // multi-line draft's internal Up/Down still moves the caret normally.
+    // Prompt-history recall (issues #16, #55) — only when neither popup owns
+    // the arrows and no modifier is held (a modified arrow is a different
+    // chord, e.g. the Ctrl+Up picker handled globally by use-keymap.jsx, and
+    // Shift+Up/Down is the native select-to-start/end gesture). Up starts a
+    // recall only from an empty composer (recallInDraft); during one, Up on
+    // the first line / Down on the last line steps it, so a multi-line entry
+    // still moves the caret line by line. Anything else is a caret move.
     if (!showMention && !showSlash && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey &&
         (e.key === "ArrowUp" || e.key === "ArrowDown")) {
       const dir = e.key === "ArrowUp" ? -1 : 1;
@@ -510,9 +510,9 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
       const end   = ta ? ta.selectionEnd   : text.length;
       const H = window.OMP_PROMPT_HISTORY;
       const eligible = dir < 0 ? H.caretOnFirstLine(text, start, end) : H.caretOnLastLine(text, start, end);
-      // recallInDraft (app/session-ui.js) also drops a recall position the
-      // text has drifted from — a lowered tweaks-panel limit, a paste-token
-      // collapse — instead of trusting a stale index.
+      // recallInDraft (app/session-ui.js) refuses a typed draft and drops a
+      // recall position the text has drifted from (an edit, a lowered
+      // tweaks-panel limit) instead of trusting a stale index.
       const next = eligible ? recallInDraft(draft, promptHistory, dir, H.step) : null;
       if (next) {
         e.preventDefault();

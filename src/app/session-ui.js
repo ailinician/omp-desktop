@@ -84,8 +84,8 @@
   // ── Composer draft ───────────────────────────────────────────────────
   // `pastes` maps a `[paste #N …]` token id to its collapsed text;
   // `pendingImages` counts image preparations still in flight for the tab;
-  // `historyNav` is the tab's prompt-history recall position and stashed
-  // unsent draft (app/prompt-history.js `step`), null when not recalling.
+  // `historyNav` is the tab's prompt-history recall position (an index into
+  // the tab's history, app/prompt-history.js `step`), null when not recalling.
 
   const DRAFT_IDLE = Object.freeze({
     text: "",
@@ -98,16 +98,18 @@
 
   /** One Arrow Up (`dir` -1) / Down (+1) prompt-history recall in `draft`,
    *  through `step` (app/prompt-history.js, injected so this file stays
-   *  dependency-free). The recall position only means something while the
-   *  text is still the entry it recalled: the history list shrinking under
-   *  it, or an edit that bypassed the composer's setText (paste-token
-   *  collapse), restarts the recall from the current text. Returns the next
-   *  draft, or null when there is nothing to recall in that direction. */
+   *  dependency-free). A recall starts only from an empty composer, as in
+   *  omp's own editor (#55): Up on a typed draft moves the caret, it never
+   *  replaces the draft. The recall position only means something while the
+   *  text is still the entry it recalled; an edit, or the history list
+   *  shrinking under it, makes the text a draft again. Returns the next
+   *  draft, or null when the key is not a recall step. */
   function recallInDraft(draft, history, dir, step) {
-    const nav = draft.historyNav;
-    const live = nav && !(nav.index >= 0 && history[nav.index] !== draft.text) ? nav : null;
-    const result = step(live, history, dir, draft.text);
-    return result && { ...draft, text: result.text, historyNav: result.nav };
+    const at = draft.historyNav;
+    const recalling = at !== null && history[at] === draft.text;
+    if (!recalling && draft.text !== "") return null;
+    const result = step(recalling ? at : null, history, dir);
+    return result && { ...draft, text: result.text, historyNav: result.index };
   }
 
   // ── Collapsed pastes (#31) ───────────────────────────────────────────

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Arrow Up no longer replaces a prompt you are typing with your last sent one (#55). Up and Down now move the caret in a typed draft, wherever it is. Up brings back earlier prompts only from an empty prompt box, as in omp's own editor. While you step through them, Up on the first line and Down on the last line move between prompts, and Down past the newest one empties the box again. `Ctrl+↑` still opens the searchable picker at any time.
+
 ## [0.8.0] - 2026-10-13
 
 ### Added

@@ -152,34 +152,26 @@ check("strips a framing prefix even when the transcript entry only has its trimE
 
 // ── step (Up/Down navigation) ───────────────────────────────────────────
 
-check("Up from idle stashes the draft and returns the newest entry", () => {
-  const r = H.step(H.IDLE, ["b", "a"], -1, "my draft");
-  assert.deepEqual(r, { nav: { index: 0, draft: "my draft" }, text: "b" });
+check("Up while not recalling returns the newest entry", () => {
+  assert.deepEqual(H.step(null, ["b", "a"], -1), { index: 0, text: "b" });
 });
-check("Up again steps to the next-older entry, keeping the stashed draft", () => {
-  const r = H.step({ index: 0, draft: "my draft" }, ["b", "a"], -1, "b");
-  assert.deepEqual(r, { nav: { index: 1, draft: "my draft" }, text: "a" });
+check("Up again steps to the next-older entry", () => {
+  assert.deepEqual(H.step(0, ["b", "a"], -1), { index: 1, text: "a" });
 });
 check("Up past the oldest entry returns null (nowhere to go)", () => {
-  assert.equal(H.step({ index: 1, draft: "d" }, ["b", "a"], -1, "a"), null);
+  assert.equal(H.step(1, ["b", "a"], -1), null);
 });
 check("Up on an empty list returns null", () => {
-  assert.equal(H.step(H.IDLE, [], -1, "draft"), null);
+  assert.equal(H.step(null, [], -1), null);
 });
-check("Down while idle returns null (nothing to return to)", () => {
-  assert.equal(H.step(H.IDLE, ["b", "a"], 1, "draft"), null);
+check("Down while not recalling returns null (nothing to return to)", () => {
+  assert.equal(H.step(null, ["b", "a"], 1), null);
 });
-check("Down from the newest entry restores the stashed draft and idles", () => {
-  const r = H.step({ index: 0, draft: "my draft" }, ["b", "a"], 1, "b");
-  assert.deepEqual(r, { nav: H.IDLE, text: "my draft" });
+check("Down from the newest entry empties the composer and ends the recall", () => {
+  assert.deepEqual(H.step(0, ["b", "a"], 1), { index: null, text: "" });
 });
 check("Down from a deeper entry steps to the next-newer one", () => {
-  const r = H.step({ index: 1, draft: "d" }, ["b", "a"], 1, "a");
-  assert.deepEqual(r, { nav: { index: 0, draft: "d" }, text: "b" });
-});
-check("Down clamps to the oldest surviving entry when the list has shrunk under a stale index (defensive)", () => {
-  const r = H.step({ index: 5, draft: "d" }, ["c2", "c1", "c0"], 1, "c?");
-  assert.deepEqual(r, { nav: { index: 2, draft: "d" }, text: "c0" });
+  assert.deepEqual(H.step(1, ["b", "a"], 1), { index: 0, text: "b" });
 });
 
 // ── caret guards ─────────────────────────────────────────────────────────

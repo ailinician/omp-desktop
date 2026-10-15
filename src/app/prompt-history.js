@@ -83,43 +83,30 @@
     return out;
   }
 
-  const IDLE = Object.freeze({ index: -1, draft: "" });
-
   /**
    * One Up (`dir = -1`, older) or Down (`dir = +1`, newer) step through
-   * `list`. `nav.index === -1` means "editing the draft": the first Up
-   * stashes `currentText` as the draft, and stepping Down past the newest
-   * entry restores it. Returns `{ nav, text }`, or `null` when there is
-   * nowhere to go (caller lets the key through untouched).
+   * `list` from recall position `index` (null = not recalling). Recall only
+   * ever starts from an empty composer (#55), so there is no draft to stash:
+   * stepping Down past the newest entry empties the composer again. Returns
+   * `{ index, text }` (`index` null once back at the empty composer), or
+   * `null` when there is nowhere to go (caller lets the key through).
    */
-  function step(nav, list, dir, currentText) {
-    const cur = nav || IDLE;
+  function step(index, list, dir) {
+    const cur = index ?? -1;
     if (dir < 0) {
-      const next = cur.index + 1;
-      if (next >= list.length) return null;
-      const draft = cur.index === -1 ? currentText : cur.draft;
-      return { nav: { index: next, draft }, text: list[next] };
+      const next = cur + 1;
+      return next < list.length ? { index: next, text: list[next] } : null;
     }
-    if (cur.index < 0) return null;
-    // Defensive bounds clamp: a caller may hold a stale index if the list
-    // shrank out from under an in-progress recall (e.g. the tweaks-panel
-    // limit was lowered mid-navigation) without resetting nav first —
-    // without this, `list[next]` reads past the end and returns
-    // `undefined` instead of a string. Composer.jsx also guards this at
-    // the call site (invalidates nav the moment `text` no longer matches
-    // the recalled entry), so this is a second line of defense, not the
-    // only one.
-    const next = Math.min(cur.index, list.length) - 1;
-    if (next === -1) return { nav: IDLE, text: cur.draft };
-    return { nav: { index: next, draft: cur.draft }, text: list[next] };
+    if (cur < 0) return null;
+    return cur === 0 ? { index: null, text: "" } : { index: cur - 1, text: list[cur - 1] };
   }
 
-  /** Caret collapsed and on the first line: Up belongs to history. */
+  /** Caret collapsed and on the first line: Up steps an ongoing recall. */
   function caretOnFirstLine(value, start, end) {
     return start === end && (start === 0 || value.lastIndexOf("\n", start - 1) === -1);
   }
 
-  /** Caret collapsed and on the last line: Down belongs to history. */
+  /** Caret collapsed and on the last line: Down steps an ongoing recall. */
   function caretOnLastLine(value, start, end) {
     return start === end && value.indexOf("\n", end) === -1;
   }
@@ -145,7 +132,7 @@
   }
 
   window.OMP_PROMPT_HISTORY = {
-    DEFAULT_LIMIT, MIN_LIMIT, MAX_LIMIT, IDLE,
+    DEFAULT_LIMIT, MIN_LIMIT, MAX_LIMIT,
     clampLimit, record, mergeOlder, promptsFromMessages, step,
     caretOnFirstLine, caretOnLastLine, trimAll,
   };
