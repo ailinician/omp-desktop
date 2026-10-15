@@ -98,12 +98,12 @@ pub(super) fn handler(core: Weak<Core>, worker: Sender<Event>) -> EventHandler {
                 let _ = worker.send(Event::Restart);
             }
         } else if annotate::EVENTS.contains(&method) {
-            core.on_overlay_event(session, method, params);
+            core.on_overlay_event(session, method, &params);
         } else if method == DISCONNECTED || FORWARDED.contains(&method) {
             let _ = worker.send(Event::Cdp {
                 session: session.map(str::to_owned),
                 method: method.to_owned(),
-                params: params.clone(), // the handler only borrows it
+                params,
             });
         }
     })
@@ -112,12 +112,12 @@ pub(super) fn handler(core: Weak<Core>, worker: Sender<Event>) -> EventHandler {
 /// Queue a frame of the shown page for the emitter; its ack to Chromium
 /// waits for the webview (see `frames.rs`). `true` when the frame is of the
 /// wrong size and the screencast should restart.
-fn on_frame(core: &Core, session: Option<&str>, params: &Value) -> bool {
+fn on_frame(core: &Core, session: Option<&str>, mut params: Value) -> bool {
     let Some(session) = session else {
         return false;
     };
-    let ack = chromium_ack(session, params);
-    let Some(data) = params.get("data").and_then(Value::as_str) else {
+    let ack = chromium_ack(session, &params);
+    let Value::String(data) = params["data"].take() else {
         core.ack_chromium(ack); // not queued: acknowledge now, or Chromium stops sending
         return false;
     };
@@ -143,8 +143,8 @@ fn on_frame(core: &Core, session: Option<&str>, params: &Value) -> bool {
     };
     let css_w = css("deviceWidth", inner.size.w);
     let css_h = css("deviceHeight", inner.size.h);
-    // The event is borrowed; the base64 stays as Chromium sent it.
-    let frame = Frame::new(data.to_owned(), css_w, css_h);
+    // The base64 moves on as Chromium sent it.
+    let frame = Frame::new(data, css_w, css_h);
     let proportioned = frame.has_css_proportions();
     let restart = inner.frame_needs_restart(css_w, css_h, proportioned);
     drop(inner);

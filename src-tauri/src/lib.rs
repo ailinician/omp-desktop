@@ -23,11 +23,15 @@ mod navigation_guard;
 mod omp_cli;
 mod open_tabs;
 mod profiles;
+mod program_setting;
 mod recent_projects;
 mod redaction;
 mod saved_sessions;
 mod stats;
+mod supervisor;
 mod terminal;
+#[cfg(test)]
+mod test_support;
 mod text;
 mod updater;
 mod widgets;
@@ -113,19 +117,14 @@ fn start_session(
     terminal.register_tab(&args.session_id, cwd_opt.map(Path::new));
     // The tab's browser (idempotent: a respawn under the same tab id reuses
     // it). Which Chromium it runs is Rust's `browser.json` setting, read at
-    // launch time. Without one the session starts without `--config` and omp
-    // falls back to its own browser (logged: a respawn racing the tab's
-    // close lands here with "still closing").
+    // launch time. Only an app run with no managed browsers at all starts omp
+    // without `--config`; a tab whose browser can't be set up (a respawn
+    // racing the tab's close: "still closing") fails to start, and the
+    // frontend's rollback closes it.
     let overlay = app
         .state::<browser::BrowserManager>()
-        .allocate(&args.session_id)
-        .map_err(|e| {
-            eprintln!(
-                "[omp-desktop] browser unavailable for {}: {e}",
-                args.session_id
-            );
-        })
-        .ok();
+        .allocate_if_available(&args.session_id)
+        .map_err(|e| format!("browser: {e}"))?;
     bridge.start_session(
         // Owned by the bridge's map; the widget hook below still needs the id.
         args.session_id.clone(),
@@ -143,19 +142,27 @@ fn start_session(
     Ok(mode.as_str().to_string())
 }
 
-/// Run a blocking operation against a shared `Arc<S>` off the main command
-/// thread — the `Arc::clone` + `spawn_blocking` + join-error tail every
-/// state-mutating command shares (`ProfileStore` and the keybindings
-/// `OverlayStore` alike): each one is a locked, fsync'd read-modify-write of
-/// its own JSON file (same rationale as `approval_rules_grant`).
+/// Run blocking `work` (file or process I/O, a long scan) off Tauri's IPC
+/// thread, which would otherwise freeze the webview: `spawn_blocking`, with
+/// a panic in `work` reported as `"join error: …"`.
+async fn off_ipc<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("join error: {e}"))
+}
+
+/// [`off_ipc`] against a shared `Arc<S>` — what every state-mutating command
+/// shares (`ProfileStore` and the keybindings `OverlayStore` alike): each one
+/// is a locked, fsync'd read-modify-write of its own JSON file (same
+/// rationale as `approval_rules_grant`).
 async fn with_blocking<S: Send + Sync + 'static, T: Send + 'static>(
     shared: &Arc<S>,
     f: impl FnOnce(&S) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
     let shared = Arc::clone(shared);
-    tauri::async_runtime::spawn_blocking(move || f(&shared))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || f(&shared)).await?
 }
 
 /// The profile list plus which entry is the startup default, in one payload.
@@ -247,9 +254,7 @@ async fn clear_profile_bootstrap(
         return Ok(());
     };
     let home = app.path().home_dir().map_err(|e| e.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || profiles::clear_bootstrap(&home, &id))
-        .await
-        .map_err(|e| format!("join error: {e}"))
+    off_ipc(move || profiles::clear_bootstrap(&home, &id)).await
 }
 
 /// Rename a profile. Only the display label changes — see
@@ -288,11 +293,8 @@ async fn list_saved_sessions(
     app: tauri::AppHandle,
 ) -> Result<Vec<saved_sessions::SavedSession>, String> {
     let profile = store.resolve_owned(profile)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        saved_sessions::scan_saved_sessions(&app, cwd.as_deref(), profile.as_deref())
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || saved_sessions::scan_saved_sessions(&app, cwd.as_deref(), profile.as_deref()))
+        .await?
 }
 
 /// The conversation family of one saved session file (`session_file`, under
@@ -308,11 +310,7 @@ async fn conversation_tree(
     app: tauri::AppHandle,
 ) -> Result<conversation_tree::ConversationTree, String> {
     let profile = store.resolve_owned(profile)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        conversation_tree::load(&app, &session_file, profile.as_deref())
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || conversation_tree::load(&app, &session_file, profile.as_deref())).await?
 }
 
 /// Kill the omp process for a tab session. Also drops its session-scoped
@@ -321,7 +319,7 @@ async fn conversation_tree(
 ///
 /// Deliberately does NOT touch the tab's terminal or browser: a profile switch
 /// respawns omp while its shell and Chromium stay. Both end only through
-/// [`close_tab`] / [`close_all_tabs`] and [`kill_child_processes`].
+/// [`end_tabs`] and [`kill_child_processes`].
 #[tauri::command]
 fn stop_session(
     session_id: String,
@@ -333,33 +331,35 @@ fn stop_session(
     widget_host.session_closed(&session_id);
 }
 
-/// End a tab for good: its omp process (with its session grants), browser,
-/// widget runs, git watcher and terminal shell. The one place a tab ends.
-fn end_tab(app: &AppHandle, session_id: &str) {
-    end_tab_but_terminal(app, session_id);
-    app.state::<Arc<terminal::TerminalManager>>()
-        .close_tab(session_id);
-}
-
-/// [`end_tab`] without the terminal, for [`close_all_tabs`], which ends
-/// every terminal at once.
-fn end_tab_but_terminal(app: &AppHandle, session_id: &str) {
+/// End tabs for good: their omp processes (with their session grants),
+/// widget runs, git watchers, browsers and terminal shells. The one place a
+/// tab ends. The two slow teardowns are independent and run side by side:
+/// the browsers (Chromium kill, profile removal) and the shells (one shared
+/// hang-up grace, `TerminalManager::close_tabs`).
+fn end_tabs<S: AsRef<str> + Sync>(app: &AppHandle, ids: &[S]) {
     let rule_book = app.state::<Arc<RuleBook>>();
-    app.state::<AgentBridge>()
-        .stop_session(session_id, &rule_book);
-    app.state::<browser::BrowserManager>().release(session_id);
-    app.state::<Arc<widgets::WidgetHost>>()
-        .session_closed(session_id);
-    app.state::<GitWatcherState>().stop(session_id);
+    let bridge = app.state::<AgentBridge>();
+    let widgets = app.state::<Arc<widgets::WidgetHost>>();
+    let watchers = app.state::<GitWatcherState>();
+    for id in ids {
+        let id = id.as_ref();
+        bridge.stop_session(id, &rule_book);
+        widgets.session_closed(id);
+        watchers.stop(id);
+    }
+    let browser = app.state::<browser::BrowserManager>();
+    std::thread::scope(|scope| {
+        scope.spawn(|| browser.release_many(ids));
+        app.state::<Arc<terminal::TerminalManager>>()
+            .close_tabs(ids);
+    });
 }
 
-/// Close a tab (the frontend's `closeSession`) — see [`end_tab`]. `async` +
+/// Close a tab (the frontend's `closeSession`) — see [`end_tabs`]. `async` +
 /// `spawn_blocking`: reaping omp and killing the shell's processes block.
 #[tauri::command]
 async fn close_tab(session_id: String, app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || end_tab(&app, &session_id))
-        .await
-        .map_err(|e| format!("join error: {e}"))
+    off_ipc(move || end_tabs(&app, &[session_id])).await
 }
 
 /// End every tab the backend knows. Called by the webview at boot, before
@@ -367,22 +367,15 @@ async fn close_tab(session_id: String, app: AppHandle) -> Result<(), String> {
 /// whatever is registered then belongs to a previous document and would
 /// otherwise run on unseen. The terminal's registry is the tab set:
 /// [`start_session`] registers the tab before it spawns omp, and only
-/// [`end_tab`] (or an app exit) unregisters it. Only the tabs registered at
-/// the start end: one started meanwhile keeps its terminal. Their shells
-/// share one hang-up grace (`TerminalManager::close_tabs`) instead of one
-/// per tab.
+/// [`end_tabs`] (or an app exit) unregisters it. Only the tabs registered at
+/// the start end: one started meanwhile keeps its terminal and browser.
 #[tauri::command]
 async fn close_all_tabs(app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let terminal = app.state::<Arc<terminal::TerminalManager>>();
-        let ids = terminal.tab_ids();
-        for id in &ids {
-            end_tab_but_terminal(&app, id);
-        }
-        terminal.close_tabs(&ids);
+    off_ipc(move || {
+        let ids = app.state::<Arc<terminal::TerminalManager>>().tab_ids();
+        end_tabs(&app, &ids);
     })
     .await
-    .map_err(|e| format!("join error: {e}"))
 }
 
 /// Start the tab's terminal shell, in the tab's folder (else the home
@@ -640,11 +633,7 @@ async fn approval_rules_list(
     rule_book: State<'_, Arc<RuleBook>>,
 ) -> Result<Vec<approval::Rule>, String> {
     let rule_book = Arc::clone(rule_book.inner());
-    tauri::async_runtime::spawn_blocking(move || {
-        rule_book.list(&session_id, project_root.as_deref().map(Path::new))
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))
+    off_ipc(move || rule_book.list(&session_id, project_root.as_deref().map(Path::new))).await
 }
 
 /// Grant standing approval for `tool`. `scope` is `"session"` or `"project"`
@@ -662,7 +651,7 @@ async fn approval_rules_grant(
     rule_book: State<'_, Arc<RuleBook>>,
 ) -> Result<(), String> {
     let rule_book = Arc::clone(rule_book.inner());
-    tauri::async_runtime::spawn_blocking(move || {
+    off_ipc(move || {
         let scope = parse_rule_scope(&scope)?;
         rule_book.grant(
             &session_id,
@@ -671,8 +660,7 @@ async fn approval_rules_grant(
             scope,
         )
     })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+    .await?
 }
 
 /// Revoke a previously granted rule. No-op (not an error) if it wasn't granted.
@@ -688,7 +676,7 @@ async fn approval_rules_revoke(
     rule_book: State<'_, Arc<RuleBook>>,
 ) -> Result<(), String> {
     let rule_book = Arc::clone(rule_book.inner());
-    tauri::async_runtime::spawn_blocking(move || {
+    off_ipc(move || {
         let scope = parse_rule_scope(&scope)?;
         rule_book.revoke(
             &session_id,
@@ -697,8 +685,7 @@ async fn approval_rules_revoke(
             scope,
         )
     })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+    .await?
 }
 
 fn parse_rule_scope(scope: &str) -> Result<approval::RuleScope, String> {
@@ -753,9 +740,7 @@ async fn list_project_files(
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<files::FileHit>, String> {
-    tauri::async_runtime::spawn_blocking(move || files::list(&cwd, &query, limit))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || files::list(&cwd, &query, limit)).await?
 }
 
 /// Native folder picker — returns the chosen path or null.
@@ -779,7 +764,7 @@ async fn open_project(app: tauri::AppHandle) -> Result<Option<String>, String> {
         .pick_folder(move |result| {
             let _ = tx.send(result);
         });
-    tauri::async_runtime::spawn_blocking(move || {
+    off_ipc(move || {
         let Some(picked) = rx.recv().map_err(|e| format!("channel error: {e}"))? else {
             return Ok(None);
         };
@@ -796,8 +781,7 @@ async fn open_project(app: tauri::AppHandle) -> Result<Option<String>, String> {
         // filesystem call.
         external_open::canonical_folder(&path).map(Some)
     })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+    .await?
 }
 
 /// Start watching `.git/HEAD` for a session's project path.
@@ -854,36 +838,28 @@ fn open_url_external(url: String) -> Result<(), String> {
 /// (blob diffs, history walks).
 #[tauri::command]
 async fn git_browser_status(path: String) -> Result<git_browser::StatusView, String> {
-    tauri::async_runtime::spawn_blocking(move || git_browser::status(Path::new(&path)))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || git_browser::status(Path::new(&path))).await?
 }
 
 /// One work-tree file in full with its change against `HEAD` inline — see
 /// `git_browser::file`. `async` + `spawn_blocking`: see `git_browser_status`.
 #[tauri::command]
 async fn git_browser_file(path: String, rel_path: String) -> Result<git_browser::FileView, String> {
-    tauri::async_runtime::spawn_blocking(move || git_browser::file(Path::new(&path), &rel_path))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || git_browser::file(Path::new(&path), &rel_path)).await?
 }
 
 /// The commit graph with refs and lanes — see `git_browser::log`.
 /// `async` + `spawn_blocking`: see `git_browser_status`.
 #[tauri::command]
 async fn git_browser_log(path: String) -> Result<git_browser::LogView, String> {
-    tauri::async_runtime::spawn_blocking(move || git_browser::log(Path::new(&path)))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || git_browser::log(Path::new(&path))).await?
 }
 
 /// A commit's metadata and touched files — see `git_browser::commit`.
 /// `async` + `spawn_blocking`: see `git_browser_status`.
 #[tauri::command]
 async fn git_browser_commit(path: String, sha: String) -> Result<git_browser::CommitView, String> {
-    tauri::async_runtime::spawn_blocking(move || git_browser::commit(Path::new(&path), &sha))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || git_browser::commit(Path::new(&path), &sha)).await?
 }
 
 /// One file as of a commit with the commit's change inline — see
@@ -895,11 +871,7 @@ async fn git_browser_commit_file(
     sha: String,
     rel_path: String,
 ) -> Result<git_browser::FileView, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        git_browser::commit_file(Path::new(&path), &sha, &rel_path)
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || git_browser::commit_file(Path::new(&path), &sha, &rel_path)).await?
 }
 
 /// Stage a file's changes — see `workspace::accept`.
@@ -909,9 +881,7 @@ async fn git_browser_commit_file(
 /// the webview if run on Tauri's main command thread.
 #[tauri::command]
 async fn workspace_accept(path: String, rel_path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || workspace::accept(Path::new(&path), &rel_path))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || workspace::accept(Path::new(&path), &rel_path)).await?
 }
 
 /// Discard a file's working-tree changes (deletes it if untracked) — see
@@ -921,9 +891,7 @@ async fn workspace_accept(path: String, rel_path: String) -> Result<(), String> 
 /// `workspace_accept` — see its doc comment.
 #[tauri::command]
 async fn workspace_reject(path: String, rel_path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || workspace::reject(Path::new(&path), &rel_path))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || workspace::reject(Path::new(&path), &rel_path)).await?
 }
 
 /// Widget config, approvals, active view and runs — see
@@ -987,9 +955,7 @@ async fn usage_stats(
     store: State<'_, Arc<profiles::ProfileStore>>,
 ) -> Result<stats::DashboardStats, String> {
     let profile = store.resolve_owned(profile)?;
-    tauri::async_runtime::spawn_blocking(move || stats::fetch(profile.as_deref()))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || stats::fetch(profile.as_deref())).await?
 }
 
 /// Whether omp's goal mode auto-continues over RPC for `profile` — see
@@ -1004,9 +970,7 @@ async fn goal_continuation_get(
     store: State<'_, Arc<profiles::ProfileStore>>,
 ) -> Result<bool, String> {
     let profile = store.resolve_owned(profile)?;
-    tauri::async_runtime::spawn_blocking(move || goal_config::get(profile.as_deref()))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || goal_config::get(profile.as_deref())).await?
 }
 
 /// Turn goal mode's auto-continue over RPC on or off for `profile` — see
@@ -1020,9 +984,7 @@ async fn goal_continuation_set(
     store: State<'_, Arc<profiles::ProfileStore>>,
 ) -> Result<bool, String> {
     let profile = store.resolve_owned(profile)?;
-    tauri::async_runtime::spawn_blocking(move || goal_config::set(profile.as_deref(), enabled))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || goal_config::set(profile.as_deref(), enabled)).await?
 }
 
 /// Shared profile-resolution and home-dir setup for the three keybindings
@@ -1195,9 +1157,7 @@ async fn model_usage_list(
     app: AppHandle,
 ) -> Result<Vec<String>, String> {
     let profile = store.resolve_owned(profile)?;
-    tauri::async_runtime::spawn_blocking(move || model_usage::recent_for(&app, profile.as_deref()))
-        .await
-        .map_err(|e| format!("join error: {e}"))
+    off_ipc(move || model_usage::recent_for(&app, profile.as_deref())).await
 }
 
 /// Ask the release feed for a newer version — see `updater::check`.

@@ -79,10 +79,10 @@ impl Core {
             };
             if let Some(old) = old {
                 self.release_overlay(&old); // the old page must not stay in annotate mode
-                let _ = self.call(Some(&old), "Page.stopScreencast", json!({}));
-                let _ = self.call(None, "Target.detachFromTarget", json!({ "sessionId": old }));
+                self.notify(Some(&old), "Page.stopScreencast", json!({}));
+                self.notify(None, "Target.detachFromTarget", json!({ "sessionId": old }));
             }
-            let _ = self.call(
+            self.notify(
                 None,
                 "Target.activateTarget",
                 json!({ "targetId": target_id }),

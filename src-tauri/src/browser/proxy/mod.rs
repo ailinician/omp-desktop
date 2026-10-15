@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 use feed::Feed;
 use tap::Tap;
 
+pub(super) use http::read_response;
+
 /// Returns the live Chromium port, launching or relaunching it as needed.
 pub type Ensure = Arc<dyn Fn() -> Result<u16, String> + Send + Sync>;
 

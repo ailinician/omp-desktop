@@ -163,33 +163,20 @@
 .browser-resize:hover, .browser-resize.dragging { background: color-mix(in oklab, var(--accent) 35%, transparent); }
 
 /* ── Composer: annotation chips ────────────────────────────────────── */
-/* Laid out like `.paste-chip` (composer.css): a reset-button label with
-   the `#n selector` in mono, then ×; both carry their own focus ring. */
+/* `.paste-chip` / `.paste-chip-label` (composer.css) plus these deltas:
+   an accent border, a label that shrinks to an ellipsis, a round ×. */
 .browser-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 2px 8px; }
 .browser-chip {
-  display: flex; align-items: center; gap: 2px;
+  align-items: center; gap: 2px;
   max-width: 100%; padding: 0 4px 0 0;
-  border: 1px solid color-mix(in oklab, var(--accent) 35%, var(--line-bright)); border-radius: 6px;
-  background: var(--bg-elevated);
-  font-size: var(--d-text-xs); color: var(--fg-2);
-  overflow: hidden;
+  border-color: color-mix(in oklab, var(--accent) 35%, var(--line-bright));
+  color: var(--fg-2);
 }
-.browser-chip.reserved { opacity: 0.55; }
-.browser-chip-label {
-  display: flex; align-items: center; gap: 5px;
-  min-width: 0; padding: 3px 4px 3px 7px;
-  appearance: none; border: 0; background: transparent;
-  color: inherit; text-align: left;
-}
-button.browser-chip-label:hover { background: var(--bg-hover); color: var(--fg); }
-button.browser-chip-label:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.browser-chip-label { min-width: 0; padding: 3px 4px 3px 7px; text-align: left; }
 .browser-chip-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.browser-chip-remove {
+.browser-chip .browser-chip-remove {
   display: flex; align-items: center; justify-content: center; flex: none;
-  width: 1rem; height: 1rem; padding: 0;
-  appearance: none; border: 0; border-radius: 50%; background: transparent;
-  color: var(--fg-3); cursor: pointer;
+  width: 1rem; height: 1rem; padding: 0; border-radius: 50%; color: var(--fg-3);
 }
-.browser-chip-remove:hover { color: var(--rose); background: var(--bg-hover); }
-.browser-chip-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.browser-chip .browser-chip-remove:hover { color: var(--rose); }
 .browser-chips-note { flex-basis: 100%; font-size: var(--d-text-xs); color: var(--amber); }

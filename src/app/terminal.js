@@ -26,8 +26,8 @@
 //
 // Exposes `window.OMP_TERMINAL`; an IIFE (AGENTS.md "IIFE rule") that calls
 // `window.OMP_KEYMAP.detectMac()` at load, so it loads after app/keymap.js
-// (its other OMP_KEYMAP lookups, and `shellLabel`'s
-// `OMP_PROJECT_NAV.basename`, happen at call time). design/terminal-panel.jsx
+// (its other OMP_KEYMAP lookups, and `shellLabel` / `shellMenu`'s
+// OMP_PATH_SETTING, happen at call time). design/terminal-panel.jsx
 // and app/use-terminal.jsx destructure it at top level, so it must load
 // before them.
 (function () {
@@ -152,39 +152,24 @@
   }
 
   /** `/bin/zsh` -> `zsh`; `C:\\Windows\\System32\\cmd.exe` -> `cmd`. */
-  function shellLabel(path) {
-    if (typeof path !== "string") return "shell";
-    return window.OMP_PROJECT_NAV.basename(path).replace(/\.exe$/i, "") || "shell";
-  }
-
-  /** Same program path, Windows drive/UNC paths ignoring case and `/` vs `\`
-   *  (a 0.7.0 setting typed as `C:\Windows\…` or `C:/Windows/…` names the
-   *  listed `C:\WINDOWS\…`). */
-  function samePath(a, b) {
-    const { normPath } = window.OMP_PROJECT_NAV;
-    return normPath(a) === normPath(b);
-  }
+  const shellLabel = (path) => window.OMP_PATH_SETTING.programName(path, "shell");
 
   /**
    * Tweaks → Terminal's shell button and menu for Rust's `TerminalSettings`
-   * (`{ shell, defaultShell, shells }`): `{ label, rows }`. `label` names the
-   * shell new terminals run (the stored one, else the default). `rows` are
-   * `{ name, hint, path, value, checked }`: `default` (value "", `hint` the
-   * default shell's name, so a row says what it runs), each installed shell,
-   * and the stored shell when it is none of them (set before, or picked with
-   * "other…"; `hint` "other", so it stands apart from a listed shell of the
-   * same name), so the menu always shows what is in use. `path` is the full
-   * program, for a tooltip. `value` is what `setTerminalShell` stores;
-   * exactly one row is checked.
+   * (`{ shell, defaultShell, shells }`): `OMP_PATH_SETTING.menu`'s
+   * `{ label, rows }`. `label` names the shell new terminals run (the stored
+   * one, else the default); the first row is `default` (`hint` the default
+   * shell's name, so a row says what it runs), then each installed shell.
+   * `value` is what `setTerminalShell` stores.
    */
   function shellMenu(settings) {
-    const shell = settings?.shell ?? "";
     const defaultShell = settings?.defaultShell ?? "";
-    const row = (name, path, value, hint = "") => ({ name, hint, path, value, checked: samePath(value, shell) });
-    const rows = [row("default", defaultShell, "", defaultShell ? shellLabel(defaultShell) : "")];
-    for (const s of settings?.shells ?? []) rows.push(row(s.name, s.path, s.path));
-    if (shell && !rows.some((r) => r.checked)) rows.push(row(shellLabel(shell), shell, shell, "other"));
-    return { label: shellLabel(shell || defaultShell), rows };
+    return window.OMP_PATH_SETTING.menu({
+      stored: settings?.shell ?? "",
+      name: shellLabel,
+      fallback: { name: "default", hint: defaultShell ? shellLabel(defaultShell) : "", path: defaultShell },
+      installed: settings?.shells ?? [],
+    });
   }
 
   /**

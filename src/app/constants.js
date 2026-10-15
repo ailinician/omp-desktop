@@ -69,6 +69,14 @@
   const isSubmitEnter = (e) =>
     e.key === "Enter" && !e.nativeEvent?.isComposing && e.keyCode !== 229;
 
+  // `s` cut to `max` UTF-16 units, the last one an ellipsis, never ending on
+  // half a surrogate pair (extension widget text, browser annotation HTML).
+  function truncateText(s, max) {
+    if (s.length <= max) return s;
+    const cut = /[\ud800-\udbff]/.test(s[max - 2]) ? max - 2 : max - 1;
+    return s.slice(0, cut) + "…";
+  }
+
   // omp's thinking levels, lowest first, with its own descriptions
   // (packages/tui/src/thinking.ts, THINKING_LEVEL_METADATA).
   const THINKING_LEVELS = {
@@ -89,6 +97,7 @@
     INTENT_FRAMING,
     APPROVAL_PROMPT,
     isSubmitEnter,
+    truncateText,
     THINKING_LEVELS,
   });
 })();

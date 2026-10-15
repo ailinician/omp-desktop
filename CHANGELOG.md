@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The conversation tree is now open or closed per tab, like the browser panel: switching tabs shows each tab's own side column (the rail, the tree or the browser).
 - The status bar now runs along the whole bottom of the window, under the side panels too, and stays on one line: when space is short it drops the tokens/s, cost and context meter cells, in that order, instead of wrapping or cutting off its buttons.
 
 ### Fixed

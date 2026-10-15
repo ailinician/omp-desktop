@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::agent::supervisor::ProcessSupervisor;
+use crate::supervisor::ProcessSupervisor;
 use crate::widgets::child::{recv_until, spawn_drain, terminate, wait_for_exit, WaitError};
 use crate::widgets::config::PluginEntry;
 use crate::widgets::context::PluginContext;

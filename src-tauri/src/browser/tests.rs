@@ -6,7 +6,7 @@ use super::*;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tungstenite::Message;
 
 /// Real-browser tests share one lock across modules. Hold it from before
@@ -60,19 +60,7 @@ pub(super) fn http_get(port: u16, path: &str) -> io::Result<String> {
     String::from_utf8(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-/// Poll `check` every 20 ms until it returns `Some`, for at most `timeout`.
-pub(super) fn eventually<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(found) = check() {
-            return Some(found);
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
+pub(super) use crate::test_support::eventually;
 
 /// The Chromium a real-browser test runs, as the app would find it. `None`
 /// (the test passes with a note) when there is none, unless the
@@ -219,6 +207,7 @@ fn allocate_is_idempotent_and_writes_overlay() {
     let p1 = m.allocate("s1").unwrap();
     let p2 = m.allocate("s1").unwrap();
     assert_eq!(p1, p2);
+    assert_eq!(m.allocate_if_available("s1"), Ok(Some(p1.clone())));
     let port = m.port("s1").unwrap();
     assert_eq!(
         std::fs::read_to_string(&p1).unwrap(),
@@ -364,7 +353,7 @@ fn reap_concurrently(
 #[cfg(unix)]
 #[test]
 fn pruning_reaps_an_orphaned_browser_before_deleting_its_dead_instance() {
-    use crate::agent::supervisor::ProcessSupervisor;
+    use crate::supervisor::ProcessSupervisor;
     let root = tempdir("reap-orphan");
     let profile = stale_profile(&root);
     let instance = profile.parent().unwrap().parent().unwrap();
@@ -391,7 +380,7 @@ fn pruning_reaps_an_orphaned_browser_before_deleting_its_dead_instance() {
 #[cfg(unix)]
 #[test]
 fn a_leftover_directory_with_our_own_pid_is_reaped_and_recreated() {
-    use crate::agent::supervisor::ProcessSupervisor;
+    use crate::supervisor::ProcessSupervisor;
     let root = tempdir("reap-own-pid");
     let instance = root.join(std::process::id().to_string());
     let profile = instance.join("profiles/session-1-0");
@@ -415,7 +404,7 @@ fn a_leftover_directory_with_our_own_pid_is_reaped_and_recreated() {
 #[cfg(unix)]
 #[test]
 fn pruning_does_not_kill_a_pid_without_the_exact_profile_argument() {
-    use crate::agent::supervisor::ProcessSupervisor;
+    use crate::supervisor::ProcessSupervisor;
     for suffix in [None, Some("-other")] {
         let root = tempdir(if suffix.is_some() {
             "reap-wrong-profile"
@@ -520,6 +509,11 @@ fn instance_dir_profiles_and_overlay_are_private() {
 fn an_unavailable_manager_refuses_to_allocate() {
     let m = BrowserManager::unavailable("no cache dir".into());
     assert_eq!(m.allocate("s1"), Err("no cache dir".into()));
+    assert_eq!(
+        m.allocate_if_available("s1"),
+        Ok(None),
+        "the app run has no managed browsers: omp starts without the overlay"
+    );
     m.release("s1");
     m.prune_stale_instances();
     m.shutdown_all();
@@ -547,7 +541,6 @@ fn shutdown_all_removes_only_its_own_instance_directory() {
 /// `40000 + <launch count>` after `delay` seconds, then idles.
 #[cfg(unix)]
 pub(super) fn fake_chromium(dir: &Path, delay: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let bin = dir.join("fake-chromium");
     let log = dir.join("launches");
     let pid = dir.join("pid");
@@ -564,9 +557,7 @@ pub(super) fn fake_chromium(dir: &Path, delay: &str) -> PathBuf {
         log = log.display(),
         pid = pid.display()
     );
-    std::fs::write(&bin, script).unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    bin
+    crate::test_support::executable(&bin, &script)
 }
 
 #[cfg(unix)]
@@ -604,7 +595,7 @@ fn a_slow_launch_blocks_no_other_session() {
             (launch_count(&dir) > 0).then_some(())
         })
         .expect("launch in flight");
-        let started = Instant::now();
+        let started = std::time::Instant::now();
         m.allocate("other").unwrap();
         assert!(m.port("other").is_some());
         m.release("other");
@@ -656,6 +647,31 @@ fn release_removes_profile_and_overlay_and_refuses_later_launches() {
     assert_eq!(launch_count(&dir), 1);
 }
 
+/// Closing many tabs releases exactly their browsers; unknown ids are fine.
+#[cfg(unix)]
+#[test]
+fn release_many_ends_exactly_the_given_sessions() {
+    let dir = tempdir("mgr-release-many");
+    let bin = fake_chromium(&dir, "0");
+    let m = manager_using(&dir.join("root"), &bin);
+    let overlays: Vec<_> = ["s1", "s2", "s3"]
+        .iter()
+        .map(|id| m.allocate(id).unwrap())
+        .collect();
+    m.chromium_port("s1").unwrap();
+    m.chromium_port("s2").unwrap();
+    let profiles: Vec<_> = ["s1", "s2"]
+        .iter()
+        .map(|id| m.profile_dir_for_test(id).unwrap())
+        .collect();
+    m.release_many(&["s1", "s2", "unknown"]);
+    assert!(profiles.iter().all(|p| !p.exists()), "{profiles:?}");
+    assert!(!overlays[0].exists() && !overlays[1].exists());
+    assert!(m.port("s1").is_none() && m.port("s2").is_none());
+    assert!(overlays[2].exists(), "s3 is not among them");
+    assert!(m.port("s3").is_some());
+}
+
 /// A launch is in flight and `release("s1")` waits for it on another
 /// thread; once that release is no longer in the map, `second_closer` runs.
 /// When it returns, the browser must be dead and its profile gone.
@@ -684,7 +700,7 @@ fn second_closer_waits_for_the_release_in_flight(name: &str, second_closer: fn(&
             .trim()
             .parse()
             .unwrap();
-        assert!(!crate::agent::supervisor::pid_is_alive(pid), "browser dead");
+        assert!(!crate::supervisor::pid_is_alive(pid), "browser dead");
         releasing.join().unwrap();
         launching.join().unwrap().unwrap();
     });
@@ -697,6 +713,33 @@ fn shutdown_all_waits_for_a_release_blocked_on_a_slow_launch() {
         "mgr-shutdown-race",
         BrowserManager::shutdown_all,
     );
+}
+
+/// A respawn racing its tab's close gets an error (the start fails and the
+/// frontend rolls the tab back), never a start without the tab's browser.
+#[cfg(unix)]
+#[test]
+fn allocating_a_session_that_is_still_closing_is_an_error() {
+    let dir = tempdir("mgr-allocate-closing");
+    let bin = fake_chromium(&dir, "1");
+    let m = manager_using(&dir.join("root"), &bin);
+    m.allocate("s1").unwrap();
+    std::thread::scope(|s| {
+        let launching = s.spawn(|| m.chromium_port("s1"));
+        eventually(Duration::from_secs(5), || {
+            (launch_count(&dir) > 0).then_some(())
+        })
+        .expect("launch in flight");
+        let releasing = s.spawn(|| m.release("s1"));
+        eventually(Duration::from_secs(5), || {
+            m.port("s1").is_none().then_some(())
+        })
+        .expect("release took the entry out");
+        let err = m.allocate_if_available("s1").unwrap_err();
+        assert!(err.contains("still closing"), "{err}");
+        releasing.join().unwrap();
+        let _ = launching.join().unwrap();
+    });
 }
 
 #[cfg(unix)]

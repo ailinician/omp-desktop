@@ -2,12 +2,12 @@
 // No DOM, no bridge:
 //   normalizeUrl(input)             address field text → loadable URL or null
 //   localUrl(href) / linkClick(e)   a localhost / 127.x / [::1] http(s) chat link
-//   trimHtml / annotationText / chipLabel / mergeIntoMessage / sendWithChips
-//                                   annotation chips → prompt text + images + delivery
+//   annotationText / chipLabel / mergeIntoMessage / droppedScreenshots
+//                                   annotation chips → prompt text + images
 //   toPageCoords / modifiersOf / keyEventToCdp / mouseButton / escapeAction
 //                                   (shape of src-tauri/src/browser/view/ `InputEvent`)
-//   EMPTY / addChip / removeChip / removeChips / reserveChips / releaseChips
-//   / chipsOf / prune
+//   EMPTY / chipsOf / addChip / removeChip / removeChips / restoreChips
+//                                   per-tab chips (OMP_SESSION_UI's per-tab map)
 //   clampWidth(px, stageWidth)      panel width bounds
 //   pathMenu(settings)              Tweaks → Browser's Chromium menu rows
 // Which keys the page gives back to the app is OMP_KEYMAP.guestShouldBypass
@@ -66,14 +66,6 @@
 
   // ---- Annotations ---------------------------------------------------------
 
-  function trimHtml(html, max = HTML_MAX) {
-    if (html.length <= max) return html;
-    let cut = max - 1;
-    // Never end on half a surrogate pair.
-    if (cut > 0 && /[\ud800-\udbff]/.test(html[cut - 1])) cut--;
-    return html.slice(0, cut) + "…";
-  }
-
   const round = (v) => Math.round(v);
   const areaOf = (r) => `${round(r.x)},${round(r.y)} ${round(r.w)}×${round(r.h)}`;
 
@@ -108,7 +100,7 @@
     } else {
       page.push(pick.selector ? `Element: ${elementName(pick)} (selector: ${pick.selector})` : `Element: ${elementName(pick)}`);
       if (pick.text) page.push(`Text: ${pick.text}`);
-      if (pick.html) page.push(`HTML: ${trimHtml(pick.html)}`);
+      if (pick.html) page.push(`HTML: ${window.truncateText(pick.html, HTML_MAX)}`);
     }
     return [
       `Browser annotation #${n}`,
@@ -124,17 +116,14 @@
     return `#${chip.n} ${what} — "${chip.comment}"`;
   }
 
-  // Appends every *sendable* chip's block to the draft and its screenshot to
-  // the images, up to the image cap. Inputs are not mutated; `dropped`
-  // counts the chip screenshots that did not fit (their text blocks still
-  // go out). A reserved chip is on its way out with another message: it
-  // stays out of this merge (and of the image cap) until that send settles.
+  // Appends every chip's block to the draft and its screenshot to the
+  // images, up to the image cap. Inputs are not mutated; `dropped` counts
+  // the chip screenshots that did not fit (their text blocks still go out).
   function mergeIntoMessage(text, images, chips) {
-    const live = chips.filter((c) => !c.reserved);
-    if (!live.length) return { text, images, dropped: 0 };
-    const blocks = live.map((c) => annotationText(c, c.n)).join("\n\n");
+    if (!chips.length) return { text, images, dropped: 0 };
+    const blocks = chips.map((c) => annotationText(c, c.n)).join("\n\n");
     const base = text.trim();
-    const chipImages = live.map((c) => c.image).filter(Boolean);
+    const chipImages = chips.map((c) => c.image).filter(Boolean);
     const room = Math.max(0, MAX_IMAGES - images.length);
     return {
       text: base ? `${base}\n\n${blocks}` : blocks,
@@ -145,32 +134,28 @@
 
   // Composer preview needs only the count, not formatted page text or images.
   function droppedScreenshots(imageCount, chips) {
-    const count = chips.reduce((n, c) => n + Number(!c.reserved && Boolean(c.image)), 0);
+    const count = chips.reduce((n, c) => n + Number(Boolean(c.image)), 0);
     return Math.max(0, count - Math.max(0, MAX_IMAGES - imageCount));
-  }
-
-  // One submit lifecycle for messages and goals. Reserve before invoking send,
-  // then spend exactly those ids on acknowledgment; every failure releases.
-  async function sendWithChips({ text, images, chips, reserveChips, spendChips, releaseChips }, send) {
-    const live = chips.filter(c => !c.reserved);
-    const ids = live.map(c => c.id);
-    const out = mergeIntoMessage(text, images, live);
-    if (ids.length) reserveChips(ids);
-    let delivered = false;
-    try {
-      delivered = (await send(out)) === true;
-      return delivered;
-    } finally {
-      if (ids.length) {
-        if (delivered) spendChips(ids);
-        else releaseChips(ids);
-      }
-    }
   }
 
   // ---- Input ---------------------------------------------------------------
 
   const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+
+  // A frame message of the panel channel (src-tauri view/emit.rs
+  // `Frame::wire`): `seq` u64, `cssW` u32, `cssH` u32 little-endian, then
+  // the JPEG. `null` for anything shorter than the header.
+  const FRAME_HEADER = 16;
+  function parseFrame(buffer) {
+    if (!(buffer?.byteLength > FRAME_HEADER)) return null;
+    const head = new DataView(buffer, 0, FRAME_HEADER);
+    return {
+      seq: Number(head.getBigUint64(0, true)),
+      cssW: head.getUint32(8, true),
+      cssH: head.getUint32(12, true),
+      jpeg: new Uint8Array(buffer, FRAME_HEADER),
+    };
+  }
 
   // Viewport point → page CSS pixel through the frame's CSS size. The frame
   // may differ from the canvas (a resize in flight), so map by ratio.
@@ -247,63 +232,37 @@
 
   // ---- Chips ---------------------------------------------------------------
 
+  // Chips are a per-tab map (OMP_SESSION_UI's entryOf / updateEntry):
+  // `sid → chip[]`, an empty list drops the tab's entry.
   const EMPTY = Object.freeze({});
   const NO_CHIPS = Object.freeze([]);
 
-  const chipsOf = (s, sid) => s[sid] ?? NO_CHIPS;
+  const chipsOf = (s, sid) => window.OMP_SESSION_UI.entryOf(s, sid, NO_CHIPS);
 
-  // The one reducer core: `fn(list)` returns the session's next list, or
-  // `list` itself for no change (then `s` comes back unchanged). An empty
-  // result drops the session's entry.
-  function withChips(s, sid, fn) {
-    const list = chipsOf(s, sid);
-    const next = fn(list);
-    if (next === list) return s;
-    const { [sid]: _, ...rest } = s;
-    return next.length ? { ...rest, [sid]: next } : rest;
-  }
+  // `fn(list)` returns the tab's next list, or `list` itself for no change
+  // (then `s` comes back unchanged).
+  const withChips = (s, sid, fn) => window.OMP_SESSION_UI.updateEntry(s, sid, NO_CHIPS,
+    (list) => { const next = fn(list); return next.length || next === list ? next : NO_CHIPS; });
 
-  // `list` with `fn` applied to the chips whose id is in `ids` and that
-  // `when` accepts; `list` itself when there is none.
-  function mapSome(list, ids, when, fn) {
-    const set = new Set(ids);
-    if (!list.some((c) => set.has(c.id) && when(c))) return list;
-    return list.flatMap((c) => (set.has(c.id) && when(c) ? fn(c) : [c]));
-  }
-
-  // `n` is assigned here: one past the highest number the session holds, so a
+  // `n` is assigned here: one past the highest number the tab holds, so a
   // number is never reused while its marker may still be on screen, and the
   // numbering restarts at 1 once the chips are cleared (after a send).
-  function addChip(s, sid, chip) {
-    return withChips(s, sid, (list) => [...list, { ...chip, n: list.reduce((m, c) => Math.max(m, c.n), 0) + 1 }]);
-  }
+  const numbered = (list, chips) => chips.reduce(
+    (acc, chip) => [...acc, { ...chip, n: acc.reduce((m, c) => Math.max(m, c.n), 0) + 1 }], list);
 
-  // Remove only the given chip ids (a send spent them); chips added while
-  // the send was in flight are left alone.
-  const removeChips = (s, sid, ids) => withChips(s, sid, (list) => mapSome(list, ids, () => true, () => []));
+  const addChip = (s, sid, chip) => withChips(s, sid, (list) => numbered(list, [chip]));
+
+  // Chips a goal start handed back (its failure restores the draft): after
+  // the ones added meanwhile, numbered on.
+  const restoreChips = (s, sid, chips) => (chips.length ? withChips(s, sid, (list) => numbered(list, chips)) : s);
+
+  // Remove only the given chip ids (a send took them); chips added since are
+  // left alone.
+  function removeChips(s, sid, ids) {
+    const gone = new Set(ids);
+    return withChips(s, sid, (list) => (list.some((c) => gone.has(c.id)) ? list.filter((c) => !gone.has(c.id)) : list));
+  }
   const removeChip = (s, sid, id) => removeChips(s, sid, [id]);
-
-  // Mark the given chips in flight: a submit reserves its ids synchronously,
-  // so a second send before the first settles cannot ship the same
-  // annotation twice. Reserved chips stay out of later merges and of the
-  // composer's sendable count until the spend or the release. Already
-  // reserved (or unknown) ids leave the state unchanged.
-  const reserveChips = (s, sid, ids) =>
-    withChips(s, sid, (list) => mapSome(list, ids, (c) => !c.reserved, (c) => [{ ...c, reserved: true }]));
-
-  // Clear the in-flight mark of the given chips (a refused or timed-out
-  // send puts them back) — a plain chip again. A chip a send spent
-  // (removed) needs no release: its id is simply not found.
-  const releaseChips = (s, sid, ids) =>
-    withChips(s, sid, (list) => mapSome(list, ids, (c) => c.reserved, ({ reserved: _r, ...chip }) => [chip]));
-
-  // Drop the chips of sessions that no longer exist.
-  function prune(s, sessionIds) {
-    const keep = new Set(sessionIds);
-    const stale = Object.keys(s).filter((sid) => !keep.has(sid));
-    if (!stale.length) return s;
-    return Object.fromEntries(Object.entries(s).filter(([sid]) => keep.has(sid)));
-  }
 
   // ---- Layout --------------------------------------------------------------
 
@@ -316,38 +275,32 @@
 
   // ---- Chromium setting ----------------------------------------------------
 
-  // `/opt/google/chrome/chrome` → `chrome`; `C:\…\msedge.exe` → `msedge`.
-  function browserName(path) {
-    return window.OMP_PROJECT_NAV.basename(path ?? "").replace(/\.exe$/i, "") || "browser";
-  }
+  const browserName = (path) => window.OMP_PATH_SETTING.programName(path, "browser");
 
   /**
    * Tweaks → Browser's Chromium button and menu for Rust's `BrowserSettings`
    * (`{ path, automatic, installed, error }`, null before it loaded):
-   * `{ label, rows }`. `label` names what the panel launches (the stored
-   * path, else what auto-detection finds). `rows` are `{ name, hint, path,
-   * value, checked }`: `automatic` (value "", `hint` the browser it finds or
-   * "none found"), each installed browser (`hint` its folder when another
-   * one has the same name, e.g. `/usr/bin/chromium` next to the real
-   * `/usr/lib/chromium/chromium`), and the stored path when it is none of
-   * them (`hint` "other"); exactly one is checked. Paths match like the
-   * terminal's shell menu (`OMP_PROJECT_NAV.normPath`: Windows paths
-   * ignoring case and `/` vs `\`). `value` is what `browserSetPath` stores.
+   * `OMP_PATH_SETTING.menu`'s `{ label, rows }`. `label` names what the
+   * panel launches (the stored path, else what auto-detection finds); the
+   * first row is `automatic` (hint: the browser it finds, or "none found"),
+   * then each installed browser (`hint` its folder when another one has the
+   * same name, e.g. `/usr/bin/chromium` next to the real
+   * `/usr/lib/chromium/chromium`). `value` is what `browserSetPath` stores.
    */
   function pathMenu(settings) {
     const path = settings?.path ?? "";
     const automatic = settings?.automatic ?? null;
-    const { normPath } = window.OMP_PROJECT_NAV;
-    const rows = [{ name: "automatic", hint: automatic ? browserName(automatic) : "none found", path: automatic ?? "", value: "", checked: path === "" }];
     const installed = settings?.installed ?? [];
     const names = installed.map(browserName);
     const folder = (p) => p.replace(/[\\/][^\\/]*$/, "");
-    installed.forEach((p, i) => {
-      const shared = names.filter((n) => n === names[i]).length > 1;
-      rows.push({ name: names[i], hint: shared ? folder(p) : "", path: p, value: p, checked: path !== "" && normPath(p) === normPath(path) });
+    return window.OMP_PATH_SETTING.menu({
+      stored: path,
+      name: browserName,
+      fallback: { name: "automatic", hint: automatic ? browserName(automatic) : "none found", path: automatic ?? "" },
+      installed: installed.map((p, i) => ({
+        name: names[i], path: p, hint: names.indexOf(names[i]) !== names.lastIndexOf(names[i]) ? folder(p) : "",
+      })),
     });
-    if (path && !rows.some((r) => r.checked)) rows.push({ name: browserName(path), hint: "other", path, value: path, checked: true });
-    return { label: path ? browserName(path) : automatic ? browserName(automatic) : "automatic", rows };
   }
 
   window.OMP_BROWSER = {
@@ -355,25 +308,22 @@
     normalizeUrl,
     localUrl,
     linkClick,
-    trimHtml,
     annotationText,
     chipLabel,
     mergeIntoMessage,
     droppedScreenshots,
-    sendWithChips,
+    parseFrame,
     toPageCoords,
     modifiersOf,
     mouseButton,
     keyEventToCdp,
     escapeAction,
     EMPTY,
+    chipsOf,
     addChip,
     removeChip,
     removeChips,
-    reserveChips,
-    releaseChips,
-    chipsOf,
-    prune,
+    restoreChips,
     clampWidth,
     pathMenu,
   };

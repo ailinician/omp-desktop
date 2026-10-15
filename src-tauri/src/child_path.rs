@@ -29,6 +29,26 @@ pub fn child_path() -> Option<OsString> {
     merged_path(current.as_deref(), &extra)
 }
 
+/// The absolute folders of [`child_path`] (the inherited PATH when that
+/// can't be built), in lookup order: where a search for a user-installed
+/// program looks (the terminal's shell list, Chromium discovery). Blocking
+/// on Windows (registry reads).
+pub fn child_path_dirs() -> Vec<PathBuf> {
+    absolute_dirs(
+        &child_path()
+            .or_else(|| std::env::var_os("PATH"))
+            .unwrap_or_default(),
+    )
+}
+
+/// The absolute folders of `path`. A relative one is dropped: it would
+/// resolve against the app's working directory.
+fn absolute_dirs(path: &OsStr) -> Vec<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .collect()
+}
+
 /// Override the child command's PATH with [`child_path`]. `Command`
 /// searches a PATH set on the command itself, so this is what makes the
 /// added dirs effective for program lookup.
@@ -161,7 +181,7 @@ fn path_key(dir: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::merged_path;
+    use super::{absolute_dirs, merged_path};
 
     fn entries(path: &std::ffi::OsStr) -> Vec<String> {
         std::env::split_paths(path)
@@ -289,5 +309,12 @@ mod tests {
             expand(r"%NOPE%%LOCALAPPDATA%"),
             r"%NOPE%C:\Users\me\AppData\Local"
         );
+    }
+
+    #[test]
+    fn only_absolute_path_folders_are_searched() {
+        let bin = if cfg!(windows) { r"C:\bin" } else { "/bin" };
+        let path = std::env::join_paths(["relative", "", bin]).unwrap();
+        assert_eq!(absolute_dirs(&path), [std::path::PathBuf::from(bin)]);
     }
 }

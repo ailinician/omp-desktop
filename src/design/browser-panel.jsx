@@ -60,14 +60,14 @@ function BrowserPopover({ pick, page, failed, onSave, onCancel }) {
   );
 }
 
-function BrowserPanel({ ui, onClose }) {
+function BrowserPanel({ ui }) {
   const { state, page, pending, chips } = ui;
   const message = state.status === "error" && state.error ? state.error : _BP_STATUS[state.status];
   const retry = state.status === "stopped" || state.status === "error";
   const marked = page ? chips.filter((c) => c.pick.url === state.url) : [];
   return (
     <section className="browser-panel" aria-label="browser">
-      <_BP_Toolbar ui={ui} onClose={onClose} />
+      <_BP_Toolbar ui={ui} />
       <div className="browser-body">
         {state.loading && <div className="browser-loading" />}
         <div className={`browser-view${ui.annotate ? " annotating" : ""}`} ref={ui.viewRef}>

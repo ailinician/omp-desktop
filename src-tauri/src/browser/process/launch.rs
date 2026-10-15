@@ -3,13 +3,14 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::instance::{create_private_file, remove_dir_retrying};
 use super::stderr::StderrTail;
-use crate::agent::supervisor::ProcessSupervisor;
+use crate::browser::lock;
 use crate::child_path::apply_child_path;
+use crate::supervisor::ProcessSupervisor;
 
 /// How long a fresh Chromium gets to publish its debugging port.
 pub const LAUNCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -166,7 +167,7 @@ impl Chromium {
 
     /// Whether the Chromium process is still running.
     pub fn is_alive(&self) -> bool {
-        self.child_guard()
+        lock(&self.child)
             .as_mut()
             .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
     }
@@ -177,7 +178,7 @@ impl Chromium {
     /// so only the first caller does the work and later callers return once
     /// it is finished.
     pub fn stop(&self) {
-        let mut guard = self.child_guard();
+        let mut guard = lock(&self.child);
         if let Some(mut child) = guard.take() {
             self.supervisor.kill_tree();
             let _ = child.kill();
@@ -187,14 +188,10 @@ impl Chromium {
         }
     }
 
-    fn child_guard(&self) -> MutexGuard<'_, Option<Child>> {
-        self.child.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// The browser process's pid while it runs.
     #[cfg(all(test, unix))]
     fn pid_for_test(&self) -> Option<u32> {
-        self.child_guard().as_ref().map(Child::id)
+        lock(&self.child).as_ref().map(Child::id)
     }
 }
 
@@ -237,10 +234,9 @@ fn wait_for_port(child: &mut Child, profile: &Path) -> Result<u16, Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use crate::agent::supervisor::pid_is_alive;
-    use crate::browser::lock;
     use crate::browser::tests::{chromium_or_skip, http_get, tempdir, CHROMIUM};
+    #[cfg(unix)]
+    use crate::supervisor::pid_is_alive;
 
     /// A fresh profile path per call under `dir`: `profile-0`, `profile-1`, …
     fn profiles(dir: &Path) -> impl FnMut() -> PathBuf + '_ {
@@ -337,11 +333,7 @@ mod tests {
     /// A stand-in browser at `dir/name` running `body` (unix shell).
     #[cfg(unix)]
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let bin = dir.join(name);
-        std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        bin
+        crate::test_support::executable(&dir.join(name), &format!("#!/bin/sh\n{body}\n"))
     }
 
     /// Every binary exits at once: `launch` fails, cleans up after each, and

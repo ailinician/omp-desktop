@@ -401,7 +401,7 @@ fn agent(m: &BrowserManager, page: Option<&str>) -> CdpClient {
         || browser_ws_url(port).unwrap(),
         |id| format!("ws://127.0.0.1:{port}/devtools/page/{id}"),
     );
-    CdpClient::connect(&ws, Box::new(|_, _, _: &Value| {})).unwrap()
+    CdpClient::connect(&ws, Box::new(|_, _, _: Value| {})).unwrap()
 }
 
 /// Attach as puppeteer does and give back the page session.

@@ -13,15 +13,15 @@
 //!   `read_until_capped`, and credential redaction.
 //! - [`journal`]    — bounded per-session event ring + replay.
 //! - [`ext_ui`]     — latest omp extension status lines / widgets (#52).
-//! - [`supervisor`] — process-tree kill (Job Object / process group) so a
-//!   stopped session can't leak subagent/tool-call descendants.
+//!
+//! A stopped session's descendants (subagents, tool calls) die with it
+//! through `crate::supervisor` (Job Object / process group).
 
 pub mod ext_ui;
 mod inner;
 pub mod journal;
 mod reader;
 pub mod spawn;
-pub mod supervisor;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -206,10 +206,7 @@ impl AgentBridge {
             EVENT_JOURNAL_MAX_BYTES,
         )));
         let ext_ui = Arc::new(Mutex::new(ExtUiState::default()));
-        let project_root = launch
-            .cwd
-            .filter(|c| !c.is_empty())
-            .map(std::path::PathBuf::from);
+        let project_root = cwd.filter(|c| !c.is_empty()).map(std::path::PathBuf::from);
         let gen = self.next_gen.fetch_add(1, Ordering::SeqCst);
         // Liveness flag for this incarnation. Cloned into the map entry
         // (so `reap_and_clear_grants`/supersession can clear it) and into

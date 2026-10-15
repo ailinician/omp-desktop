@@ -241,6 +241,7 @@ impl Core {
     /// around a capture) would otherwise stay on screen. Best effort; call
     /// it holding no view lock.
     pub(in crate::browser) fn refresh_frame(&self) {
+        let _switching = lock(&self.switch);
         let (session, size) = {
             let inner = lock(&self.inner);
             let Some(active) = inner.active.as_ref() else {
@@ -248,7 +249,7 @@ impl Core {
             };
             (active.session.clone(), inner.size) // owned: the lock must not span the restart
         };
-        let _ = self.resize_to(&session, size);
+        let _ = self.restart_screencast(&session, size);
     }
 }
 

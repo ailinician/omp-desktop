@@ -7,7 +7,7 @@
 //! user's `browser.json` setting ([`SettingsStore`]) or automatic discovery,
 //! read at launch time. A tab's browser survives its omp process being
 //! respawned (profile switch, approval-mode restart); only closing the tab
-//! ([`BrowserManager::release`]) or leaving the app ends it.
+//! ([`BrowserManager::release_many`]) or leaving the app ends it.
 
 mod annotate;
 mod cdp;
@@ -149,6 +149,21 @@ struct State {
     closing: Vec<Arc<Entry>>,
 }
 
+impl State {
+    /// The session's entry to tear down: moved from `entries` to `closing`,
+    /// or the one already closing (whose teardown the caller then awaits).
+    fn take_for_close(&mut self, session_id: &str) -> Option<Arc<Entry>> {
+        if let Some(entry) = self.entries.remove(session_id) {
+            self.closing.push(Arc::clone(&entry));
+            return Some(entry);
+        }
+        self.closing
+            .iter()
+            .find(|e| e.slot.session_id == session_id)
+            .map(Arc::clone)
+    }
+}
+
 /// What a working manager has.
 struct Instance {
     /// `<root>/<pid>`, private to this process: `profiles/` and the overlays.
@@ -252,6 +267,18 @@ impl BrowserManager {
         Ok(overlay)
     }
 
+    /// [`allocate`](Self::allocate), or `None` when this app run has no
+    /// managed browsers at all ([`unavailable`](Self::unavailable), logged
+    /// once at startup): omp then runs without the overlay. A tab whose own
+    /// browser cannot be set up (still closing, the port or overlay failed)
+    /// is an error, never a silent start without it.
+    pub fn allocate_if_available(&self, session_id: &str) -> Result<Option<PathBuf>, String> {
+        if self.instance.is_err() {
+            return Ok(None);
+        }
+        self.allocate(session_id).map(Some)
+    }
+
     /// The placeholder port omp connects to.
     // The tests read it; omp learns the port from the overlay file.
     #[cfg(test)]
@@ -274,32 +301,30 @@ impl BrowserManager {
         slot.ensure() // outside the map lock: a launch must not block other tabs
     }
 
-    /// End the session's browser (see [`Entry::close`]). Idempotent; returns
-    /// only once the teardown is complete, also when another thread started
-    /// it.
+    /// [`release_many`](Self::release_many) for one session (the tests').
+    #[cfg(test)]
     pub fn release(&self, session_id: &str) {
-        let entry = {
+        self.release_many(&[session_id]);
+    }
+
+    /// End these sessions' browsers (see [`Entry::close`]), side by side:
+    /// closing many tabs waits for the slowest teardown, not their sum.
+    /// Idempotent; returns only once each teardown is complete, also one
+    /// another thread started.
+    pub fn release_many<S: AsRef<str>>(&self, session_ids: &[S]) {
+        let entries: Vec<_> = {
             let mut state = self.state();
-            if let Some(entry) = state.entries.remove(session_id) {
-                state.closing.push(Arc::clone(&entry));
-                Some(entry)
-            } else {
-                state
-                    .closing
-                    .iter()
-                    .find(|e| e.slot.session_id == session_id)
-                    .map(Arc::clone)
-            }
+            session_ids
+                .iter()
+                .filter_map(|id| state.take_for_close(id.as_ref()))
+                .collect()
         };
-        if let Some(entry) = entry {
-            self.finish_close(&entry);
-        }
+        self.finish_all(&entries);
     }
 
     /// Release every session, including the ones whose release is still in
-    /// flight (a close waiting for a slow launch), all at once: app exit
-    /// waits for the slowest teardown, not their sum. For app exit, where
-    /// managed state is not dropped.
+    /// flight (a close waiting for a slow launch), all at once. For app exit,
+    /// where managed state is not dropped.
     pub fn shutdown_all(&self) {
         let all = {
             let mut state = self.state();
@@ -309,13 +334,23 @@ impl BrowserManager {
             // lock; concurrent release callers must still find and await them.
             state.closing.clone()
         };
-        std::thread::scope(|scope| {
-            for entry in &all {
-                scope.spawn(|| self.finish_close(entry));
-            }
-        });
+        self.finish_all(&all);
         if let Ok(instance) = &self.instance {
             let _ = remove_dir_retrying(&instance.dir);
+        }
+    }
+
+    /// [`finish_close`](Self::finish_close) every entry, in parallel when
+    /// there is more than one.
+    fn finish_all(&self, entries: &[Arc<Entry>]) {
+        match entries {
+            [] => {}
+            [entry] => self.finish_close(entry),
+            _ => std::thread::scope(|scope| {
+                for entry in entries {
+                    scope.spawn(|| self.finish_close(entry));
+                }
+            }),
         }
     }
 

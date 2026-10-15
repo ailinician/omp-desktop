@@ -3,6 +3,15 @@
 
 const { copyCodeBlockClick: _MdCopyClick } = window;
 
+// Clicks in rendered markdown, delegated on its container: the code blocks'
+// copy buttons, then links — `MarkdownLinkContext` carries a handler
+// (app-live.jsx: the browser panel's localhost links), null for none.
+const MarkdownLinkContext = React.createContext(null);
+function useMarkdownClick() {
+  const onLink = React.useContext(MarkdownLinkContext);
+  return React.useCallback((e) => { _MdCopyClick(e); onLink?.(e); }, [onLink]);
+}
+
 const escapeText = (text) =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -19,15 +28,15 @@ const MarkdownContent = ({ text, streaming }) => {
     catch (_) { return '<pre>' + escapeText(text) + '</pre>'; }
   }, [text]);
 
-  // onClick: delegated copy for the code-block buttons in the marked output.
+  const onClick = useMarkdownClick();
   return (
     <div
       className={`md-content selectable${streaming ? ' md-streaming' : ''}`}
-      onClick={_MdCopyClick}
+      onClick={onClick}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );
 };
 
 
-Object.assign(window, { MarkdownContent });
+Object.assign(window, { MarkdownContent, MarkdownLinkContext, useMarkdownClick });

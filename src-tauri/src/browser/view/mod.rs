@@ -125,7 +125,7 @@ impl View {
         };
         let target = match first {
             Some(target) => target,
-            None => self.create_page()?,
+            None => self.core.create_page()?,
         };
         core.update_state(|s| s.status = Status::Running);
         core.switch_to(&target)?;
@@ -248,23 +248,10 @@ impl View {
             .map(drop)
     }
 
-    /// A new blank page, listed at once.
-    fn create_page(&self) -> Result<String, String> {
-        let created =
-            self.core
-                .call(None, "Target.createTarget", json!({ "url": "about:blank" }))?;
-        let target = created["targetId"]
-            .as_str()
-            .ok_or("createTarget returned no target")?
-            .to_owned();
-        lock(&self.core.inner).upsert_page(&json!({ "targetId": target, "url": "about:blank" }));
-        Ok(target)
-    }
-
     /// Open a blank tab and show it.
     pub fn tab_new(&self) -> Result<(), String> {
         self.core.stamp_user_activation(); // the new page is the user's choice, not the agent's
-        let target = self.create_page()?;
+        let target = self.core.create_page()?;
         self.core.switch_to(&target)
     }
 
@@ -275,7 +262,7 @@ impl View {
         self.core.stamp_user_activation();
         let only = lock(&self.core.inner).pages.len() <= 1;
         if only {
-            self.create_page()?;
+            self.core.create_page()?;
         }
         self.core
             .call(None, "Target.closeTarget", json!({ "targetId": target_id }))

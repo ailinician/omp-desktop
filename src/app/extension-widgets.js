@@ -29,11 +29,7 @@
   const VT = /\u001b\[[0-?]*[ -/]*(?:[@-~]|$)|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|\u009b[0-?]*[ -/]*(?:[@-~]|$)|\u001b[ -/]*[0-~]?/g;
   const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
   function clean(text) {
-    const s = text.replace(VT, "").replace(CONTROL, "");
-    if (s.length <= LIMITS.text) return s;
-    // Never end on half a surrogate pair.
-    const cut = /[\ud800-\udbff]/.test(s[LIMITS.text - 2]) ? LIMITS.text - 2 : LIMITS.text - 1;
-    return s.slice(0, cut) + "…";
+    return window.truncateText(text.replace(VT, "").replace(CONTROL, ""), LIMITS.text);
   }
 
   // UTF-8 length without allocating: the backend bounds keys in bytes.

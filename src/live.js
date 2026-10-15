@@ -138,7 +138,6 @@
   const sessionRegistry = new Map();
   const sessionSnapshots = new Map(); // id -> saved state + volatile vars
   const gitListeners = new Map();  // session_id → Tauri unlisten fn for git://branch/{id}
-  const _browserInputLogged = new Map(); // session_id → last browser_input error log (ms)
   // Prompt history — one list per tab, newest-first, in memory only. Never
   // persisted to disk/localStorage: filled as the user sends (_recordPrompt)
   // and backfilled from the transcript whenever get_messages arrives (tab
@@ -1008,9 +1007,13 @@
   // rpc_chunk frames. Each carries a base64 segment of the original UTF-8 JSON.
   const MAX_REASSEMBLED_FRAME = 64 * 1024 * 1024; // matches ready.maxReassembledFrameBytes
 
-  // Decode base64 (rpc_chunk segments, terminal output) to its bytes; shared
-  // with the browser panel's frames (app/image-attach.js loads before this).
-  const { b64Bytes: _b64Bytes } = window.OMP_IMAGES;
+  /** Decode base64 (rpc_chunk segments, terminal output) to its bytes. */
+  function _b64Bytes(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
 
   // Pure: validate a complete set of rpc_chunk frames for one chunkId and
   // return the parsed JSON object. Throws on any inconsistency.
@@ -1152,21 +1155,23 @@
    *  a respawn uses `_killSessionProcess`, which keeps the browser and shell. */
   function _closeTab(id) {
     const closed = _invokeSafe("close_tab", { sessionId: id });
-    _browserInputLogged.delete(id);
     _dropGitListener(id);
     sessionSnapshots.delete(id);
     return closed;
   }
 
-  /** Listen to a Tauri event. Returns `{ stop, ready }`: `stop` is valid at
-   *  once (a call before the async `listen` settled unlistens when it does);
+  /** Listen to a Tauri event (the terminal's streams). Returns
+   *  `{ stop, ready }`: `stop` is valid at once (a call before the async
+   *  `listen` settled unlistens when it does);
    *  `ready` resolves once the listener is registered (or failed), so a
    *  caller can query state knowing no later event is missed. */
-  function _listenTerminal(event, handler) {
+  function _listen(event, handler) {
     if (!window.__TAURI__) return { stop: () => {}, ready: Promise.resolve() };
     let unlisten = null;
     let stopped = false;
-    const ready = window.__TAURI__.event.listen(event, ev => handler(ev.payload)).then(
+    // A stopped handler never runs, even for an event delivered before the
+    // async `listen` settled.
+    const ready = window.__TAURI__.event.listen(event, ev => { if (!stopped) handler(ev.payload); }).then(
       off => { if (stopped) off(); else unlisten = off; },
       err => console.error(`[live] listen ${event} failed:`, err),
     );
@@ -2542,9 +2547,8 @@
     // `prompt_result` closes an accepted prompt once the agent yielded, after
     // that run's `agent_end`. Only a failed agent turn matters here: the
     // frame adds omp's cleaned error text and its `retryable` verdict to the
-    // failure `agent_end` just showed. Not matched by id: the prompt's own
-    // response (`_sendPromptAck`) is the id-correlated ack, and this frame
-    // only decorates whichever turn just failed.
+    // failure `agent_end` just showed. Not id-correlated — an ordinary
+    // prompt is sent without one.
     if (type === "prompt_result") {
       if (ev.agentInvoked === true && ev.status === "error") {
         _showFailure(prev => TURN.withPromptError(prev, ev.error));
@@ -2790,16 +2794,6 @@
     _invokeSend(cmd).catch(_logSendError);
   }
 
-  // An id-correlated `prompt` whose reply decides the outcome: `success`
-  // (or a refusal / timeout, like `_sendWithResponse`) is what counts as
-  // the message being delivered — an IPC acceptance alone does not.
-  // Resolves `true` on the reply's `success`, `false` on a refusal or a
-  // timeout, and `false` (instead of rejecting) when there is no session.
-  function _sendPromptAck(cmd) {
-    if (!window.__TAURI__ || !activeSessionId) return Promise.resolve(false);
-    return _sendWithResponse(cmd).then(() => true, () => false);
-  }
-
   // The `send_command` hand-off to the active tab, shared by `_send` and
   // `_sendWithResponse`; callers check the connection and handle failure.
   function _invokeSend(cmd) {
@@ -3007,31 +3001,26 @@
    *  the composer. A timeout only drops the row: omp may still admit the
    *  message (an image being prepared), and its `queue_update` shows it.
    *
-   *  Resolves `true` once omp acknowledged the hand-off, `false` when there
-   *  is no session, it refused, or the reply timed out. Side-effectful end
-   *  to end (IPC, both tab stores); the row and note shapes are pure and
-   *  tested in test-message-queue.mjs. */
+   *  Side-effectful end to end (IPC, both tab stores); the row and note
+   *  shapes are pure and tested in test-message-queue.mjs. */
   function _sendQueued(kind, text, images, send) {
     const origin = activeSessionId;
-    if (!origin) return Promise.resolve(false);
+    if (!origin) return;
     const id = ++_queueSendSeq;
     _disarmAutoRename(text);
     _recordPrompt(text);
     state.queueSending = [...state.queueSending, QUEUE.sendingEntry(id, kind, text, images.length, state.queue, state.queueSending)];
     notify();
-    return send()
-      .then(() => { _dropSending(origin, id); return true; })
-      .catch(e => {
-        if (!e?.timedOut) {
-          const reason = e?.message ?? String(e);
-          // Responses are only dispatched for the active tab, so a refusal
-          // reaching us for another one is a failed hand-off racing a switch.
-          if (origin === activeSessionId) _pushAssistantNote(QUEUE.failureNote(kind, reason, text));
-          else console.warn(`[live] ${kind} for '${origin}' not sent: ${reason}`);
-        }
-        _dropSending(origin, id);
-        return false;
-      });
+    send().then(() => _dropSending(origin, id), e => {
+      if (!e?.timedOut) {
+        const reason = e?.message ?? String(e);
+        // Responses are only dispatched for the active tab, so a refusal
+        // reaching us for another one is a failed hand-off racing a switch.
+        if (origin === activeSessionId) _pushAssistantNote(QUEUE.failureNote(kind, reason, text));
+        else console.warn(`[live] ${kind} for '${origin}' not sent: ${reason}`);
+      }
+      _dropSending(origin, id);
+    });
   }
 
   /** Remove a "sending" row from its tab, wherever that tab's state lives
@@ -3102,17 +3091,13 @@
 
   /** `OMP_BRIDGE.send`: the user bubble at once, then `prompt`. A
    *  `streamingBehavior` tells omp what to do if a turn is running by the
-   *  time the prompt arrives; idle, omp ignores it and runs the prompt.
-   *  Resolves to the admission outcome (`true` once omp's reply for the
-   *  `prompt` command is `success`, `false` when the session is gone, omp
-   *  refused it, or the reply timed out). Callers that ignore the result
-   *  are unaffected. */
+   *  time the prompt arrives; idle, omp ignores it and runs the prompt. */
   function _sendPrompt(text, images, streamingBehavior) {
     state.messages = [...state.messages, { kind: "user", time: timeNow(), text, images: images ?? [] }];
     _disarmAutoRename(text);
     _recordPrompt(text);
     notify();
-    return _sendPromptAck({ type: "prompt", message: text, images: images ?? [], ...(streamingBehavior ? { streamingBehavior } : {}) });
+    _send({ type: "prompt", message: text, images: images ?? [], ...(streamingBehavior ? { streamingBehavior } : {}) });
   }
 
   /** A `goal` command's `{goal, state}` result applied to the active tab. */
@@ -3145,7 +3130,7 @@
     // The bubble shows at once; omp's echo (`message_start`) ties it to the
     // persisted message. A command omp runs locally sends no echo, so its
     // bubble keeps no `ts` and the get_messages merge leaves it in place.
-    send(text, images) { return _sendPrompt(text, images); },
+    send(text, images) { _sendPrompt(text, images); },
     // No id on purpose: a pending-id match returns before the command
     // switch, and the abort response is what releases a cancelled
     // auto-rename. See `_releaseAutoRenameAfterAbort`.
@@ -3173,22 +3158,19 @@
     // Both route a real slash command — or a skill invocation, even
     // mid-prompt (#30) — through `prompt` with the matching
     // `streamingBehavior` (`OMP_SLASH.queuedFrame`): omp's `steer` /
-    // `follow_up` frames skip command and skill dispatch entirely. Callers
-    // that merged browser annotations pass the classification of the typed
-    // draft (`OMP_SLASH.routeSubmit`); other callers classify here.
+    // `follow_up` frames skip command and skill dispatch entirely. Browser
+    // annotations merged into `text` never change its classification
+    // (OMP_BROWSER.annotationText neutralises page data and comments).
     // See `_sendQueued` for how the message shows until omp delivers it.
-    /** The user's follow-up / steer. Resolves `true` once omp acknowledged
-     *  the hand-off, `false` when the process is gone or refused (a
-     *  timeout also resolves `false`: the row may still arrive, but the
-     *  hand-off was not confirmed). Callers ignore the result when they do
-     *  not need delivery knowledge; the browser chips spend only on `true`. */
-    followUp(text, images, isCmd = isCommandInvocation(state.commands, text)) {
+    followUp(text, images) {
       const imgs = images ?? [];
-      return _sendQueued("followUp", text, imgs, () => _sendWithResponse(queuedFrame("followUp", text, imgs, isCmd)));
+      const isCmd = isCommandInvocation(state.commands, text);
+      _sendQueued("followUp", text, imgs, () => _sendWithResponse(queuedFrame("followUp", text, imgs, isCmd)));
     },
-    steer(text, images, isCmd = isCommandInvocation(state.commands, text)) {
+    steer(text, images) {
       const imgs = images ?? [];
-      return _sendQueued("steering", text, imgs, () => _sendWithResponse(queuedFrame("steer", text, imgs, isCmd)));
+      const isCmd = isCommandInvocation(state.commands, text);
+      _sendQueued("steering", text, imgs, () => _sendWithResponse(queuedFrame("steer", text, imgs, isCmd)));
     },
     /** ✕ / ✎ on a queue-strip row (`queue`: "steering" | "followUp"):
      *  `true` once omp removed the message, `false` when it was no longer
@@ -3231,18 +3213,12 @@
      *  (`goal.continuationModes` holds "rpc") omp then starts a goal turn
      *  by itself; otherwise the objective goes out as the first prompt, as
      *  omp's own `/goal` does — as a steer when a turn is running. Images
-     *  are steered on with it rather than dropped. `prompt` is what that
-     *  delivery carries (default: the objective) — the objective with the
-     *  tab's browser annotations merged in; the goal itself stores only
-     *  the typed `objective`.
-     *  Resolves `{ok}` or `{ok: false, error}` (omp refuses in plan
-     *  mode, with a paused goal…). Success also requires the
-     *  objective's delivery to be acknowledged — a refusal or timeout
-     *  there reports the failure, so a caller that spent browser
-     *  annotations with the objective keeps them. A delivery failure
-     *  after the goal was created resolves `{ok: false, created: true,
-     *  error}` instead: the goal runs without the objective, so a
-     *  caller must not re-arm goal mode — only the objective goes back.
+     *  ride with it; when omp already started on its own they are steered
+     *  in rather than dropped. `prompt` is what that delivery carries
+     *  (default: the objective) — the objective with the tab's browser
+     *  annotations merged in; the goal itself stores only the typed
+     *  `objective`. Resolves `{ok}` or `{ok: false, error}` (omp refuses in
+     *  plan mode, with a paused goal…).
      *  A tab switch before the follow-up sends nothing to the other tab:
      *  both requests keep the default timeout, so a reply held back by the
      *  switch is replayed on the way back and the sequence goes on there.
@@ -3270,11 +3246,8 @@
       if (origin !== activeSessionId) return { ok: true };
       const bridge = window.OMP_BRIDGE;
       if (wasStreaming) {
-        // The objective (and its images and annotations) is steered into
-        // the running turn; that steer's acknowledgment is the delivery the
-        // caller's spend depends on.
-        const delivered = await bridge.steer(message, imgs);
-        return delivered ? { ok: true } : { ok: false, created: true, error: "omp did not acknowledge the objective." };
+        bridge.steer(message, imgs);
+        return { ok: true };
       }
       let rpcState = null;
       try {
@@ -3290,24 +3263,16 @@
       // prompt path adds the goal-mode context (objective, budget, when to
       // call it complete) to the turn — an idle steer is drained without it.
       // A turn that started meanwhile takes it as a steer. Settled: the
-      // first prompt, with the same `streamingBehavior` fallback. Either
-      // way the hand-off's acknowledgment is the delivery: a refusal or
-      // timeout reports a failed start, so the objective's annotations are
-      // not spent.
+      // first prompt, with the same `streamingBehavior` fallback. When omp
+      // started on its own, the objective is already in the goal: only what
+      // it does not carry (images, browser annotations) is steered in.
       if (GOAL.ompStartedTurn(rpcState)) {
-        // The objective is already in the goal (omp started its own turn);
-        // only its screenshots and annotations ride a steer, and that
-        // steer's ack is the delivery the caller's spend depends on.
-        if (imgs.length === 0 && message === text) return { ok: true };
-        const delivered = await bridge.steer(message, imgs);
-        return delivered ? { ok: true } : { ok: false, created: true, error: "omp did not acknowledge the objective." };
+        if (imgs.length > 0 || message !== text) bridge.steer(message, imgs);
       } else if (rpcState?.isSettled === false) {
-        const ack = _sendQueued("steering", message, imgs,
+        _sendQueued("steering", message, imgs,
           () => _sendWithResponse({ type: "prompt", message, images: imgs, streamingBehavior: "steer" }));
-        return (await ack) ? { ok: true } : { ok: false, created: true, error: "omp did not acknowledge the objective." };
-      }
-      const ack = _sendPrompt(message, imgs, "steer");
-      return (await ack) ? { ok: true } : { ok: false, created: true, error: "omp did not acknowledge the objective." };
+      } else _sendPrompt(message, imgs, "steer");
+      return { ok: true };
     },
     /** `pause` / `resume` / `drop` the active tab's goal. */
     goalOp(op) { return _goalOp(op); },
@@ -3756,14 +3721,14 @@
      *  pty produced them (feed straight to `Terminal.write`, which
      *  reassembles split UTF-8). Returns `{ stop, ready }`. */
     onTerminalData(sessionId, cb) {
-      return _listenTerminal(`terminal://data/${sessionId}`,
+      return _listen(`terminal://data/${sessionId}`,
         p => cb({ instance: p.instance, seq: p.seq, bytes: _b64Bytes(p.b64) }));
     },
 
     /** A shell exited: `cb({ instance, code })`, `code` null when a signal
      *  killed it. Returns `{ stop, ready }`. */
     onTerminalExit(sessionId, cb) {
-      return _listenTerminal(`terminal://exit/${sessionId}`,
+      return _listen(`terminal://exit/${sessionId}`,
         p => cb({ instance: p.instance, code: p.code ?? null }));
     },
 
@@ -3816,13 +3781,21 @@
 
     // ── Browser panel (src-tauri/src/browser/commands.rs) ──────────────────
     // Sizes are CSS pixels (integers); `dpr` scales the screencast.
-    browserOpenPanel(sid, width, height, dpr) {
-      return _invokeSafe("browser_open_panel", { sessionId: sid, width, height, dpr });
+    /** `onMessage` gets everything the view reports during this open, in
+     *  order, over one channel (docs/architecture/browser.md): a frame as an
+     *  `ArrayBuffer` (OMP_BROWSER.parseFrame), else `{ type, value }` with
+     *  type `state` | `tabs` | `pick`. It is attached before the open is
+     *  sent, so the backend's first `state` (during the open) arrives too;
+     *  a later open (restart) replaces the channel. */
+    browserOpenPanel(sid, width, height, dpr, onMessage) {
+      const events = window.__TAURI__ ? new window.__TAURI__.core.Channel() : null;
+      if (events) events.onmessage = onMessage;
+      return _invokeSafe("browser_open_panel", { sessionId: sid, width, height, dpr, events });
     },
     /** Stops the screencast; Chromium stays. Best effort: after the tab's
      *  release there is no browser left to close, which is not an error. */
-    async browserClosePanel(sid) {
-      if (window.__TAURI__) await window.__TAURI__.core.invoke("browser_close_panel", { sessionId: sid }).catch(() => {});
+    browserClosePanel(sid) {
+      return _invokeResult("browser_close_panel", { sessionId: sid });
     },
     browserResize(sid, width, height, dpr) {
       return _invokeSafe("browser_resize", { sessionId: sid, width, height, dpr });
@@ -3845,25 +3818,18 @@
       return _invokeSafe("browser_tab_activate", { sessionId: sid, targetId });
     },
     /** Pointer / wheel / key event for the page (`InputEvent`, see
-     *  app/browser.js). Fire and forget at event rate: the backend refuses
-     *  while no page is shown, so a rejection is dropped and logged at most
-     *  once a minute per tab. */
+     *  app/browser.js), sent at event rate: `{ok}` | `{ok: false, error}`.
+     *  The backend refuses while no page is shown; the panel decides what
+     *  to log (app/use-browser.jsx). */
     browserInput(sid, event) {
-      if (!window.__TAURI__) return;
-      window.__TAURI__.core.invoke("browser_input", { sessionId: sid, event }).catch(err => {
-        const now = Date.now();
-        if (now - (_browserInputLogged.get(sid) ?? 0) < 60_000) return;
-        _browserInputLogged.set(sid, now);
-        console.error("[live] browser_input error:", err);
-      });
+      return _invokeResult("browser_input", { sessionId: sid, event });
     },
-    /** Frame `seq` of `browser://frame/{sid}` was painted or dropped as
+    /** Frame `seq` of the panel channel was painted or dropped as
      *  superseded: Rust sends the next one (one frame in flight per view).
-     *  Fire and forget — the panel closing is not a fault, and Rust's own
-     *  timeout covers a lost ack. */
+     *  Quiet — the panel closing is not a fault, and Rust's own timeout
+     *  covers a lost ack. */
     browserFrameAck(sid, seq) {
-      if (!window.__TAURI__) return;
-      window.__TAURI__.core.invoke("browser_frame_ack", { sessionId: sid, seq }).catch(() => {});
+      return _invokeResult("browser_frame_ack", { sessionId: sid, seq });
     },
     browserAnnotate(sid, on) {
       return _invokeSafe("browser_annotate", { sessionId: sid, on });
@@ -3873,31 +3839,12 @@
      *  Quiet on purpose: the chip click is a convenience, and a refused
      *  scroll (the panel closed, the page moved) is not a bridge fault. */
     browserScrollTo(sid, rect) {
-      if (!window.__TAURI__) return;
-      window.__TAURI__.core.invoke("browser_scroll_to", { sessionId: sid, rect }).catch(() => {});
+      return _invokeResult("browser_scroll_to", { sessionId: sid, rect });
     },
     /** Area screenshot of `rect` (page CSS px): `{ok, value: {data, mimeType}}`
      *  with base64 `data`, or `{ok: false, error}`. */
     browserCapture(sid, rect) {
       return _invokeResult("browser_capture", { sessionId: sid, rect });
-    },
-    /** Listen to `browser://{kind}/{sid}` (kind: frame | tabs | state | pick).
-     *  Returns the unlisten function at once — safe to call before the
-     *  listener attached; `unlisten.ready` resolves when it is attached, so
-     *  the panel can open only after every listener is (the backend's first
-     *  `state` event fires during `browserOpenPanel`). A stop before the
-     *  listener is attached still drops the events — the handler runs only
-     *  while un-stopped — so a cancel-before-attach never resurrects the
-     *  old tab's screencast or picks. */
-    onBrowserEvent(sid, kind, handler) {
-      let stopped = false;
-      let unlisten = null;
-      const stop = () => { stopped = true; unlisten?.(); unlisten = null; };
-      stop.ready = !window.__TAURI__ ? Promise.resolve() : window.__TAURI__.event
-        .listen(`browser://${kind}/${sid}`, ev => { if (!stopped) handler(ev.payload); })
-        .then(u => { if (stopped) u(); else unlisten = u; })
-        .catch(err => { console.error(`[live] browser://${kind} listener failed:`, err); });
-      return stop;
     },
 
     /** Usage statistics for the active tab's profile — see usage_stats in

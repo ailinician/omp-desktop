@@ -3,9 +3,12 @@
 
 use std::io::Read as _;
 use std::process::ChildStderr;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use crate::browser::lock;
+use crate::text::join_nonblank;
 
 /// Bytes kept; everything before is drained and dropped.
 const TAIL_BYTES: usize = 2048;
@@ -32,7 +35,7 @@ impl StderrTail {
             .spawn(move || {
                 let mut chunk = [0u8; 4096];
                 while let Ok(n @ 1..) = stderr.read(&mut chunk) {
-                    let mut kept = sink.lock().unwrap_or_else(PoisonError::into_inner);
+                    let mut kept = lock(&sink);
                     kept.extend_from_slice(&chunk[..n]);
                     // Trim in batches: amortised, and never above twice the cap.
                     if kept.len() > 2 * TAIL_BYTES {
@@ -54,8 +57,7 @@ impl StderrTail {
         while self.reader.as_ref().is_some_and(|r| !r.is_finished()) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        let kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
-        tail_text(&kept)
+        tail_text(&lock(&self.kept))
     }
 }
 
@@ -70,13 +72,7 @@ fn tail_text(bytes: &[u8]) -> Option<String> {
     } else {
         &text
     };
-    let joined = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" | ");
-    (!joined.is_empty()).then_some(joined)
+    join_nonblank(text.lines(), " | ")
 }
 
 #[cfg(test)]

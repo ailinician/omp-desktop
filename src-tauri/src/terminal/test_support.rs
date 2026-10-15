@@ -4,21 +4,8 @@
 use super::{Emit, TerminalManager};
 use std::ffi::OsStr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-/// Poll `condition` until it holds (`true`) or `timeout` passes (`false`).
-pub fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if condition() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
+pub use crate::test_support::wait_until;
 
 /// `id` registered on `manager` with the temp dir as its folder, its shell
 /// opened and observed by a fresh `C`.

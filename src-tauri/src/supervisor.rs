@@ -1,4 +1,8 @@
-//! Process-tree supervision.
+//! Process-tree supervision, shared by everything that spawns: omp
+//! (`agent/`), widget plugins, the terminal's shell on Windows and the
+//! browser's Chromium; plus the pid probes (`pid_is_alive`,
+//! `kill_group_if_leader`) the JSON store's lock takeover and the browser's
+//! orphan reaper use.
 //!
 //! `Child::kill` only signals the direct child process. omp forks subagents
 //! and shells out to tools (bash, etc.); killing just the top-level `omp`
@@ -161,7 +165,7 @@ impl ProcessSupervisor {
     #[cfg(windows)]
     pub fn prepare(cmd: &mut Command) {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(super::spawn::CREATE_NO_WINDOW);
+        cmd.creation_flags(crate::agent::spawn::CREATE_NO_WINDOW);
     }
 
     /// Attach supervision to a just-spawned child. Must be called *after*
@@ -314,24 +318,9 @@ mod tests {
     use super::{
         is_group_leader, kill_group_if_leader, pid_is_alive as process_alive, ProcessSupervisor,
     };
+    use crate::test_support::wait_until;
     use std::process::Command;
-    use std::time::{Duration, Instant};
-
-    /// Poll `condition` every 20ms up to `timeout`, returning `true` as
-    /// soon as it holds. Avoids "sleep and hope" flakiness in the tests
-    /// below, which race against process teardown.
-    fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if condition() {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
+    use std::time::Duration;
 
     /// Spawn `sh -c 'sleep 30 & sleep 30 & wait'`, returning the shell's
     /// `Child` plus the two grandchild `sleep` pids (read back via

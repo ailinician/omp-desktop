@@ -8,17 +8,20 @@
 //! non-blocking drain of what arrived runs under it.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{BufReader, ErrorKind, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use tungstenite::error::Error as WsError;
-use tungstenite::{Message, WebSocket};
+use tungstenite::{Message, Utf8Bytes, WebSocket};
+
+use super::lock;
+use super::proxy::read_response;
 
 /// How long [`CdpClient::call`] waits for the response.
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -31,17 +34,14 @@ const IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// connection ends without [`CdpClient::close`] having been called.
 pub const DISCONNECTED: &str = "CDP.disconnected";
 
-/// Handler of events: session id, method, params. Runs on the reader
+/// Handler of events: session id, method, params (owned, so a large field
+/// such as a screencast frame moves on without a copy). Runs on the reader
 /// thread, so it must be quick and must not [`call`](CdpClient::call) (the
 /// response could only be read by the thread that is waiting for it);
 /// [`notify`](CdpClient::notify) is fine.
-pub type EventHandler = Box<dyn Fn(Option<&str>, &str, &Value) + Send>;
+pub type EventHandler = Box<dyn Fn(Option<&str>, &str, Value) + Send>;
 
 type Waiters = Mutex<HashMap<u64, Sender<Result<Value, String>>>>;
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 struct Shared {
     ws: Mutex<WebSocket<TcpStream>>,
@@ -206,14 +206,14 @@ fn read_loop(shared: &Shared, peek: &TcpStream, on_event: &EventHandler) {
     // Dropping the senders wakes every waiting `call`.
     lock(&shared.waiters).clear();
     if lost {
-        on_event(None, DISCONNECTED, &Value::Null);
+        on_event(None, DISCONNECTED, Value::Null);
     }
 }
 
 /// Read everything that is available without blocking (the socket mutex is
 /// held, so the socket is switched to non-blocking only meanwhile). Returns
 /// the texts and whether the connection is still usable.
-fn drain(shared: &Shared) -> (Vec<String>, bool) {
+fn drain(shared: &Shared) -> (Vec<Utf8Bytes>, bool) {
     let mut ws = lock(&shared.ws);
     let mut messages = Vec::new();
     if ws.get_ref().set_nonblocking(true).is_err() {
@@ -221,7 +221,7 @@ fn drain(shared: &Shared) -> (Vec<String>, bool) {
     }
     let alive = loop {
         match ws.read() {
-            Ok(Message::Text(text)) => messages.push(text.as_str().to_owned()),
+            Ok(Message::Text(text)) => messages.push(text),
             Ok(_) => {}
             Err(WsError::Io(e)) if e.kind() == ErrorKind::WouldBlock => break true,
             Err(_) => break false,
@@ -248,9 +248,10 @@ fn dispatch(shared: &Shared, on_event: &EventHandler, text: &str) {
             let result = error.map_or_else(|| Ok(message["result"].take()), Err);
             let _ = waiter.send(result);
         }
-    } else if let Some(method) = message.get("method").and_then(Value::as_str) {
+    } else if message.get("method").is_some_and(Value::is_string) {
+        let params = message["params"].take();
+        let method = message["method"].as_str().unwrap_or_default();
         let session = message.get("sessionId").and_then(Value::as_str);
-        let params = message.get("params").unwrap_or(&Value::Null);
         on_event(session, method, params);
     }
 }
@@ -274,26 +275,7 @@ pub fn browser_ws_url(port: u16) -> Result<String, String> {
         "GET /json/version HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
     )
     .map_err(err)?;
-    let mut reader = BufReader::new(stream);
-    let mut length = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).map_err(err)? == 0 {
-            return Err("chromium /json/version: truncated response".into());
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                length = value.trim().parse().unwrap_or(0);
-            }
-        }
-    }
-    // Chromium ignores `Connection: close`: read by length, not to EOF.
-    let mut body = vec![0; length.min(1 << 16)];
-    reader.read_exact(&mut body).map_err(err)?;
+    let (_, body) = read_response(&mut BufReader::new(stream)).map_err(err)?;
     serde_json::from_slice::<Value>(&body)
         .ok()
         .and_then(|v| v["webSocketDebuggerUrl"].as_str().map(str::to_owned))
@@ -333,11 +315,7 @@ mod tests {
         let client = CdpClient::connect(
             url,
             Box::new(move |session, method, params| {
-                let _ = tx.send((
-                    session.map(str::to_owned),
-                    method.to_owned(),
-                    params.clone(), // the handler only borrows it
-                ));
+                let _ = tx.send((session.map(str::to_owned), method.to_owned(), params));
             }),
         )
         .unwrap();
@@ -423,7 +401,7 @@ mod tests {
 
     #[test]
     fn only_loopback_ws_urls_are_accepted() {
-        let handler = || Box::new(|_: Option<&str>, _: &str, _: &Value| {});
+        let handler = || Box::new(|_: Option<&str>, _: &str, _: Value| {});
         assert!(CdpClient::connect("http://127.0.0.1:1/x", handler()).is_err());
         assert!(CdpClient::connect("ws://192.0.2.1:9222/x", handler()).is_err());
     }

@@ -1,15 +1,17 @@
-//! Payloads and sink of the browser panel's events (`browser://…/{session}`),
-//! and the frame's pixel size read from its JPEG header.
+//! Payloads and sink of the browser panel's messages (one ordered channel
+//! per open panel), and the frame's pixel size read from its JPEG header.
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::ipc::{Channel, InvokeResponseBody};
 
-/// One screencast frame. `b64` is Chromium's JPEG, base64 already.
-/// `w`/`h` are image pixels; `css_w`/`css_h` the page's CSS viewport the
-/// frame shows (clicks map through those). `seq` numbers the frames a view
-/// emits; the webview acks it (`browser_frame_ack`) once painted or dropped.
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+/// One screencast frame. `b64` is Chromium's JPEG, as Chromium sent it
+/// (decoded only when it goes out). `w`/`h` are image pixels; `css_w`/`css_h`
+/// the page's CSS viewport the frame shows (clicks map through those). `seq`
+/// numbers the frames a view emits; the webview acks it
+/// (`browser_frame_ack`) once painted or dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
     pub b64: String,
     pub w: u32,
@@ -28,11 +30,6 @@ pub struct TabInfo {
     pub active: bool,
 }
 
-#[derive(Serialize, Clone)]
-struct Tabs<'a> {
-    tabs: &'a [TabInfo],
-}
-
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -45,7 +42,7 @@ pub enum Status {
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-// The `browser://state` wire shape: independent flags the webview reads.
+// The panel's `state` message: independent flags the webview reads.
 #[allow(clippy::struct_excessive_bools)]
 pub struct ViewState {
     pub status: Status,
@@ -105,24 +102,46 @@ pub trait BrowserEmit: Send + Sync {
     fn pick(&self, sid: &str, p: &Pick);
 }
 
-/// Emits the events to the webview.
-pub struct TauriBrowserEmit(pub AppHandle);
+/// A JSON message of the panel's channel: `{ type, value }`.
+#[derive(Serialize)]
+#[serde(tag = "type", content = "value", rename_all = "lowercase")]
+enum Message<'a> {
+    State(&'a ViewState),
+    Tabs(&'a [TabInfo]),
+    Pick(&'a Pick),
+}
+
+/// Sends the panel's messages over the channel the webview handed to
+/// `browser_open_panel`. One channel keeps them in order (a page's `tabs`
+/// before its frames) and carries a frame as raw bytes: no base64 or JSON
+/// for the webview to parse. The session is the channel's own.
+pub struct TauriBrowserEmit(pub Channel<InvokeResponseBody>);
+
+impl TauriBrowserEmit {
+    fn json(&self, message: &Message) {
+        if let Ok(json) = serde_json::to_string(message) {
+            let _ = self.0.send(InvokeResponseBody::Json(json));
+        }
+    }
+}
 
 impl BrowserEmit for TauriBrowserEmit {
-    fn frame(&self, sid: &str, f: &Frame) {
-        let _ = self.0.emit(&format!("browser://frame/{sid}"), f);
+    fn frame(&self, _: &str, f: &Frame) {
+        if let Some(bytes) = f.wire() {
+            let _ = self.0.send(InvokeResponseBody::Raw(bytes));
+        }
     }
 
-    fn tabs(&self, sid: &str, tabs: &[TabInfo]) {
-        let _ = self.0.emit(&format!("browser://tabs/{sid}"), Tabs { tabs });
+    fn tabs(&self, _: &str, tabs: &[TabInfo]) {
+        self.json(&Message::Tabs(tabs));
     }
 
-    fn state(&self, sid: &str, s: &ViewState) {
-        let _ = self.0.emit(&format!("browser://state/{sid}"), s);
+    fn state(&self, _: &str, s: &ViewState) {
+        self.json(&Message::State(s));
     }
 
-    fn pick(&self, sid: &str, p: &Pick) {
-        let _ = self.0.emit(&format!("browser://pick/{sid}"), p);
+    fn pick(&self, _: &str, p: &Pick) {
+        self.json(&Message::Pick(p));
     }
 }
 
@@ -143,6 +162,18 @@ impl Frame {
         }
     }
 
+    /// The frame as the panel's channel carries it: `seq` (u64), `css_w`
+    /// and `css_h` (u32), little-endian, then the JPEG. `None` when the
+    /// base64 does not decode.
+    pub fn wire(&self) -> Option<Vec<u8>> {
+        let mut bytes = Vec::with_capacity(FRAME_HEADER + self.b64.len() / 4 * 3);
+        bytes.extend_from_slice(&self.seq.to_le_bytes());
+        bytes.extend_from_slice(&self.css_w.to_le_bytes());
+        bytes.extend_from_slice(&self.css_h.to_le_bytes());
+        STANDARD.decode_vec(&self.b64, &mut bytes).ok()?;
+        Some(bytes)
+    }
+
     /// Whether the image has the proportions of the CSS size the metadata
     /// claims, give or take the rounding of its pixel size. Chromium's
     /// first frame of a screencast can be the whole window surface labelled
@@ -156,45 +187,19 @@ impl Frame {
     }
 }
 
+/// Bytes before the JPEG in [`Frame::wire`].
+const FRAME_HEADER: usize = 16;
+
 /// Base64 characters decoded for [`jpeg_size`]; the start-of-frame segment
 /// sits well before.
 const PREFIX: usize = 4096;
 
-fn sextet(c: u8) -> Option<u32> {
-    match c {
-        b'A'..=b'Z' => Some(u32::from(c - b'A')),
-        b'a'..=b'z' => Some(u32::from(c - b'a') + 26),
-        b'0'..=b'9' => Some(u32::from(c - b'0') + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    }
-}
-
-/// The bytes of the first `PREFIX` base64 characters (an incomplete trailing
-/// group is dropped).
-fn decode_prefix(b64: &str) -> Vec<u8> {
-    let text = &b64.as_bytes()[..b64.len().min(PREFIX)];
-    let mut bytes = Vec::with_capacity(text.len() / 4 * 3);
-    for group in text.as_chunks::<4>().0 {
-        let mut bits = 0u32;
-        let mut sextets = 0usize;
-        for &c in group {
-            let Some(value) = sextet(c) else { break };
-            bits = bits << 6 | value;
-            sextets += 1;
-        }
-        if sextets < 4 {
-            // Padding: 2 sextets carry 1 byte, 3 carry 2.
-            let bits = bits << (6 * (4 - sextets));
-            for shift in [16, 8].into_iter().take(sextets.saturating_sub(1)) {
-                bytes.push((bits >> shift & 0xFF) as u8); // masked to a byte
-            }
-            break;
-        }
-        bytes.extend([16, 8, 0].map(|shift| (bits >> shift & 0xFF) as u8)); // masked to a byte
-    }
-    bytes
+/// The bytes of the first `PREFIX` base64 characters, cut to whole groups
+/// (`PREFIX` is a multiple of 4; a shorter string keeps its padding).
+fn decode_prefix(b64: &str) -> Option<Vec<u8>> {
+    STANDARD
+        .decode(&b64.as_bytes()[..b64.len().min(PREFIX) & !3])
+        .ok()
 }
 
 fn be16(bytes: &[u8], at: usize) -> Option<u32> {
@@ -203,7 +208,7 @@ fn be16(bytes: &[u8], at: usize) -> Option<u32> {
 
 /// `(width, height)` in pixels of the JPEG `b64` encodes.
 fn jpeg_size(b64: &str) -> Option<(u32, u32)> {
-    let bytes = decode_prefix(b64);
+    let bytes = decode_prefix(b64)?;
     if bytes.get(..2)? != [0xFF, 0xD8] {
         return None;
     }
@@ -237,6 +242,21 @@ mod tests {
             (400, 300, 200, 150)
         );
         assert_eq!(frame.b64, HEADER, "passed through untouched");
+    }
+
+    #[test]
+    fn the_wire_form_is_a_header_and_the_decoded_jpeg() {
+        let frame = Frame {
+            seq: 0x0102_0304_0506_0708,
+            ..Frame::new(HEADER.to_owned(), 200, 150)
+        };
+        let wire = frame.wire().unwrap();
+        assert_eq!(wire[..8], 0x0102_0304_0506_0708u64.to_le_bytes());
+        assert_eq!(wire[8..12], 200u32.to_le_bytes());
+        assert_eq!(wire[12..16], 150u32.to_le_bytes());
+        assert_eq!(wire[16..], STANDARD.decode(HEADER).unwrap());
+        let broken = Frame::new("not base64!".to_owned(), 1, 1);
+        assert_eq!(broken.wire(), None);
     }
 
     #[test]

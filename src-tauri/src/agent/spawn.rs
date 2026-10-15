@@ -12,10 +12,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// this flag Windows would attach a fresh console (visible flash) on every
 /// spawn.
 ///
-/// [`super::supervisor::ProcessSupervisor::prepare`] sets it for every
+/// [`crate::supervisor::ProcessSupervisor::prepare`] sets it for every
 /// supervised child.
 #[cfg(windows)]
-pub(super) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Candidate binary names tried in order. Explicit `.exe` first on Windows
 /// because some systems have unusual PATHEXT handling.
@@ -336,7 +336,7 @@ fn sanitize_child_env(cmd: &mut Command) {
 /// If `resume` is specified, `--resume=<path_or_id>` is passed to resume an
 /// existing session (a single token, not two separate argv entries — see
 /// `omp_args` for why). Returns the child alongside a
-/// [`super::supervisor::ProcessSupervisor`] already attached to it, so the
+/// [`crate::supervisor::ProcessSupervisor`] already attached to it, so the
 /// whole process tree (subagents, tool-call children) can be torn down as
 /// a unit — plain `Child::kill` only signals the direct `omp` process.
 pub(super) fn spawn_omp(
@@ -345,7 +345,7 @@ pub(super) fn spawn_omp(
     profile: Option<&str>,
     mode: ApprovalMode,
     config: Option<&Path>,
-) -> Result<(Child, super::supervisor::ProcessSupervisor), String> {
+) -> Result<(Child, crate::supervisor::ProcessSupervisor), String> {
     // Refused here rather than left to fail later: an omp too old for the
     // RPC surface the frontend uses would start and then break feature by
     // feature. The message is cached in `last_errors`, where `session_status`
@@ -378,10 +378,10 @@ pub(super) fn spawn_omp(
         }
         // Unix: must run before spawn() (installs the child as its own
         // process-group leader). Windows: only `CREATE_NO_WINDOW` again.
-        super::supervisor::ProcessSupervisor::prepare(&mut cmd);
+        crate::supervisor::ProcessSupervisor::prepare(&mut cmd);
         match cmd.spawn() {
             Ok(child) => {
-                let supervisor = super::supervisor::ProcessSupervisor::attach(&child);
+                let supervisor = crate::supervisor::ProcessSupervisor::attach(&child);
                 return Ok((child, supervisor));
             }
             Err(e) => {

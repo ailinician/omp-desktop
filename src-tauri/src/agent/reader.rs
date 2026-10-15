@@ -410,14 +410,7 @@ impl StderrTail {
     /// when the child said nothing. omp's banners are double-spaced for a
     /// terminal; collapsing keeps the UI note compact.
     fn to_reason(&self) -> Option<String> {
-        let joined = self
-            .lines
-            .iter()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        (!joined.is_empty()).then_some(joined)
+        crate::text::join_nonblank(self.lines.iter().map(String::as_str), " ")
     }
 }
 

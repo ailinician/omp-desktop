@@ -6,10 +6,8 @@
    the xterm and hands over `mountRef`; `onContextMenu` is the body's
    right-click (copy the selection). A drag (left button) starts from the
    height the panel is rendered at — CSS caps it at 70 % of the column,
-   which may be less than the saved tweak after the window shrank —
-   resizes the panel from local state and reports the final height once
-   (`onHeight`), so the saved tweak is written per drag, not per pointer
-   move. `TerminalPanels` renders the panels of every tab for app-live.jsx.
+   which may be less than the saved tweak after the window shrank — and
+   reports the final height once (`onHeight`, ui/use-edge-drag.js). `TerminalPanels` renders the panels of every tab for app-live.jsx.
    ═════════════════════════════════════════════════════════════════════ */
 
 const { Icon: _TP_Icon } = window;
@@ -18,47 +16,22 @@ const {
 } = window.OMP_TERMINAL;
 
 function TerminalPanel({ entry, height, hidden, onHeight, onClose, mountRef, onContextMenu, shellLabel, cwd }) {
-  // `{ pointerId, startY, startHeight, columnHeight, height }` while
-  // dragging; `dragHeight` is the height shown meanwhile.
-  const drag = React.useRef(null);
-  const [dragHeight, setDragHeight] = React.useState(null);
-
-  const dragStart = (e) => {
-    if (e.button !== 0 || drag.current) return;
-    const column = e.currentTarget.closest(".session");
-    const shown = Math.round(e.currentTarget.parentElement.getBoundingClientRect().height);
-    drag.current = {
-      pointerId: e.pointerId,
-      startY: e.clientY,
-      startHeight: shown,
-      height: shown,
-      columnHeight: column ? column.getBoundingClientRect().height : window.innerHeight,
-    };
-    e.currentTarget.setPointerCapture(e.pointerId);
-    setDragHeight(shown);
-    e.preventDefault();
-  };
-  const dragMove = (e) => {
-    const d = drag.current;
-    if (!d || e.pointerId !== d.pointerId) return;
-    d.height = _TP_clamp(d.startHeight + d.startY - e.clientY, d.columnHeight);
-    setDragHeight(d.height);
-  };
-  // pointerup, pointercancel and a lost capture all end the drag; the first
-  // one persists the last height shown (one setTweak, batched with the
-  // reset of the local height, so the panel does not flash back).
-  const dragEnd = (e) => {
-    const d = drag.current;
-    if (!d || e.pointerId !== d.pointerId) return;
-    drag.current = null;
-    setDragHeight(null);
-    if (d.height !== d.startHeight) onHeight(d.height);
-  };
+  const drag = window.useEdgeDrag({
+    begin: (e) => {
+      const column = e.currentTarget.closest(".session");
+      return {
+        start: Math.round(e.currentTarget.parentElement.getBoundingClientRect().height),
+        startY: e.clientY,
+        columnHeight: column ? column.getBoundingClientRect().height : window.innerHeight,
+      };
+    },
+    measure: (e, d) => _TP_clamp(d.start + d.startY - e.clientY, d.columnHeight),
+    commit: onHeight,
+  });
 
   return (
-    <section className="term-panel" hidden={hidden} style={{ height: dragHeight ?? height }}>
-      <div className="term-handle" onPointerDown={dragStart} onPointerMove={dragMove}
-        onPointerUp={dragEnd} onPointerCancel={dragEnd} onLostPointerCapture={dragEnd} />
+    <section className="term-panel" hidden={hidden} style={{ height: drag.size ?? height }}>
+      <div className="term-handle" {...drag.handlers} />
       <div className="term-head">
         <_TP_Icon name="terminal" size={11} color="var(--fg-3)" />
         <span className="term-head-shell">{shellLabel}</span>

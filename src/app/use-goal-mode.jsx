@@ -6,9 +6,9 @@
    profile; and the goal strip the composer renders (design/goal-strip.jsx).
 
    `goal` is the active tab's `{known, goal}` from the bridge snapshot;
-   `runState` its run state (app/turn-status.js). `onRestoreDraft(text,
-   images)` puts an objective omp refused, with its images, back into the
-   composer of the tab it was typed in. */
+   `runState` its run state (app/turn-status.js). `onRestoreDraft(draft)`
+   puts an objective omp refused (`{ text, images, chips }`, as `start` got
+   it) back into the composer of the tab it was typed in. */
 
 const { GoalStrip: _UG_GoalStrip } = window;
 const { entryOf: _UG_entryOf, updateEntry: _UG_updateEntry, pruneEntries: _UG_pruneEntries } = window.OMP_SESSION_UI;
@@ -87,14 +87,11 @@ function useGoalMode({ bridge, tabId, sessionIds, goal, planMode, profileId, run
   /** The goal-mode send: `goal create` with the typed objective plus, when
    *  omp does not start on its own, the first prompt (OMP_BRIDGE.goalStart).
    *  Leaves goal mode on success; on a refusal keeps it, shows omp's
-   *  reason in the strip and hands the typed objective back — but a goal
-   *  that was already created (`res.created`) leaves goal mode off again,
-   *  since re-sending would `goal create` over the existing goal.
-   *  `typed` is `{ text, images }` as the user wrote it: `text` becomes the
-   *  goal's objective and both go back into the composer on a failure.
-   *  `out` is what the first prompt delivers (the typed text and images
-   *  with the tab's browser annotations merged in); it defaults to
-   *  `typed`. Resolves whether omp accepted the goal and its prompt. */
+   *  reason in the strip and hands the draft back. `typed` is the draft as
+   *  the user wrote it (`{ text, images, chips? }`): `text` becomes the
+   *  goal's objective. `out` is what the first prompt delivers (`{ text,
+   *  images }`: the typed text and images with the tab's browser
+   *  annotations merged in); it defaults to `typed`. */
   const start = async (typed, out = typed) => {
     const id = tabId;
     const budget = draft.budget;
@@ -102,18 +99,10 @@ function useGoalMode({ bridge, tabId, sessionIds, goal, planMode, profileId, run
     const res = await bridge?.goalStart(typed.text, budget, out.images, out.text);
     if (res?.ok) {
       update(id, () => _UG_IDLE);
-      return true;
+      return;
     }
-    // `res.created` (live.js goalStart): the goal create landed but the
-    // objective's delivery failed. The goal exists — goal-create mode is
-    // not re-armed (a re-armed send would `goal create` again, which
-    // would fail), the error shows in the strip, and the objective goes
-    // back for a plain send. The browser chips ride back with it — the
-    // send above released them, it did not spend them (app-live.jsx).
-    const rearm = !res?.created;
-    update(id, d => ({ ...d, mode: rearm, error: res?.error ?? "Could not start the goal." }));
-    if (tabRef.current === id) onRestoreDraft?.(typed.text, typed.images);
-    return false;
+    update(id, d => ({ ...d, mode: true, error: res?.error ?? "Could not start the goal." }));
+    if (tabRef.current === id) onRestoreDraft?.(typed);
   };
 
   const strip = tabId && shown ? (

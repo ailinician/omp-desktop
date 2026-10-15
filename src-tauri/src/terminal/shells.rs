@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+#[cfg(not(windows))]
 use super::shell;
 use crate::child_path;
 
@@ -80,10 +81,7 @@ const fn on_path(name: &'static str) -> Candidate {
 /// be built, as `shell::apply_env` keeps it). Blocking filesystem checks:
 /// call off the IPC thread.
 pub fn available() -> Vec<ShellChoice> {
-    let path = child_path::child_path()
-        .or_else(|| std::env::var_os("PATH"))
-        .unwrap_or_default();
-    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let dirs = child_path::child_path_dirs();
     #[cfg(windows)]
     let candidates = CANDIDATES;
     #[cfg(not(windows))]
@@ -92,25 +90,19 @@ pub fn available() -> Vec<ShellChoice> {
         candidates,
         |var| std::env::var_os(var),
         &dirs,
-        shell::is_executable_file,
+        crate::program_setting::is_executable_file,
     )
 }
 
-/// [`available`] over a given list, environment, `PATH` folders and
-/// "is this a runnable shell" check. A relative `PATH` folder is skipped
-/// (it would depend on the app's working directory), and so is a path that
-/// is not UTF-8 (the setting is a string).
+/// [`available`] over a given list, environment, absolute `PATH` folders
+/// and "is this a runnable shell" check. A path that is not UTF-8 is
+/// skipped (the setting is a string).
 fn available_with(
     candidates: &[Candidate],
     env: impl Fn(&str) -> Option<OsString>,
     dirs: &[PathBuf],
     usable: impl Fn(&Path) -> bool,
 ) -> Vec<ShellChoice> {
-    let dirs: Vec<&Path> = dirs
-        .iter()
-        .map(PathBuf::as_path)
-        .filter(|dir| dir.is_absolute())
-        .collect();
     candidates
         .iter()
         .filter_map(|candidate| {
@@ -201,13 +193,6 @@ mod tests {
             found[1].path,
             root("first").join("two").display().to_string()
         );
-    }
-
-    #[test]
-    fn relative_path_folders_are_skipped() {
-        let dirs = [PathBuf::from("relative"), root("bin")];
-        let found = available_with(&LIST[1..2], |_| None, &dirs, |_| true);
-        assert_eq!(found[0].path, root("bin").join("two").display().to_string());
     }
 
     /// `System32\bash.exe` is the WSL launcher, not Git Bash.

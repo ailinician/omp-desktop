@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::reap;
-use crate::agent::supervisor::pid_is_alive;
+use crate::supervisor::pid_is_alive;
 
 /// A directory builder that creates `0700` directories (unix).
 pub fn private_dirs(recursive: bool) -> std::fs::DirBuilder {

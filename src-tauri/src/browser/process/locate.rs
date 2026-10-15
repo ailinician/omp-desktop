@@ -13,7 +13,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use crate::terminal::is_executable_file;
+use crate::program_setting::is_executable_file;
 
 /// The platform a candidate list is built for. A parameter rather than
 /// `cfg`, so every platform's order is testable on any host.
@@ -74,7 +74,8 @@ pub struct Places {
     /// `$XDG_CACHE_HOME/omp/puppeteer` once that `omp` dir exists (Linux,
     /// macOS), else in `~/.omp/puppeteer`.
     pub xdg_cache: Option<PathBuf>,
-    /// The child PATH's directories, in lookup order (the Linux launchers).
+    /// The child PATH's absolute directories, in lookup order (the Linux
+    /// launchers).
     pub path: Vec<PathBuf>,
     /// Windows install roots, best first: `%ProgramFiles%`,
     /// `%ProgramFiles(x86)%`, `%LOCALAPPDATA%` (per-user installs).
@@ -89,8 +90,7 @@ impl Places {
             root: PathBuf::from("/"),
             home: home.to_path_buf(),
             xdg_cache: var("XDG_CACHE_HOME").map(PathBuf::from),
-            path: crate::child_path::child_path()
-                .map_or_else(Vec::new, |path| std::env::split_paths(&path).collect()),
+            path: crate::child_path::child_path_dirs(),
             install_roots: ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
                 .into_iter()
                 .filter_map(var)
@@ -296,18 +296,7 @@ fn chrome_for_testing(platform: Platform, root: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use crate::browser::tests::tempdir;
-
-    /// An executable stand-in at `path` (unix: mode 0755).
-    fn exe(path: &Path, content: &str) -> PathBuf {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, content).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        path.to_path_buf()
-    }
+    use crate::test_support::executable as exe;
 
     fn places(dir: &Path) -> Places {
         Places {

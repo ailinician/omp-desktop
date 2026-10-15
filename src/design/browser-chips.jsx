@@ -1,14 +1,12 @@
 /* browser-chips.jsx — the annotation chips above the composer's attachment
    strip (docs/architecture/browser.md, "Annotate"): one chip per
    saved browser annotation, `#1 button.save — "overflows on mobile"`, with ×
-   to remove. Like the paste chips: the label is a button (when
+   to remove. Styled as paste chips: the label is a button (when
    `onChipClick` is given; it scrolls the panel to the annotated element —
    the caller decides (app-live.jsx) whether the panel is on the page the
-   chip was picked from) and the `#n selector` part is mono. A reserved
-   chip is on its way out with a message that has not settled yet (a
-   second submit would ship it twice): it is dimmed and marked as in
-   flight. `dropped` is how many chip screenshots would not fit the image
-   cap if the message went out now; their text blocks still go. */
+   chip was picked from) and the `#n selector` part is mono. `dropped` is
+   how many chip screenshots would not fit the image cap if the message
+   went out now; their text blocks still go. */
 
 const { Icon: _BC_Icon } = window;
 const { chipLabel: _BC_label, MAX_IMAGES: _BC_CAP } = window.OMP_BROWSER;
@@ -30,13 +28,12 @@ function BrowserChips({ chips, dropped = 0, onRemove, onChipClick }) {
   return (
     <div className="browser-chips">
       {chips.map((c) => {
-        const title = c.reserved ? `${c.pick.url} — sending…` : c.pick.url;
         const body = (<><_BC_Icon name="web" size={10} /><_BC_Text chip={c} /></>);
         return (
-          <span className={`browser-chip${c.reserved ? " reserved" : ""}`} key={c.id} title={title}>
+          <span className="paste-chip browser-chip" key={c.id} title={c.pick.url}>
             {onChipClick
-              ? <button type="button" className="browser-chip-label" onClick={() => onChipClick(c)}>{body}</button>
-              : <span className="browser-chip-label">{body}</span>}
+              ? <button type="button" className="paste-chip-label browser-chip-label" onClick={() => onChipClick(c)}>{body}</button>
+              : <span className="paste-chip-label browser-chip-label">{body}</span>}
             <button type="button" className="browser-chip-remove" title="remove annotation" aria-label="remove annotation"
               onClick={() => onRemove(c.id)}>
               <_BC_Icon name="close" size={9} />

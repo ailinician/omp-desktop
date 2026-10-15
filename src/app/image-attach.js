@@ -2,9 +2,7 @@
    app/image-attach.js — turn picked/pasted/dropped image Files (and the
    browser panel's annotation screenshots) into omp `ImageContent` blocks
    ({ type: "image", data: <base64>, mimeType }), the shape the `prompt` /
-   `steer` / `follow_up` RPC commands accept. Also home of `b64Bytes`, the
-   one base64 → bytes decoder (live.js: rpc_chunk + terminal output;
-   app/browser-screen.js: screencast frames) — this script loads before both.
+   `steer` / `follow_up` RPC commands accept.
    ═════════════════════════════════════════════════════════════════════ */
 (function () {
   // Formats every omp provider takes as-is. Anything else a clipboard or
@@ -40,14 +38,6 @@
   // Decoded size of a base64 payload, without decoding it.
   function decodedSize(b64) {
     return Math.floor((b64.length * 3) / 4);
-  }
-
-  /** Decode base64 to its bytes. */
-  function b64Bytes(b64) {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return bytes;
   }
 
   function fitWithin(width, height, max = MAX_EDGE_PX) {
@@ -210,7 +200,6 @@
 
   window.OMP_IMAGES = {
     MAX_ATTACHMENTS,
-    b64Bytes,
     parseDataUrl,
     toDataUrl,
     fitWithin,

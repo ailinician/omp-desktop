@@ -34,10 +34,22 @@ function node(extra = {}) {
   };
 }
 
-/** The real browser.js + image-attach.js on `window`, as index.html loads them. */
+/** The real browser.js and what it calls on `window`, as index.html loads them. */
 function loadHelpers(window) {
+  runInNewContext(source("src/app/constants.js"), { window });
+  runInNewContext(source("src/app/session-ui.js"), { window });
   runInNewContext(source("src/app/image-attach.js"), { window, atob, Uint8Array });
   runInNewContext(source("src/app/browser.js"), { window, URL });
+}
+
+/** A frame message of the panel channel: the header, then a 1-byte "JPEG". */
+function wire(cssW, cssH, seq) {
+  const buffer = new ArrayBuffer(17);
+  const head = new DataView(buffer);
+  head.setBigUint64(0, BigInt(seq), true);
+  head.setUint32(8, cssW, true);
+  head.setUint32(12, cssH, true);
+  return buffer;
 }
 
 function screenHarness({ bypass = () => false, escape = () => null } = {}) {
@@ -106,7 +118,7 @@ test("screen paints the newest frame, publishes painted geometry and acks every 
   h.paintAll();
   assert.equal(h.canvas.width, 800);
   assert.equal(h.canvas.height, 600);
-  h.screen.frame({ b64: "AA==", cssW: 400, cssH: 300, seq: 1 });
+  h.screen.frame(wire(400, 300, 1));
   await flush();
   assert.equal(h.pages.length, 0, "unpainted geometry stays unpublished");
   assert.deepEqual(h.acks, [], "no ack before the paint");
@@ -116,14 +128,14 @@ test("screen paints the newest frame, publishes painted geometry and acks every 
   assert.deepEqual(h.acks, [1], "acked after the paint");
   // Two frames before a decode finishes: the superseded one is acked as
   // dropped, the newest after its paint.
-  h.screen.frame({ b64: "AA==", cssW: 400, cssH: 300, seq: 2 });
-  h.screen.frame({ b64: "AA==", cssW: 400, cssH: 300, seq: 3 });
+  h.screen.frame(wire(400, 300, 2));
+  h.screen.frame(wire(400, 300, 3));
   await flush();
   h.paintAll();
   assert.deepEqual(h.acks, [1, 2, 3]);
   // An undecodable frame is dropped and acked, so the stream goes on.
   h.decode.fail = true;
-  h.screen.frame({ b64: "AA==", cssW: 400, cssH: 300, seq: 4 });
+  h.screen.frame(wire(400, 300, 4));
   await flush();
   assert.deepEqual(h.acks, [1, 2, 3, 4]);
   h.screen.destroy();
@@ -146,7 +158,7 @@ test("screen re-sends its size when the display's pixel ratio changes", () => {
 
 test("screen input: typed keys, text through the sink, paste, side buttons", async () => {
   const h = screenHarness({ bypass: (e) => e.key === "B" && e.ctrlKey && e.shiftKey });
-  h.screen.frame({ b64: "AA==", cssW: 800, cssH: 600, seq: 1 });
+  h.screen.frame(wire(800, 600, 1));
   await flush();
   // A printable key goes out with its text and never lands in the sink.
   const a = h.sink.fire("keydown", { target: h.sink, key: "a", code: "KeyA" });
@@ -180,6 +192,33 @@ test("screen input: typed keys, text through the sink, paste, side buttons", asy
     ["mousePressed", "back", 400, 300], ["mouseReleased", "back", 400, 300],
   ]);
   assert.equal(h.sink.focused, 1);
+  h.screen.destroy();
+});
+
+test("screen input: moves and wheel ticks coalesce per frame; a press sends what waits first", async () => {
+  const h = screenHarness();
+  h.screen.frame(wire(800, 600, 1));
+  await flush();
+  h.paintAll();
+  const canvas = h.canvas;
+  const start = h.sent.length;
+  h.window.fire("mousemove", { target: canvas, buttons: 0, clientX: 10, clientY: 10 });
+  h.window.fire("mousemove", { target: canvas, buttons: 0, clientX: 100, clientY: 50 });
+  h.view.fire("wheel", { target: canvas, deltaMode: 0, deltaX: 0, deltaY: 30, clientX: 100, clientY: 50 });
+  const tick = h.view.fire("wheel", { target: canvas, deltaMode: 1, deltaX: 0, deltaY: 2, clientX: 100, clientY: 50 });
+  assert.equal(tick.defaultPrevented, true, "the app never scrolls under the page");
+  assert.equal(h.sent.length, start, "nothing goes out before the frame");
+  h.paintAll();
+  assert.deepEqual(h.sent.slice(start).map((e) => [e.kind, e.type ?? null, e.x, e.y, e.deltaY ?? null]), [
+    ["mouse", "mouseMoved", 200, 100, null], ["wheel", null, 200, 100, 62],
+  ], "the latest move, and the wheel deltas added up (2 lines = 32 px)");
+  // A press sends the move still waiting first, and it is not sent again.
+  const mid = h.sent.length;
+  h.window.fire("mousemove", { target: canvas, buttons: 0, clientX: 40, clientY: 30 });
+  h.view.fire("mousedown", { target: canvas, button: 0, buttons: 1, clientX: 40, clientY: 30, detail: 1 });
+  assert.deepEqual(h.sent.slice(mid).map((e) => e.type), ["mouseMoved", "mousePressed"]);
+  h.paintAll();
+  assert.equal(h.sent.length, mid + 2);
   h.screen.destroy();
 });
 
@@ -253,6 +292,7 @@ test("hook: a stale open completion cannot release the newer tab's queued resize
   const resized = [];
   const navigated = [];
   const closed = [];
+  const channels = new Map(); // sid → the open's channel handler
   const picks = new Map();
   const states = new Map();
   let capture;
@@ -263,21 +303,18 @@ test("hook: a stale open completion cannot release the newer tab's queued resize
         screens.push(options);
         return { frame() {}, destroy() {}, size: () => ({ width: 400, height: 300, dpr: 1 }) };
       },
-      watchLocalLinks: () => () => {},
     },
   };
   loadHelpers(window);
   window.OMP_IMAGES.normalizeImage = async (img) => img; // DOM canvas work, covered by the app
   const useBrowser = runInNewContext(source("src/app/use-browser.jsx") + "\nuseBrowser", { window, React });
   const bridge = {
-    onBrowserEvent(sid, kind, handler) {
-      if (kind === "pick") picks.set(sid, handler);
-      if (kind === "state") states.set(sid, handler);
-      const off = () => {};
-      off.ready = Promise.resolve();
-      return off;
+    browserOpenPanel(sid, _w, _h, _dpr, onMessage) {
+      channels.set(sid, onMessage);
+      picks.set(sid, (value) => onMessage({ type: "pick", value }));
+      states.set(sid, (value) => onMessage({ type: "state", value }));
+      return new Promise((resolve) => opens.push({ sid, resolve }));
     },
-    browserOpenPanel: (sid) => new Promise((resolve) => opens.push({ sid, resolve })),
     browserResize: (...args) => resized.push(args),
     browserNavigate: (...args) => navigated.push(args),
     browserClosePanel: (sid) => closed.push(sid),
@@ -290,17 +327,22 @@ test("hook: a stale open completion cannot release the newer tab's queued resize
     ui.viewRef.current = {};
     ui.sinkRef.current = {};
   };
-  const show = (sid) => render(() => useBrowser({ bridge, activeSessionId: sid, sessionIds: ["old", "new"], tweaks: {} }));
+  // app-live.jsx's per-tab side column, reduced to the browser's part.
+  const openBy = {};
+  const show = (sid) => render(() => useBrowser({
+    bridge, activeSessionId: sid, sessionIds: ["old", "new"], tweaks: {},
+    open: Boolean(openBy[sid]), setOpen: (on) => { openBy[sid] = on; },
+  }));
 
   let ui = show("old");
   elements(ui);
-  ui.toggle();
+  openBy.old = true; // app-live opens the side column
   ui = show("old");
   assert.equal(ui.open, true);
   await flush();
   ui = show("new"); // the old tab's effect is cleaned up
   assert.deepEqual(closed, ["old"]);
-  ui.toggle();
+  openBy.new = true;
   ui = show("new");
   await flush();
   assert.deepEqual(opens.map((o) => o.sid), ["old", "new"]);
@@ -348,4 +390,34 @@ test("hook: a stale open completion cannot release the newer tab's queued resize
   assert.equal(screens[1].escape(), null);
   unmount();
   assert.deepEqual(closed, ["old", "new"]);
+});
+
+test("hook: a localhost chat link opens in the panel; a modifier click goes to the system browser", () => {
+  const { React, render } = fakeReact();
+  const window = { OMP_BROWSER_SCREEN: { createScreen: () => ({ frame() {}, destroy() {}, size: () => ({ width: 1, height: 1, dpr: 1 }) }) } };
+  loadHelpers(window);
+  const useBrowser = runInNewContext(source("src/app/use-browser.jsx") + "\nuseBrowser", { window, React });
+  const external = [];
+  const bridge = { openExternalUrl: (url) => { external.push(url); return Promise.resolve({ ok: true }); } };
+  const openBy = {};
+  const show = (tweaks) => render(() => useBrowser({
+    bridge, activeSessionId: "s", sessionIds: ["s"], tweaks,
+    open: Boolean(openBy.s), setOpen: (on) => { openBy.s = on; },
+  }));
+  const click = (href, over = {}) => {
+    const a = { getAttribute: () => href };
+    return { button: 0, defaultPrevented: false, target: { closest: () => a }, preventDefault() { this.defaultPrevented = true; }, ...over };
+  };
+  const ui = show({});
+  const e = click("http://localhost:3000/a");
+  ui.onChatClick(e);
+  assert.equal(e.defaultPrevented, true);
+  assert.equal(openBy.s, true, "the panel opens to load it");
+  const other = click("https://example.com/");
+  ui.onChatClick(other);
+  assert.equal(other.defaultPrevented, false, "not this machine: left to the webview");
+  const mod = click("http://localhost:3000/b", { ctrlKey: true });
+  ui.onChatClick(mod);
+  assert.deepEqual(external, ["http://localhost:3000/b"]);
+  assert.equal(show({ browserLocalhostInPanel: false }).onChatClick, null, "tweak off: no routing");
 });

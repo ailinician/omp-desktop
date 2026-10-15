@@ -14,7 +14,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::agent::supervisor::ProcessSupervisor;
+use crate::supervisor::ProcessSupervisor;
 
 const POLL: Duration = Duration::from_millis(25);
 

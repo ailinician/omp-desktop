@@ -75,7 +75,7 @@ fn picked(core: &Core) {
     lock(&core.inner).set_active("a", "sa");
     let mut annotate = lock(&core.annotate);
     annotate.on = true;
-    annotate.installed.insert("sa".into());
+    annotate.install("sa");
     annotate.add_context("sa", 7);
     annotate.picked = Some(("sa".into(), 7));
 }
@@ -94,7 +94,8 @@ fn contexts_are_kept_only_for_installed_sessions() {
     let mut a = super::Annotate::default();
     assert!(!a.add_context("s", 1), "off");
     assert!(!a.owns("s", 1), "not installed: ignored");
-    a.installed.insert("s".into());
+    assert!(a.install("s"));
+    assert!(!a.install("s"), "already installed");
     a.on = true;
     assert!(a.add_context("s", 1), "on: the caller switches it on");
     assert!(a.add_context("s", 1));
@@ -159,7 +160,7 @@ fn turning_off_without_a_page_clears_the_flag_and_tells_the_panel() {
     );
     assert!(!lock(&core.annotate).on);
     // A later document must not come up in annotate mode.
-    lock(&core.annotate).installed.insert("sb".into());
+    lock(&core.annotate).install("sb");
     assert!(!lock(&core.annotate).add_context("sb", 1));
     assert_eq!(lock(&probe.annotate).last(), Some(&false));
 }

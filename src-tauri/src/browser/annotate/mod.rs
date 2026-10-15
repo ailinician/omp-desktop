@@ -16,7 +16,7 @@ mod pick;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
@@ -43,9 +43,8 @@ pub(in crate::browser) const EVENTS: [&str; 4] = [
 #[derive(Default)]
 pub(in crate::browser) struct Annotate {
     pub(in crate::browser) on: bool,
-    /// Page sessions the overlay is (being) installed on.
-    installed: HashSet<String>,
-    /// The overlay world's contexts per installed session.
+    /// The overlay world's contexts per session the overlay is (being)
+    /// installed on.
     contexts: HashMap<String, Vec<i64>>,
     /// Session and overlay context of the last pick emitted: a capture is
     /// of that document or fails.
@@ -56,10 +55,9 @@ impl Annotate {
     /// Whether `on`, after recording a context of `session` (ignored for a
     /// session the overlay is not installed on).
     fn add_context(&mut self, session: &str, id: i64) -> bool {
-        if !self.installed.contains(session) {
+        let Some(contexts) = self.contexts.get_mut(session) else {
             return false;
-        }
-        let contexts = self.contexts.entry(session.to_owned()).or_default();
+        };
         if !contexts.contains(&id) {
             contexts.push(id);
         }
@@ -96,8 +94,16 @@ impl Annotate {
             .map(|(_, c)| *c)
     }
 
+    /// Start tracking `session`'s contexts; `false` when it already was.
+    fn install(&mut self, session: &str) -> bool {
+        if self.contexts.contains_key(session) {
+            return false;
+        }
+        self.contexts.insert(session.to_owned(), Vec::new());
+        true
+    }
+
     fn forget(&mut self, session: &str) {
-        self.installed.remove(session);
         self.drop_context(session, None);
         self.contexts.remove(session);
     }
@@ -115,28 +121,28 @@ impl Core {
     /// the annotate lock, whose holders must not wait on the reader thread.
     pub(in crate::browser) fn install_overlay(&self, session: &str) -> Result<(), String> {
         let _installing = lock(&self.overlay_install);
-        if !lock(&self.annotate).installed.insert(session.to_owned()) {
+        if !lock(&self.annotate).install(session) {
             return Ok(());
         }
-        // `Runtime.enable` first: it reports the world `runImmediately` makes.
-        let steps = [
-            ("Runtime.enable", json!({})),
-            (
-                "Runtime.addBinding",
-                json!({ "name": BINDING, "executionContextName": WORLD }),
-            ),
-            (
-                "Page.addScriptToEvaluateOnNewDocument",
-                json!({ "source": OVERLAY, "worldName": WORLD, "runImmediately": true }),
-            ),
-        ];
-        for (method, params) in steps {
-            if let Err(e) = self.call(Some(session), method, params) {
-                lock(&self.annotate).forget(session);
-                return Err(format!("annotate overlay: {e}"));
-            }
-        }
-        Ok(())
+        // In order on the session, so only the last is waited for: `Runtime.
+        // enable` first (it reports the world `runImmediately` makes), then
+        // the binding the script calls. A session that refuses one refuses
+        // the script too (it is gone).
+        self.notify(Some(session), "Runtime.enable", json!({}));
+        self.notify(
+            Some(session),
+            "Runtime.addBinding",
+            json!({ "name": BINDING, "executionContextName": WORLD }),
+        );
+        let installed = self.call(
+            Some(session),
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": OVERLAY, "worldName": WORLD, "runImmediately": true }),
+        );
+        installed.map(drop).map_err(|e| {
+            lock(&self.annotate).forget(session);
+            format!("annotate overlay: {e}")
+        })
     }
 
     /// Annotate on or off for the shown page, and for every page shown

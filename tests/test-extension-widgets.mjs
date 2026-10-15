@@ -11,6 +11,9 @@ import { dirname, join } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const win = {};
+// constants.js: truncateText.
+// eslint-disable-next-line no-new-func
+new Function("window", readFileSync(join(root, "src/app/constants.js"), "utf8"))(win);
 // eslint-disable-next-line no-new-func
 new Function("window", readFileSync(join(root, "src/app/extension-widgets.js"), "utf8"))(win);
 const X = win.OMP_EXT_WIDGETS;

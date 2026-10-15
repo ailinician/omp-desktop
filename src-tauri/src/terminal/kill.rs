@@ -25,7 +25,7 @@
 //! saves its history and hangs up its own jobs — before the SIGKILL passes.
 //!
 //! **Windows:** the shell is attached to a kill-on-close Job Object through
-//! `agent::supervisor::ProcessSupervisor::attach_process`, so killing the
+//! `supervisor::ProcessSupervisor::attach_process`, so killing the
 //! tree closes the job handle, which ends the shell and every descendant. A
 //! job that could not be set up falls back to killing the shell alone; the
 //! pseudo console's closing then ends what is attached to it.
@@ -42,7 +42,7 @@ use std::sync::{MutexGuard, PoisonError};
 use portable_pty::ChildKiller;
 
 #[cfg(windows)]
-use crate::agent::supervisor::ProcessSupervisor;
+use crate::supervisor::ProcessSupervisor;
 
 /// Passes over the process table: a job may fork between listing and signal.
 #[cfg(unix)]

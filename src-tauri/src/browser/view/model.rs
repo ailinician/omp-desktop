@@ -273,23 +273,31 @@ impl Inner {
         self.request_follow(id).then(|| id.to_owned()) // owned: used after the lock
     }
 
-    /// The tab list when it differs from the last one handed out.
+    /// The tab list when it differs from the last one handed out; compared
+    /// in place, so an unchanged list (most target events) copies nothing.
     pub fn tabs_if_changed(&mut self) -> Option<&[TabInfo]> {
         let active = self.active.as_ref().map(|a| a.target_id.as_str());
-        let tabs: Vec<TabInfo> = self
+        let is_active = |p: &Page| Some(p.target_id.as_str()) == active;
+        let unchanged = self.pages.len() == self.published_tabs.len()
+            && self.pages.iter().zip(&self.published_tabs).all(|(p, t)| {
+                p.target_id == t.target_id
+                    && p.title == t.title
+                    && p.url == t.url
+                    && is_active(p) == t.active
+            });
+        if unchanged {
+            return None;
+        }
+        self.published_tabs = self
             .pages
             .iter()
             .map(|p| TabInfo {
                 target_id: p.target_id.clone(), // the event owns its payload
                 title: p.title.clone(),         // same
                 url: p.url.clone(),             // same
-                active: Some(p.target_id.as_str()) == active,
+                active: is_active(p),
             })
             .collect();
-        if tabs == self.published_tabs {
-            return None;
-        }
-        self.published_tabs = tabs;
         Some(&self.published_tabs)
     }
 }

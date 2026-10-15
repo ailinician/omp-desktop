@@ -4,7 +4,7 @@
 use std::path::Path;
 
 #[cfg(unix)]
-use crate::agent::supervisor::{kill_group_if_leader, pid_is_alive};
+use crate::supervisor::{kill_group_if_leader, pid_is_alive};
 
 /// Kill the browsers a dead instance directory recorded (its
 /// `profiles/*.pid`); `false` if a verified browser could still be running

@@ -5,6 +5,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager, State};
 
 use super::annotate::CapturedImage;
@@ -174,47 +175,41 @@ impl BrowserManager {
     }
 }
 
-async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T, String> + Send + 'static,
-) -> Result<T, String> {
-    tauri::async_runtime::spawn_blocking(work)
-        .await
-        .map_err(|e| format!("join error: {e}"))?
-}
-
 /// Run `action` on the session's open view, off the IPC thread.
 async fn with_view<T: Send + 'static>(
     app: AppHandle,
     session_id: String,
     action: impl FnOnce(&View) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
-    blocking(move || {
+    crate::off_ipc(move || {
         let view = app.state::<BrowserManager>().panel(&session_id)?;
         action(&view)
     })
-    .await
+    .await?
 }
 
+/// `events` is the panel's channel: every state, tabs, pick and frame
+/// message of this open, in order, until the panel closes or reopens.
 #[tauri::command]
 pub async fn browser_open_panel(
     session_id: String,
     width: u32,
     height: u32,
     dpr: f64,
+    events: Channel<InvokeResponseBody>,
     app: AppHandle,
 ) -> Result<(), String> {
-    blocking(move || {
-        // The emitter keeps its own handle for the view's threads.
-        let emit = Arc::new(TauriBrowserEmit(app.clone()));
+    crate::off_ipc(move || {
+        let emit = Arc::new(TauriBrowserEmit(events));
         app.state::<BrowserManager>()
             .open_panel(&session_id, width, height, dpr, emit)
     })
-    .await
+    .await?
 }
 
 #[tauri::command]
 pub async fn browser_close_panel(session_id: String, app: AppHandle) -> Result<(), String> {
-    blocking(move || app.state::<BrowserManager>().close_panel(&session_id)).await
+    crate::off_ipc(move || app.state::<BrowserManager>().close_panel(&session_id)).await?
 }
 
 #[tauri::command]

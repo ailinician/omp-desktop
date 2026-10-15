@@ -31,7 +31,7 @@ function BrowserTabs({ ui }) {
   );
 }
 
-function BrowserToolbar({ ui, onClose }) {
+function BrowserToolbar({ ui }) {
   const { state } = ui;
   const [draft, setDraft] = React.useState(null); // null = show the page's address
   const [shake, setShake] = React.useState(false);
@@ -81,7 +81,7 @@ function BrowserToolbar({ ui, onClose }) {
         <button className={`btn icon ghost${ui.fullView ? " active" : ""}`} title="full view" aria-label="full view" aria-pressed={ui.fullView} onClick={() => ui.setFullView(!ui.fullView)}>
           <_BT_Icon name="focus" size={11} />
         </button>
-        <button className="btn icon ghost" title="close browser" aria-label="close browser" onClick={onClose}>
+        <button className="btn icon ghost" title="close browser" aria-label="close browser" onClick={ui.close}>
           <_BT_Icon name="close" size={11} />
         </button>
       </div>

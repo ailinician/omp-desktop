@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Instant;
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use super::super::cdp::DISCONNECTED;
 use super::super::lock;
@@ -73,7 +73,7 @@ fn handle(core: &Core, session: Option<&str>, method: &str, params: &Value) {
                 });
             }
         }
-        _ if session.is_some_and(|s| core.is_active_session(s)) => {
+        _ if session.is_some_and(|s| core.active_session().is_ok_and(|a| a == s)) => {
             on_page_event(core, method, params);
         }
         _ => {}
@@ -97,11 +97,16 @@ fn on_page_event(core: &Core, method: &str, params: &Value) {
                 let _ = core.refresh_history();
             }
         }
-        "Page.frameStartedLoading" => core.update_state(|s| s.loading = true),
-        "Page.frameStoppedLoading" => core.update_state(|s| s.loading = false),
+        // Subframes (ads, embeds) load on their own; only the page's counts.
+        "Page.frameStartedLoading" | "Page.frameStoppedLoading"
+            if core.is_main_frame(params["frameId"].as_str()) =>
+        {
+            let loading = method == "Page.frameStartedLoading";
+            core.update_state(|s| s.loading = loading);
+        }
+        // The history changed at `frameNavigated`; the title may have now.
         "Page.loadEventFired" => {
             core.update_state(|s| s.loading = false);
-            let _ = core.refresh_history();
             let _ = core.refresh_title();
         }
         "Page.navigatedWithinDocument" => {
@@ -175,11 +180,7 @@ fn on_target_destroyed(core: &Core, target_id: Option<&str>) {
             let _ = core.switch_to(&id);
         }
         Some(None) => {
-            let created = core.call(None, "Target.createTarget", json!({ "url": "about:blank" }));
-            if let Some(id) = created
-                .ok()
-                .and_then(|c| c["targetId"].as_str().map(str::to_owned))
-            {
+            if let Ok(id) = core.create_page() {
                 let _ = core.switch_to(&id);
             }
         }

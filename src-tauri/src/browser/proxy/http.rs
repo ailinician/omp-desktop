@@ -178,9 +178,38 @@ pub(super) fn relay_json(
     let _ = write!(request, "Host: 127.0.0.1:{chromium}\r\n\r\n");
     upstream.write_all(request.as_bytes())?;
 
-    // Chromium ignores `Connection: close`: read by `Content-Length`, not EOF.
-    let mut reader = BufReader::new(upstream);
-    let mut lines = Vec::new();
+    let (head, body) = read_response(&mut BufReader::new(upstream))?;
+    let body =
+        String::from_utf8(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let body = rewrite_json(&body, chromium, own);
+
+    let mut response = head
+        .iter()
+        .filter(|l| !has_header(l, "content-length") && !has_header(l, "connection"))
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let _ = write!(
+        response,
+        "\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    client.write_all(response.as_bytes())?;
+    Ok(())
+}
+
+/// Longest body [`read_response`] accepts: Chromium's discovery JSON lists
+/// one entry per target, far below this.
+const MAX_BODY: usize = 1 << 20;
+
+/// Reads one HTTP/1.1 response from Chromium: the status and header lines
+/// (without line ends) and the body. Chromium ignores `Connection: close`,
+/// so the body is read by `Content-Length`, never to EOF.
+pub(in crate::browser) fn read_response(
+    reader: &mut impl BufRead,
+) -> io::Result<(Vec<String>, Vec<u8>)> {
+    let invalid = |why: &str| io::Error::new(io::ErrorKind::InvalidData, why);
+    let mut head = Vec::new();
     let mut length = None;
     loop {
         let mut line = String::new();
@@ -194,31 +223,17 @@ pub(super) fn relay_json(
         if has_header(line, "content-length") {
             length = line
                 .split_once(':')
-                .and_then(|(_, v)| v.trim().parse().ok());
-        } else if !has_header(line, "connection") {
-            lines.push(line.to_owned());
+                .and_then(|(_, v)| v.trim().parse::<usize>().ok());
         }
+        head.push(line.to_owned());
     }
-    let length: usize = length.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "upstream sent no Content-Length",
-        )
-    })?;
+    let length = length.ok_or_else(|| invalid("response has no Content-Length"))?;
+    if length > MAX_BODY {
+        return Err(invalid("response body is too large"));
+    }
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
-    let body =
-        String::from_utf8(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let body = rewrite_json(&body, chromium, own);
-
-    let mut response = lines.join("\r\n");
-    let _ = write!(
-        response,
-        "\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    client.write_all(response.as_bytes())?;
-    Ok(())
+    Ok((head, body))
 }
 
 fn has_header(line: &str, name: &str) -> bool {

@@ -7,9 +7,11 @@
 //! list. It runs on the connection's observer thread, never on a splice
 //! thread.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::value::RawValue;
 
 use super::feed::Direction;
 use super::AgentTarget;
@@ -75,13 +77,14 @@ impl Tap {
     }
 
     /// One complete text message of the connection. `Err` when the tap can
-    /// no longer follow it (and must be switched off).
+    /// no longer follow it (and must be switched off). Only the envelope is
+    /// parsed; `params` and `result` only for the few messages acted on.
     pub(super) fn on_message(
         &mut self,
         direction: Direction,
         message: &[u8],
     ) -> Result<(), &'static str> {
-        let Ok(message) = serde_json::from_slice::<Value>(message) else {
+        let Ok(message) = serde_json::from_slice::<Envelope>(message) else {
             return Ok(());
         };
         match direction {
@@ -93,22 +96,28 @@ impl Tap {
         }
     }
 
-    fn on_command(&mut self, command: &Value) {
-        let Some(method) = command["method"].as_str() else {
+    fn on_command(&mut self, command: &Envelope) {
+        let Some(method) = command.method.as_deref() else {
             return;
         };
-        let params = &command["params"];
-        match (method, command["id"].as_u64()) {
+        match (method, command.id) {
             ("Target.createTarget", Some(id)) => self.pending.insert(id, Request::Create),
             ("Target.attachToTarget", Some(id)) => {
-                if let Some(target) = params["targetId"].as_str() {
-                    self.pending.insert(id, Request::Attach(target.to_owned()));
+                if let Some(target) = parse::<TargetId>(command.params).map(|p| p.target_id) {
+                    self.pending
+                        .insert(id, Request::Attach(target.into_owned()));
                 }
             }
             _ => {}
         }
         let target = match method {
-            "Target.activateTarget" => params["targetId"].as_str(),
+            "Target.activateTarget" => {
+                let target = parse::<TargetId>(command.params).map(|p| p.target_id);
+                if let Some(target) = target {
+                    (self.on_target)(&target);
+                }
+                return;
+            }
             "Page.navigate"
             | "Page.reload"
             | "Page.navigateToHistoryEntry"
@@ -124,29 +133,29 @@ impl Tap {
 
     /// The page a command is for: its session's, or the page-level
     /// connection's own.
-    fn target_of(&self, command: &Value) -> Option<&str> {
-        command["sessionId"].as_str().map_or_else(
+    fn target_of(&self, command: &Envelope) -> Option<&str> {
+        command.session_id.as_deref().map_or_else(
             || self.page.as_deref(),
             |session| self.sessions.get(session).and_then(Option::as_deref),
         )
     }
 
-    fn on_reply_or_event(&mut self, message: &Value) -> Result<(), &'static str> {
-        let params = &message["params"];
-        match message["method"].as_str() {
+    fn on_reply_or_event(&mut self, message: &Envelope) -> Result<(), &'static str> {
+        match message.method.as_deref() {
             Some("Target.attachedToTarget") => {
-                if let Some(session) = params["sessionId"].as_str() {
-                    let info = &params["targetInfo"];
-                    let page = info["targetId"]
-                        .as_str()
-                        .filter(|_| info["type"] == "page")
-                        .map(str::to_owned);
-                    self.sessions.insert(session.to_owned(), page);
+                if let Some(attached) = parse::<Attached>(message.params) {
+                    // A session on something else (a frame, a worker) maps to `None`.
+                    let page = attached
+                        .target_info
+                        .filter(|info| info.kind.as_deref() == Some("page"))
+                        .and_then(|info| info.target_id)
+                        .map(Cow::into_owned);
+                    self.sessions.insert(attached.session_id.into_owned(), page);
                 }
             }
             Some("Target.detachedFromTarget") => {
-                if let Some(session) = params["sessionId"].as_str() {
-                    self.sessions.remove(session);
+                if let Some(detached) = parse::<SessionId>(message.params) {
+                    self.sessions.remove(detached.session_id.as_ref());
                 }
             }
             Some(_) => {}
@@ -162,30 +171,79 @@ impl Tap {
     /// `Target.attachToTarget` the session of its page (no intent: puppeteer
     /// stays attached to every page). Result or error, the reply retires
     /// its request.
-    fn on_reply(&mut self, reply: &Value) {
-        let Some(request) = reply["id"].as_u64().and_then(|id| self.pending.retire(id)) else {
+    fn on_reply(&mut self, reply: &Envelope) {
+        let Some(request) = reply.id.and_then(|id| self.pending.retire(id)) else {
             return;
         };
-        let Some(result) = reply.get("result") else {
-            return; // an error reply: nothing was created or attached
-        };
+        // No result: an error reply, nothing was created or attached.
         match request {
             Request::Create => {
-                if let Some(target) = result["targetId"].as_str() {
-                    (self.on_target)(target);
+                if let Some(created) = parse::<TargetId>(reply.result) {
+                    (self.on_target)(&created.target_id);
                 }
             }
             Request::Attach(target) => {
-                if let Some(session) = result["sessionId"].as_str() {
+                if let Some(attached) = parse::<SessionId>(reply.result) {
                     // The attach event may have named it first (and said what
                     // it is).
                     self.sessions
-                        .entry(session.to_owned())
+                        .entry(attached.session_id.into_owned())
                         .or_insert(Some(target));
                 }
             }
         }
     }
+}
+
+/// The fields of a CDP message the tap reads first. Strings are `Cow`: JSON
+/// may escape them, though CDP's names and ids never need it.
+#[derive(Deserialize)]
+struct Envelope<'a> {
+    id: Option<u64>,
+    #[serde(borrow)]
+    method: Option<Cow<'a, str>>,
+    #[serde(borrow, rename = "sessionId")]
+    session_id: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    params: Option<&'a RawValue>,
+    #[serde(borrow)]
+    result: Option<&'a RawValue>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TargetId<'a> {
+    #[serde(borrow)]
+    target_id: Cow<'a, str>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionId<'a> {
+    #[serde(borrow)]
+    session_id: Cow<'a, str>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Attached<'a> {
+    #[serde(borrow)]
+    session_id: Cow<'a, str>,
+    #[serde(borrow)]
+    target_info: Option<TargetInfo<'a>>,
+}
+
+#[derive(Deserialize)]
+struct TargetInfo<'a> {
+    #[serde(borrow, rename = "targetId")]
+    target_id: Option<Cow<'a, str>>,
+    #[serde(borrow, rename = "type")]
+    kind: Option<Cow<'a, str>>,
+}
+
+/// `raw` (a `params` or `result`) as `T`, when present and of that shape.
+fn parse<'a, T: Deserialize<'a>>(raw: Option<&'a RawValue>) -> Option<T> {
+    serde_json::from_str(raw?.get()).ok()
 }
 
 /// The request target of a request head's first line.

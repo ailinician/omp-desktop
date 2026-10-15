@@ -15,11 +15,14 @@ import { dirname, join } from "node:path";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const win = {};
 // keymap.js must load first — terminal.js reads window.OMP_KEYMAP (chords,
-// platform detection) — and project-nav.js gives shellLabel its basename.
+// platform detection) — and project-nav.js + path-setting.js give
+// shellLabel / shellMenu their names and rows.
 // eslint-disable-next-line no-new-func
 new Function("window", readFileSync(join(root, "src/app/keymap.js"), "utf8"))(win);
 // eslint-disable-next-line no-new-func
 new Function("window", readFileSync(join(root, "src/app/project-nav.js"), "utf8"))(win);
+// eslint-disable-next-line no-new-func
+new Function("window", readFileSync(join(root, "src/app/path-setting.js"), "utf8"))(win);
 // eslint-disable-next-line no-new-func
 new Function("window", readFileSync(join(root, "src/app/terminal.js"), "utf8"))(win);
 const T = win.OMP_TERMINAL;
@@ -320,7 +323,7 @@ check("shellMenu: a stored shell outside the list gets its own checked row, mark
 
 check("shellMenu: settings not loaded yet still give one checked default row", () => {
   const m = T.shellMenu(null);
-  assert.equal(m.label, "shell");
+  assert.equal(m.label, "default", "names the row, like the browser's `automatic`");
   assert.deepEqual(m.rows, [{ name: "default", hint: "", path: "", value: "", checked: true }]);
 });
 

@@ -53,8 +53,6 @@ use base64::Engine;
 
 pub use pump::Emit;
 pub use settings::TerminalSettings;
-/// Shared with the browser's Chromium setting (`browser/process/settings.rs`).
-pub use shell::{is_executable_file, typed_path};
 pub use wire::{ReplayWire, TauriEmit, TerminalState, TerminalStatus};
 
 use pty::Pty;
@@ -325,19 +323,20 @@ impl TerminalManager {
         }
     }
 
-    /// End the tab: forget it, hang its shell up, and kill what is left of
-    /// it and everything it started after [`pty::HANGUP_GRACE`] at most
-    /// (see [`Pty::close`]). Silent (no exit event). Unknown tabs are
-    /// ignored. An `open` spawning for it meanwhile closes its own shell.
-    /// Blocks up to the grace: call off the IPC thread.
+    /// [`close_tabs`](Self::close_tabs) for one tab (the tests').
+    #[cfg(test)]
     pub fn close_tab(&self, id: &str) {
         self.close_tabs(&[id]);
     }
 
-    /// [`TerminalManager::close_tab`] for exactly these tabs; a tab
-    /// registered meanwhile is left alone. Their shells share one
-    /// [`pty::HANGUP_GRACE`] and each kill pass over the process table (see
-    /// [`Pty::close_all`]).
+    /// End exactly these tabs: forget them, hang their shells up, and kill
+    /// what is left of them and everything they started after
+    /// [`pty::HANGUP_GRACE`] at most (see [`Pty::close`]). Silent (no exit
+    /// event). Unknown tabs are ignored, and a tab registered meanwhile is
+    /// left alone; an `open` spawning for a closed tab meanwhile closes its
+    /// own shell. The shells share one grace and each kill pass over the
+    /// process table (see [`Pty::close_all`]). Blocks up to the grace: call
+    /// off the IPC thread.
     pub fn close_tabs<S: AsRef<str>>(&self, ids: &[S]) {
         let shells: Vec<Arc<Pty>> = {
             let mut tabs = self.tabs();

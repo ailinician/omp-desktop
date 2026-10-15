@@ -10,27 +10,17 @@
 //! sends a path for a launch. A configured path that stops being executable
 //! is a launch error, never a silent fallback to another browser.
 //!
-//! Same storage and failure policy as the terminal's shell setting
-//! (`terminal/settings.rs`): cached in memory, an unreadable file reads as
-//! automatic, but a change refuses to overwrite it.
+//! Storage, cache and failure policy are `program_setting`'s, shared with
+//! the terminal's shell: an unreadable file reads as automatic, but a change
+//! refuses to overwrite it.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::locate::{self, Places, Platform};
-use crate::json_store;
-use crate::terminal::{is_executable_file, typed_path};
-
-/// The on-disk shape. Unknown keys are dropped on the next write; add a
-/// field here before writing a new one.
-#[derive(Default, Serialize, Deserialize)]
-struct SettingsFile {
-    #[serde(default)]
-    path: String,
-}
+use crate::program_setting::{is_executable_file, typed_path, ProgramSetting};
 
 /// What `browser_settings` / `browser_set_path` / `browser_pick_path`
 /// return.
@@ -50,55 +40,24 @@ pub struct BrowserSettings {
 
 /// `browser.json` plus its in-memory copy.
 pub struct SettingsStore {
-    /// `None` when the app has no config folder: the setting then lives in
-    /// memory only (never a shared fallback folder another account could
-    /// plant a browser in).
-    file: Option<StoreFile>,
+    path: ProgramSetting,
     /// The user's home, where omp's Chrome for Testing builds live.
     home: PathBuf,
-    /// The stored `path`. Held only to copy or replace the string.
-    path: Mutex<String>,
-}
-
-struct StoreFile {
-    path: PathBuf,
-    /// `path.with_extension("lock")`, computed once.
-    lock: PathBuf,
 }
 
 impl SettingsStore {
-    /// Read `file` once (a missing or unreadable file reads as automatic).
+    /// Read `file` once (a missing or unreadable file reads as automatic;
+    /// `None` keeps the setting in memory only).
     pub fn load(file: Option<PathBuf>, home: PathBuf) -> Self {
-        let path = file.as_deref().map_or_else(String::new, |file| {
-            json_store::read_strict::<SettingsFile>(file).map_or_else(
-                |e| {
-                    eprintln!(
-                        "[omp-desktop] {} unreadable, finding Chromium automatically: {e}",
-                        file.display()
-                    );
-                    String::new()
-                },
-                |stored| stored.path,
-            )
-        });
         Self {
-            file: file.map(|path| StoreFile {
-                lock: path.with_extension("lock"),
-                path,
-            }),
+            path: ProgramSetting::load(file, "path"),
             home,
-            path: Mutex::new(path),
         }
-    }
-
-    /// The cache. Only ever cloned or replaced, so poison is ignored.
-    fn cached(&self) -> MutexGuard<'_, String> {
-        self.path.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The stored path; empty = automatic.
     pub fn path(&self) -> String {
-        self.cached().clone()
+        self.path.get()
     }
 
     /// The stored path, what automatic discovery resolves to and the
@@ -133,23 +92,7 @@ impl SettingsStore {
         if !path.is_empty() {
             configured(path)?;
         }
-        let Some(StoreFile { path: file, lock }) = &self.file else {
-            path.clone_into(&mut self.cached());
-            return Ok(self.settings());
-        };
-        json_store::update_strict(
-            file,
-            lock,
-            |stored: &mut SettingsFile| {
-                let changed = stored.path != path;
-                if changed {
-                    path.clone_into(&mut stored.path);
-                }
-                changed
-            },
-            // Under the file lock, so the cache follows the file's order.
-            |stored| *self.cached() = stored.path,
-        )?;
+        self.path.set(path)?;
         Ok(self.settings())
     }
 
@@ -211,22 +154,20 @@ mod tests {
     use super::*;
     use crate::browser::tests::tempdir;
 
-    /// An executable file in `dir` (unix: mode 0755).
+    /// A browser stand-in `dir/name`.
     fn executable(dir: &Path, name: &str) -> PathBuf {
-        let path = dir.join(name);
-        std::fs::write(&path, "#!/bin/sh\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        path
+        crate::test_support::executable(&dir.join(name), "#!/bin/sh\n")
+    }
+
+    /// The store over `file`, discovering browsers under `home`.
+    fn store(file: Option<PathBuf>, home: &Path) -> SettingsStore {
+        SettingsStore::load(file, home.to_path_buf())
     }
 
     #[test]
     fn set_path_validates_and_normalises() {
         let dir = tempdir("browser-settings-validate");
-        let store = SettingsStore::load(None, dir.clone());
+        let store = store(None, &dir);
         let bin = executable(&dir, "my-chrome");
         let shown = bin.display().to_string();
 
@@ -270,7 +211,7 @@ mod tests {
         let macos = dir.join("My Browser.app/Contents/MacOS");
         std::fs::create_dir_all(&macos).unwrap();
         let bin = executable(&macos, "My Browser");
-        let store = SettingsStore::load(None, dir.clone());
+        let store = store(None, &dir);
         let bundle = format!("{}/", dir.join("My Browser.app").display());
         assert_eq!(
             store.set_path(&bundle).unwrap().path,
@@ -286,14 +227,14 @@ mod tests {
         let dir = tempdir("browser-settings-persist");
         let file = dir.join("browser.json");
         let bin = executable(&dir, "my-chrome");
-        SettingsStore::load(Some(file.clone()), dir.clone())
+        store(Some(file.clone()), &dir)
             .set_path(&bin.display().to_string())
             .unwrap();
         let raw: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(raw["path"], bin.display().to_string());
 
-        let reloaded = SettingsStore::load(Some(file), dir);
+        let reloaded = store(Some(file), &dir);
         assert_eq!(reloaded.path(), bin.display().to_string());
         std::fs::remove_file(&bin).unwrap();
         let err = reloaded.launch_candidates().unwrap_err();
@@ -305,18 +246,6 @@ mod tests {
             "kept for the user to see"
         );
         assert!(settings.error.is_some());
-    }
-
-    #[test]
-    fn an_unreadable_file_reads_as_automatic_and_is_never_overwritten() {
-        let dir = tempdir("browser-settings-corrupt");
-        let file = dir.join("browser.json");
-        std::fs::write(&file, b"{ not json").unwrap();
-        let store = SettingsStore::load(Some(file.clone()), dir.clone());
-        assert_eq!(store.path(), "");
-        let bin = executable(&dir, "my-chrome");
-        assert!(store.set_path(&bin.display().to_string()).is_err());
-        assert_eq!(std::fs::read(&file).unwrap(), b"{ not json");
     }
 
     #[test]

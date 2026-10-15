@@ -2,13 +2,13 @@
 // paints the latest screencast frame on a canvas and
 // forwards the user's pointer, wheel, key, text and paste input to the page.
 //   createScreen({ view, canvas, sink, send, ack, onResize, onPage, escape, onEscape })
-//     -> { frame(f), size(), destroy() }
-//   watchLocalLinks(open) -> unsubscribe
+//     -> { frame(buffer), size(), destroy() }
 // `view` is the wrapper the canvas fills; `sink` a hidden <textarea> inside
 // it that holds keyboard focus for the page, so paste, IME composition and
 // dead keys work (an editable target): keys that type nothing go out as key
 // events, composed text and pastes as `{ kind: "text" }`. `send(ev)` takes
-// an `InputEvent` (app/browser.js). `ack(seq)` tells Rust a frame was
+// an `InputEvent` (app/browser.js). `frame(buffer)` takes a frame message
+// of the panel channel (OMP_BROWSER.parseFrame). `ack(seq)` tells Rust a frame was
 // painted or dropped (one frame in flight per view). `onResize(w, h, dpr)`
 // fires 100 ms after the view's CSS size or the display's pixel ratio
 // settled on a new value; `onPage({cssW, cssH})` when the painted frame's
@@ -24,7 +24,6 @@
 
   function createScreen({ view, canvas, sink, send, ack, onResize, onPage, escape, onEscape }) {
     const B = window.OMP_BROWSER;
-    const bytesOf = window.OMP_IMAGES.b64Bytes;
     const ctx = canvas.getContext("2d");
     let dead = false;
     let last = null; // newest frame received: its CSS size maps the clicks
@@ -34,8 +33,9 @@
     let shown = null; // painted: { bmp, cssW, cssH }; kept to redraw after a resize
     let paintRaf = 0;
     let published = null; // geometry sent with the last painted frame
-    let moveRaf = 0;
-    let move = null;
+    let inputRaf = 0;
+    let move = null; // the latest mousemove still to send
+    let wheel = null; // { e: the latest wheel event, dx, dy }: deltas still to send, CSS px
     let pressed = false;
     let resizeTimer = 0;
     let dprQuery = null;
@@ -50,12 +50,14 @@
       return { width: Math.round(r.width), height: Math.round(r.height), dpr: dpr() };
     };
     let sent = sizeNow();
+    // The view's box as of the last resize: painting does not force a
+    // layout read per frame.
+    let box = view.getBoundingClientRect();
 
     // Canvas backing store = view CSS size × dpr (assigning clears it).
     function fit() {
-      const r = view.getBoundingClientRect();
-      const w = Math.max(1, Math.round(r.width * dpr()));
-      const h = Math.max(1, Math.round(r.height * dpr()));
+      const w = Math.max(1, Math.round(box.width * dpr()));
+      const h = Math.max(1, Math.round(box.height * dpr()));
       if (canvas.width !== w) canvas.width = w;
       if (canvas.height !== h) canvas.height = h;
     }
@@ -93,7 +95,7 @@
         const f = incoming;
         incoming = null;
         try {
-          const bmp = await createImageBitmap(new Blob([bytesOf(f.b64)], { type: "image/jpeg" }));
+          const bmp = await createImageBitmap(new Blob([f.jpeg], { type: "image/jpeg" }));
           if (dead) { bmp.close(); break; }
           if (ready) { ready.bmp.close(); done(ready); }
           ready = { bmp, cssW: f.cssW, cssH: f.cssH, seq: f.seq };
@@ -105,8 +107,9 @@
       decoding = false;
     }
 
-    function frame(f) {
-      if (dead || !f?.b64) return;
+    function frame(buffer) {
+      const f = B.parseFrame(buffer);
+      if (dead || !f) return;
       last = f;
       done(incoming);
       incoming = f;
@@ -117,6 +120,7 @@
     // (ResizeObserver) or the display's pixel ratio (moving the window to a
     // monitor with another scale changes no CSS size).
     function settle() {
+      box = view.getBoundingClientRect();
       schedule();
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
@@ -154,53 +158,49 @@
       send({ kind: "mouse", type, x: p.x, y: p.y, button, buttons: e.buttons, clickCount: type === "mouseMoved" ? 0 : Math.max(1, e.detail), modifiers: B.modifiersOf(e) });
     }
 
-    // The coalesced move still in its rAF belongs to the gesture in flight;
-    // it goes out before a release or a new press, so a fast drag stays an
-    // area pick and a pressed move never follows the release.
-    function flushMove() {
-      if (!moveRaf) return;
-      cancelAnimationFrame(moveRaf);
-      moveRaf = 0;
-      if (move && !dead) send(move);
-      move = null;
+    // Moves and wheel ticks are coalesced to one of each per frame (the
+    // wheel's deltas add up) and mapped to the page only when they go out.
+    // What still waits belongs to the gesture in flight: it goes out before
+    // a release or a new press, so a fast drag stays an area pick and a
+    // pressed move never follows the release.
+    function flushInput() {
+      cancelAnimationFrame(inputRaf);
+      inputRaf = 0;
+      if (!dead) {
+        if (move) mouse("mouseMoved", move, buttonOf(move));
+        const p = wheel && at(wheel.e);
+        if (p) send({ kind: "wheel", x: p.x, y: p.y, deltaX: wheel.dx, deltaY: wheel.dy, modifiers: B.modifiersOf(wheel.e) });
+      }
+      move = wheel = null;
     }
+    const scheduleInput = () => { if (!inputRaf) inputRaf = requestAnimationFrame(flushInput); };
 
     const onDown = (e) => {
       if (e.target !== canvas) return;
       e.preventDefault(); // keeps the page selection ours, so focus is taken by hand
       sink.focus({ preventScroll: true });
       pressed = true;
-      flushMove();
+      flushInput();
       mouse("mousePressed", e, B.mouseButton(e.button));
     };
     const onUp = (e) => {
       if (!pressed) return;
       pressed = false;
-      flushMove();
+      flushInput();
       mouse("mouseReleased", e, B.mouseButton(e.button));
     };
-    // Moves are coalesced to one per frame; a drag keeps reporting after the
-    // pointer left the view.
+    // A drag keeps reporting after the pointer left the view.
     const onMove = (e) => {
       if (!pressed && e.target !== canvas) return;
-      const p = at(e);
-      if (!p) return;
-      move = { kind: "mouse", type: "mouseMoved", x: p.x, y: p.y, button: buttonOf(e), buttons: e.buttons, clickCount: 0, modifiers: B.modifiersOf(e) };
-      if (!moveRaf) {
-        moveRaf = requestAnimationFrame(() => {
-          moveRaf = 0;
-          if (move && !dead) send(move);
-          move = null;
-        });
-      }
+      move = e;
+      scheduleInput();
     };
     const onWheel = (e) => {
       if (e.target !== canvas) return;
       e.preventDefault();
-      const p = at(e);
-      if (!p) return;
       const unit = e.deltaMode === 1 ? LINE_PX : e.deltaMode === 2 ? view.clientHeight : 1;
-      send({ kind: "wheel", x: p.x, y: p.y, deltaX: e.deltaX * unit, deltaY: e.deltaY * unit, modifiers: B.modifiersOf(e) });
+      wheel = { e, dx: (wheel?.dx ?? 0) + e.deltaX * unit, dy: (wheel?.dy ?? 0) + e.deltaY * unit };
+      scheduleInput();
     };
     const onContext = (e) => { if (e.target === canvas) e.preventDefault(); };
 
@@ -258,7 +258,7 @@
       dprQuery?.removeEventListener("change", onDpr);
       clearTimeout(resizeTimer);
       cancelAnimationFrame(paintRaf);
-      cancelAnimationFrame(moveRaf);
+      cancelAnimationFrame(inputRaf);
       ready?.bmp.close();
       shown?.bmp.close();
       ready = shown = null;
@@ -267,19 +267,5 @@
     return { frame, size: sizeNow, destroy };
   }
 
-  // Primary clicks on localhost links in the chat (OMP_BROWSER.linkClick)
-  // go to `open(url, external)` instead of the webview. Returns the
-  // unsubscribe.
-  function watchLocalLinks(open) {
-    const onClick = (e) => {
-      const link = window.OMP_BROWSER.linkClick(e);
-      if (!link) return;
-      e.preventDefault();
-      open(link.url, link.external);
-    };
-    document.addEventListener("click", onClick);
-    return () => document.removeEventListener("click", onClick);
-  }
-
-  window.OMP_BROWSER_SCREEN = { createScreen, watchLocalLinks };
+  window.OMP_BROWSER_SCREEN = { createScreen };
 })();

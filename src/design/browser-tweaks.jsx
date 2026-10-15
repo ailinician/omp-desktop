@@ -5,8 +5,8 @@
    `automatic` (hint: what auto-detection finds now), the browsers installed
    here (Rust's list), the stored custom path and "other…" (Rust's file
    dialog); a pick is saved with `browserSetPath`. Rust reads the setting at
-   each launch, so it applies to panels started afterwards. Shares the
-   terminal shell's hook and menu (terminal-tweaks.jsx). Renders only the
+   each launch, so it applies to panels started afterwards. The hook and
+   menu are design/path-setting.jsx's. Renders only the
    row: app-live.jsx puts it in its Browser section.
    ═════════════════════════════════════════════════════════════════════ */
 

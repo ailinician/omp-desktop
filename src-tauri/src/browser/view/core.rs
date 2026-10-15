@@ -92,19 +92,16 @@ impl Core {
             .call(session, method, params)
     }
 
-    pub(in crate::browser) fn active_session(&self) -> Result<String, String> {
-        lock(&self.inner)
-            .active
-            .as_ref()
-            .map(|a| a.session.clone()) // owned: the lock must not span the CDP call
-            .ok_or_else(|| "no page open".to_owned())
+    /// Send a command whose reply nobody reads; CDP keeps each session's
+    /// commands in order, so a later `call` still sees its effect.
+    pub(in crate::browser) fn notify(&self, session: Option<&str>, method: &str, params: Value) {
+        if let Some(client) = self.client.get() {
+            client.notify(session, method, params);
+        }
     }
 
-    pub(super) fn is_active_session(&self, session: &str) -> bool {
-        lock(&self.inner)
-            .active
-            .as_ref()
-            .is_some_and(|a| a.session == session)
+    pub(in crate::browser) fn active_session(&self) -> Result<String, String> {
+        self.activation().map(|(session, _)| session)
     }
 
     pub(in crate::browser) fn call_active(
@@ -114,6 +111,17 @@ impl Core {
     ) -> Result<Value, String> {
         let session = self.active_session()?;
         self.call(Some(&session), method, params)
+    }
+
+    /// A new blank page, listed at once.
+    pub(super) fn create_page(&self) -> Result<String, String> {
+        let created = self.call(None, "Target.createTarget", json!({ "url": "about:blank" }))?;
+        let target = created["targetId"]
+            .as_str()
+            .ok_or("createTarget returned no target")?
+            .to_owned();
+        lock(&self.inner).upsert_page(&json!({ "targetId": target, "url": "about:blank" }));
+        Ok(target)
     }
 
     /// Emit `tabs` when the list differs from the last one. Emitting under
@@ -193,9 +201,9 @@ impl Core {
         self.apply_viewport(session, size)
     }
 
-    /// (Re)start the screencast of `session` at `size`.
+    /// Size `session`'s viewport to `size` and (re)start its screencast.
     pub(super) fn apply_viewport(&self, session: &str, size: Size) -> Result<(), String> {
-        let _ = self.call(Some(session), "Page.stopScreencast", json!({}));
+        self.notify(Some(session), "Page.stopScreencast", json!({}));
         self.call(
             Some(session),
             "Emulation.setDeviceMetricsOverride",
@@ -203,11 +211,22 @@ impl Core {
         )?;
         // The page shows as focused (carets, `:focus`) though headless
         // Chromium has no window focus; not every build supports it.
-        let _ = self.call(
+        self.notify(
             Some(session),
             "Emulation.setFocusEmulationEnabled",
             json!({ "enabled": true }),
         );
+        self.start_screencast(session, size)
+    }
+
+    /// Restart `session`'s screencast without touching its viewport: the
+    /// start sends a fresh frame.
+    pub(super) fn restart_screencast(&self, session: &str, size: Size) -> Result<(), String> {
+        self.notify(Some(session), "Page.stopScreencast", json!({}));
+        self.start_screencast(session, size)
+    }
+
+    fn start_screencast(&self, session: &str, size: Size) -> Result<(), String> {
         self.frames.clear();
         self.call(
             Some(session),
@@ -232,7 +251,9 @@ impl Core {
     }
 
     /// Send a queued gesture to the page session it was made for. One of an
-    /// earlier activation is dropped, not sent to the page shown now.
+    /// earlier activation is dropped, not sent to the page shown now. Not
+    /// waited for: CDP keeps the order, and a round trip per event would cap
+    /// input at one per reply.
     pub(super) fn send_input(&self, item: InputItem) -> Result<(), String> {
         let current = lock(&self.inner)
             .active
@@ -244,8 +265,18 @@ impl Core {
         if item.release {
             self.note_panel_release(); // before the page can react to it
         }
-        self.call(Some(&item.session), item.method, item.params)
-            .map(drop)
+        self.client.get().ok_or("cdp not connected")?.post(
+            Some(&item.session),
+            item.method,
+            item.params,
+        )
+    }
+
+    /// Whether `frame_id` is the shown page's main frame (a page target's
+    /// main frame has the target's id).
+    pub(super) fn is_main_frame(&self, frame_id: Option<&str>) -> bool {
+        let inner = lock(&self.inner);
+        frame_id.is_some_and(|id| inner.active.as_ref().is_some_and(|a| a.target_id == id))
     }
 
     /// The panel released a mouse button on the page.
