@@ -1,7 +1,10 @@
 /* ═════════════════════════════════════════════════════════════════════
-   app/image-attach.js — turn picked/pasted/dropped image Files into omp
-   `ImageContent` blocks ({ type: "image", data: <base64>, mimeType }),
-   the shape the `prompt` / `steer` / `follow_up` RPC commands accept.
+   app/image-attach.js — turn picked/pasted/dropped image Files (and the
+   browser panel's annotation screenshots) into omp `ImageContent` blocks
+   ({ type: "image", data: <base64>, mimeType }), the shape the `prompt` /
+   `steer` / `follow_up` RPC commands accept. Also home of `b64Bytes`, the
+   one base64 → bytes decoder (live.js: rpc_chunk + terminal output;
+   app/browser-screen.js: screencast frames) — this script loads before both.
    ═════════════════════════════════════════════════════════════════════ */
 (function () {
   // Formats every omp provider takes as-is. Anything else a clipboard or
@@ -34,8 +37,17 @@
     return `data:${img.mimeType};base64,${img.data}`;
   }
 
-  function base64Bytes(b64) {
+  // Decoded size of a base64 payload, without decoding it.
+  function decodedSize(b64) {
     return Math.floor((b64.length * 3) / 4);
+  }
+
+  /** Decode base64 to its bytes. */
+  function b64Bytes(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
   }
 
   function fitWithin(width, height, max = MAX_EDGE_PX) {
@@ -154,15 +166,15 @@
     });
   }
 
-  // File → ImageContent, downscaled/re-encoded when it would be too large
-  // or in a format a provider may reject. Rejects on undecodable input.
-  async function prepareImage(file) {
-    const url = await readAsDataUrl(file);
+  // A data URL (`bytes` long decoded) → ImageContent, downscaled/re-encoded
+  // when it would be too large or in a format a provider may reject.
+  // Rejects on undecodable input.
+  async function normalizeDataUrl(url, bytes) {
     const img = await decode(url);
     const w = img.naturalWidth;
     const h = img.naturalHeight;
     const original = parseDataUrl(url);
-    if (original && !needsReencode(original.mimeType, file.size, w, h)) return original;
+    if (original && !needsReencode(original.mimeType, bytes, w, h)) return original;
 
     const { width, height } = fitWithin(w, h);
     const canvas = document.createElement("canvas");
@@ -174,7 +186,7 @@
     // JPEG only when PNG is still too heavy (photos), flattening any alpha
     // onto white first — JPEG would otherwise turn it black.
     let out = parseDataUrl(canvas.toDataURL("image/png"));
-    if (!out || base64Bytes(out.data) > MAX_PASSTHROUGH_BYTES) {
+    if (!out || decodedSize(out.data) > MAX_PASSTHROUGH_BYTES) {
       ctx.globalCompositeOperation = "destination-over";
       ctx.fillStyle = "#fff";
       ctx.fillRect(0, 0, width, height);
@@ -184,8 +196,21 @@
     return out;
   }
 
+  // File → ImageContent (see normalizeDataUrl).
+  async function prepareImage(file) {
+    return normalizeDataUrl(await readAsDataUrl(file), file.size);
+  }
+
+  // An ImageContent from elsewhere (a browser panel screenshot, captured at
+  // the page's device pixel ratio) through the same edge cap and re-encode
+  // as a pasted image.
+  function normalizeImage(img) {
+    return normalizeDataUrl(toDataUrl(img), decodedSize(img.data));
+  }
+
   window.OMP_IMAGES = {
     MAX_ATTACHMENTS,
+    b64Bytes,
     parseDataUrl,
     toDataUrl,
     fitWithin,
@@ -196,5 +221,6 @@
     imageFilesFromTransfer,
     imageFilesFromClipboardAsync,
     prepareImage,
+    normalizeImage,
   };
 })();

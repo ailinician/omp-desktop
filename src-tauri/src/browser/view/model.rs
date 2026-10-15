@@ -11,6 +11,8 @@ use super::emit::{Status, TabInfo, ViewState};
 /// this long.
 const FOLLOW_HOLD: Duration = Duration::from_secs(5);
 const MAX_EDGE: u32 = 8192;
+/// Device pixels per side of the emulated viewport and its screencast.
+const MAX_DEVICE_EDGE: f64 = 8192.0;
 /// Screencast restarts for a frame of the wrong size, see
 /// [`Inner::frame_needs_restart`].
 const MAX_HEALS: u8 = 5;
@@ -19,16 +21,18 @@ const HEAL_REFILL: Duration = Duration::from_secs(5);
 
 /// The panel's CSS size and device pixel ratio.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Size {
+pub(in crate::browser) struct Size {
     pub w: u32,
     pub h: u32,
     pub dpr: f64,
 }
 
 impl Size {
+    /// A panel size within bounds, CSS and device pixels both.
     pub fn new(w: u32, h: u32, dpr: f64) -> Result<Self, String> {
-        if (1..=MAX_EDGE).contains(&w) && (1..=MAX_EDGE).contains(&h) && (0.25..=8.0).contains(&dpr)
-        {
+        let sides = (1..=MAX_EDGE).contains(&w) && (1..=MAX_EDGE).contains(&h);
+        let device = f64::from(w.max(h)) * dpr <= MAX_DEVICE_EDGE;
+        if sides && (0.25..=8.0).contains(&dpr) && device {
             Ok(Self { w, h, dpr })
         } else {
             Err(format!("invalid panel size {w}x{h} at {dpr}x"))
@@ -43,13 +47,13 @@ impl Size {
     }
 }
 
-pub(super) struct Page {
+pub(in crate::browser) struct Page {
     pub target_id: String,
     pub title: String,
     pub url: String,
 }
 
-pub(super) struct Active {
+pub(in crate::browser) struct Active {
     pub target_id: String,
     pub session: String,
     /// Which activation this is; a new page session or a switch makes a
@@ -57,7 +61,7 @@ pub(super) struct Active {
     pub generation: u64,
 }
 
-pub(super) struct Inner {
+pub(in crate::browser) struct Inner {
     pub pages: Vec<Page>,
     pub active: Option<Active>,
     pub size: Size,
@@ -65,6 +69,9 @@ pub(super) struct Inner {
     pub following: bool,
     /// The page the agent worked in that the view does not list yet.
     pending_follow: Option<String>,
+    /// The page the agent worked in last while the user's choice held the
+    /// view; shown when the hold ends.
+    held_follow: Option<String>,
     pub user_activated: Option<Instant>,
     /// How long `user_activated` keeps the view from following the agent.
     pub follow_hold: Duration,
@@ -92,6 +99,7 @@ impl Inner {
             },
             following: false,
             pending_follow: None,
+            held_follow: None,
             follow_hold: FOLLOW_HOLD,
             activations: 0,
             user_activated: None,
@@ -163,11 +171,32 @@ impl Inner {
         true
     }
 
+    /// The user's recent choice keeps the view where it is.
+    fn held(&self) -> bool {
+        self.user_activated
+            .is_some_and(|at| at.elapsed() < self.follow_hold)
+    }
+
+    #[cfg(test)]
     pub fn may_follow(&self) -> bool {
-        self.following
-            && self
-                .user_activated
-                .is_none_or(|at| at.elapsed() >= self.follow_hold)
+        self.following && !self.held()
+    }
+
+    pub fn is_listed(&self, target_id: &str) -> bool {
+        self.pages.iter().any(|p| p.target_id == target_id)
+    }
+
+    /// Drop page `target_id`; `true` when it was listed. A follow waiting
+    /// for it is dropped too.
+    pub fn remove_page(&mut self, target_id: &str) -> bool {
+        let before = self.pages.len();
+        self.pages.retain(|p| p.target_id != target_id);
+        for waiting in [&mut self.pending_follow, &mut self.held_follow] {
+            if waiting.as_deref() == Some(target_id) {
+                *waiting = None;
+            }
+        }
+        before != self.pages.len()
     }
 
     /// Show `target_id` through `session`; the returned generation tells
@@ -188,27 +217,47 @@ impl Inner {
         self.activations
     }
 
-    /// The agent worked in `target_id`: `true` when the view shows it now,
-    /// `false` when the user's recent choice holds the view back (the request
-    /// is dropped) or the page is not listed yet. In that case one request
-    /// is kept, and [`apply_target_event`](Self::apply_target_event) hands
-    /// the page out when it appears.
+    /// The agent worked in `target_id`: `true` when the view is to show it
+    /// now. Otherwise the newest request is kept: while the user's recent
+    /// choice holds the view, as the page to show when the hold ends (see
+    /// [`follow_deadline`](Self::follow_deadline)); for a page not listed
+    /// yet, until [`apply_target_event`](Self::apply_target_event) sees it
+    /// appear.
     pub fn request_follow(&mut self, target_id: &str) -> bool {
-        if !self.may_follow() {
+        if !self.following {
             return false;
         }
-        if self.pages.iter().any(|p| p.target_id == target_id) {
-            self.pending_follow = None;
-            return true;
+        self.pending_follow = None;
+        self.held_follow = None;
+        if !self.is_listed(target_id) {
+            self.pending_follow = Some(target_id.to_owned());
+            return false;
         }
-        self.pending_follow = Some(target_id.to_owned());
-        false
+        if self.held() {
+            self.held_follow = Some(target_id.to_owned());
+            return false;
+        }
+        true
+    }
+
+    /// When the hold keeping a follow back ends, if one is kept.
+    pub fn follow_deadline(&self) -> Option<Instant> {
+        self.held_follow.as_ref()?;
+        self.user_activated.map(|at| at + self.follow_hold)
+    }
+
+    /// The follow kept back by a hold that has ended.
+    pub fn take_held_follow(&mut self) -> Option<String> {
+        if self.held() {
+            return None;
+        }
+        self.held_follow.take()
     }
 
     /// Handle a target event: keep the pages current and give back the page
     /// to show, if it is the one [`request_follow`](Self::request_follow)
     /// was waiting for and the user's recent choice does not hold the view
-    /// back.
+    /// back (then it is kept for when the hold ends).
     pub fn apply_target_event(&mut self, method: &str, params: &Value) -> Option<String> {
         let info = &params["targetInfo"];
         if info["type"] != "page" {
@@ -221,8 +270,7 @@ impl Inner {
         if !awaited {
             return None;
         }
-        self.pending_follow = None;
-        self.may_follow().then(|| id.to_owned()) // owned: used after the lock
+        self.request_follow(id).then(|| id.to_owned()) // owned: used after the lock
     }
 
     /// The tab list when it differs from the last one handed out.
@@ -266,10 +314,13 @@ mod tests {
             (9000, 300, 1.0),
             (400, 300, 0.0),
             (400, 300, 9.0),
+            (4096, 300, 2.5),
+            (400, 8000, 1.5),
         ] {
             assert!(Size::new(w, h, dpr).is_err(), "{w}x{h}@{dpr}");
         }
         assert_eq!(Size::new(400, 300, 1.5).unwrap().px(400), 600);
+        assert!(Size::new(4096, 2160, 2.0).is_ok(), "8192 device px");
     }
 
     #[test]
@@ -424,18 +475,54 @@ mod tests {
     }
 
     #[test]
-    fn the_users_choice_holds_a_follow_back() {
+    fn a_follow_held_back_by_the_users_choice_is_kept_for_when_the_hold_ends() {
+        let mut inner = following_a();
+        inner.upsert_page(&page("b"));
+        inner.upsert_page(&page("c"));
+        let picked = Instant::now();
+        inner.user_activated = Some(picked);
+        assert_eq!(inner.follow_deadline(), None, "nothing kept yet");
+        assert!(!inner.request_follow("b"), "held");
+        assert!(!inner.request_follow("c"), "held");
+        assert_eq!(inner.follow_deadline(), Some(picked + FOLLOW_HOLD));
+        assert_eq!(inner.take_held_follow(), None, "the hold is not over");
+        inner.user_activated = picked.checked_sub(FOLLOW_HOLD);
+        assert_eq!(
+            inner.take_held_follow().as_deref(),
+            Some("c"),
+            "the newest report"
+        );
+        assert_eq!(inner.take_held_follow(), None, "once");
+        assert!(inner.request_follow("b"), "no hold: followed at once");
+    }
+
+    #[test]
+    fn a_page_that_appears_during_a_hold_is_kept_for_when_it_ends() {
+        let mut inner = following_a();
+        assert!(!inner.request_follow("c"), "not listed yet");
+        inner.user_activated = Some(Instant::now());
+        let (method, params) = created("c");
+        assert_eq!(inner.apply_target_event(method, &params), None, "held");
+        inner.user_activated = Instant::now().checked_sub(FOLLOW_HOLD);
+        assert_eq!(inner.take_held_follow().as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn a_closed_page_is_no_longer_waited_for() {
         let mut inner = following_a();
         inner.upsert_page(&page("b"));
         inner.user_activated = Some(Instant::now());
-        assert!(!inner.request_follow("b"), "held");
-        assert!(inner.pending_follow.is_none(), "and not kept for later");
-        inner.user_activated = Instant::now().checked_sub(FOLLOW_HOLD);
-        assert!(inner.request_follow("b"), "the hold is over");
-        // A page that shows up after the hold came back is held again.
-        assert!(!inner.request_follow("c"));
-        inner.user_activated = Some(Instant::now());
-        let (method, params) = created("c");
+        assert!(!inner.request_follow("b"));
+        assert!(inner.remove_page("b"));
+        assert!(!inner.remove_page("b"), "gone already");
+        assert_eq!(inner.follow_deadline(), None);
+        inner.user_activated = None;
+        assert!(!inner.request_follow("x"), "not listed yet");
+        assert!(
+            !inner.remove_page("x"),
+            "never listed, but no longer awaited"
+        );
+        let (method, params) = created("x");
         assert_eq!(inner.apply_target_event(method, &params), None);
     }
 

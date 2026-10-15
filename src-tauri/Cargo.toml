@@ -56,9 +56,9 @@ tauri-plugin-single-instance = "2"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Decode screenshot pixels in real-Chromium annotate regression tests.
+# Decode screenshot pixels in real-Chromium annotate regression tests
+# (`base64` comes from the normal dependencies).
 [dev-dependencies]
-base64 = "0.22"
 png = "0.18"
 
 [profile.release]

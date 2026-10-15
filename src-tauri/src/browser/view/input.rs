@@ -53,6 +53,17 @@ fn one_of(what: &str, value: &str, allowed: &[&str]) -> Result<(), String> {
 }
 
 impl InputEvent {
+    /// A mouse button release.
+    pub fn is_release(&self) -> bool {
+        matches!(self, Self::Mouse { r#type, .. } if r#type == "mouseReleased")
+    }
+
+    /// The user acting on the page (not just moving the pointer over it):
+    /// it holds the view on the page, as picking a tab does.
+    pub fn is_deliberate(&self) -> bool {
+        !matches!(self, Self::Mouse { r#type, .. } if r#type == "mouseMoved")
+    }
+
     /// The CDP method and params for this event; refuses values CDP has no
     /// meaning for.
     pub fn to_command(&self) -> Result<(&'static str, Value), String> {
@@ -182,5 +193,23 @@ mod tests {
             r#"{"kind":"key","type":"press","key":"a","code":"KeyA","text":null,"modifiers":0,"windowsVirtualKeyCode":65}"#,
         );
         assert!(bad_key.to_command().is_err());
+    }
+
+    #[test]
+    fn releases_and_deliberate_input_are_told_apart() {
+        let mouse = |kind: &str| {
+            parse(&format!(
+                r#"{{"kind":"mouse","type":"{kind}","x":0,"y":0,"button":"left","buttons":0,"clickCount":1,"modifiers":0}}"#
+            ))
+        };
+        assert!(mouse("mouseReleased").is_release());
+        assert!(!mouse("mousePressed").is_release());
+        assert!(mouse("mousePressed").is_deliberate());
+        assert!(
+            !mouse("mouseMoved").is_deliberate(),
+            "hovering is not acting"
+        );
+        let text = parse(r#"{"kind":"text","text":"a"}"#);
+        assert!(text.is_deliberate() && !text.is_release());
     }
 }

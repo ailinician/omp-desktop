@@ -2,11 +2,24 @@
 //! (`Target.attachToTarget { flatten: true }`, so one socket serves every
 //! page session), the page targets, and the screencast of the active one.
 //!
-//! Threads: the connection's reader runs [`view_events::handler`] (frames
-//! and quick bookkeeping only), a worker thread does everything that needs
-//! a CDP call in answer to an event, one thread emits frames and one sends
-//! input in order. Locks: `Core::inner` is never held across a CDP call;
+//! Threads: the connection's reader runs [`events::handler`] (frames and
+//! quick bookkeeping only), a worker thread does everything that needs a
+//! CDP call in answer to an event, one thread emits frames (flow-controlled
+//! by the webview's acks, see `frames.rs`) and one sends input in order.
+//! Locks: `Core::inner` is never held across a CDP call or a frame emit;
 //! `Core::switch` serialises target switches and viewport changes.
+
+mod core;
+mod emit;
+mod events;
+mod frames;
+mod input;
+mod model;
+mod switching;
+mod worker;
+
+#[cfg(test)]
+mod tests;
 
 use std::sync::mpsc::{self, Sender, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -14,18 +27,42 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use self::events::{Event, InputItem};
 use super::annotate::CapturedImage;
 use super::cdp::{browser_ws_url, CdpClient};
-use super::emit::{BrowserEmit, Rect, Status};
 use super::lock;
-use super::view_core::Core;
-use super::view_events::{self, Event, InputItem};
-pub use super::view_input::InputEvent;
-use super::view_model::Size;
+
+pub(in crate::browser) use self::core::Core;
+pub(in crate::browser) use emit::{BrowserEmit, Pick, Rect, Status, TauriBrowserEmit, ViewState};
+#[cfg(test)]
+pub(in crate::browser) use emit::{Frame, TabInfo};
+pub use input::InputEvent;
+pub(in crate::browser) use model::Size;
 
 const MAX_URL_LEN: usize = 8192;
 /// Input events waiting for the page; a hung page drops the rest.
 const INPUT_QUEUE: usize = 512;
+
+/// What the panel may load: the web, inline documents and a blank page
+/// (what the address field's `normalizeUrl` makes); never `javascript:`,
+/// `file:`, `chrome:` or other schemes that would act on the browser.
+fn checked_url(url: &str) -> Result<&str, String> {
+    let url = url.trim();
+    if url.is_empty() || url.len() > MAX_URL_LEN || url.chars().any(char::is_control) {
+        return Err("invalid url".into());
+    }
+    let starts = |prefix: &str| {
+        url.get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    };
+    if ["http://", "https://", "data:"].into_iter().any(starts)
+        || url.eq_ignore_ascii_case("about:blank")
+    {
+        Ok(url)
+    } else {
+        Err("unsupported url scheme".into())
+    }
+}
 
 /// The panel's session on one tab's Chromium.
 pub struct View {
@@ -40,13 +77,13 @@ impl View {
         let url = browser_ws_url(port)?;
         let core = Arc::new(Core::new(sid, emit));
         let (events, queue) = mpsc::channel();
-        let handler = view_events::handler(Arc::downgrade(&core), events.clone()); // the view keeps one sender for `Barrier` and `Stop`
+        let handler = events::handler(Arc::downgrade(&core), events.clone()); // the view keeps one sender for `Barrier` and `Stop`
         let client = CdpClient::connect(&url, handler)?;
         if core.client.set(client).is_err() {
             return Err("cdp client already set".into());
         }
         let (input, input_queue) = mpsc::sync_channel(INPUT_QUEUE);
-        view_events::spawn(&core, queue, input_queue)?;
+        events::spawn(&core, queue, input_queue)?;
         Ok(Self {
             core,
             events,
@@ -57,15 +94,13 @@ impl View {
     /// Discover the pages, show the one the agent last worked in if it is
     /// still there (`start_on`) or else the newest (a blank one when there is
     /// none), and start following the agent.
-    pub fn open(
+    pub(in crate::browser) fn open(
         &self,
-        width: u32,
-        height: u32,
-        dpr: f64,
+        size: Size,
         start_on: Option<&str>,
     ) -> Result<(), String> {
         let core = &self.core;
-        lock(&core.inner).size = Size::new(width, height, dpr)?;
+        lock(&core.inner).size = size;
         core.call(
             None,
             "Target.setDiscoverTargets",
@@ -82,7 +117,7 @@ impl View {
             }
             // Owned: the lock must not span the switch.
             let first = start_on
-                .filter(|t| inner.pages.iter().any(|p| p.target_id == *t))
+                .filter(|t| inner.is_listed(t))
                 .map(str::to_owned)
                 .or_else(|| inner.pages.last().map(|p| p.target_id.clone()));
             drop(inner);
@@ -90,7 +125,7 @@ impl View {
         };
         let target = match first {
             Some(target) => target,
-            None => self.create_page("about:blank")?,
+            None => self.create_page()?,
         };
         core.update_state(|s| s.status = Status::Running);
         core.switch_to(&target)?;
@@ -99,10 +134,10 @@ impl View {
     }
 
     /// The agent worked in page `target`: the view switches to it unless the
-    /// user picked a tab a moment ago, or when it appears if it is not
-    /// listed yet. Callers are proxy threads: this only records the page in
-    /// the follow slot (a newer report replaces an older one the worker has
-    /// not taken) and wakes the worker if no wake-up is queued.
+    /// user acted a moment ago (then when the hold ends), or when it appears
+    /// if it is not listed yet. Callers are proxy threads: this only records
+    /// the page in the follow slot (a newer report replaces an older one the
+    /// worker has not taken) and wakes the worker if no wake-up is queued.
     pub fn follow_agent(&self, target: &str) {
         if self.core.follow.put(target) {
             let _ = self.events.send(Event::Follow);
@@ -119,15 +154,21 @@ impl View {
             .map_err(|_| "browser view did not answer".to_owned())
     }
 
+    /// The webview painted or dropped frame `seq`: the next one may follow.
+    pub fn frame_ack(&self, seq: u64) {
+        self.core.frame_ack(seq);
+    }
+
     /// Turn annotate mode on or off (for this view's pages, shown now and
     /// later); a closed view has it off.
     pub fn annotate(&self, on: bool) -> Result<(), String> {
         self.core.set_annotate(on)
     }
 
-    /// A PNG of `rect` (viewport-relative CSS pixels of the page shown).
-    pub fn capture(&self, rect: &Rect) -> Result<CapturedImage, String> {
-        self.core.capture(rect)
+    /// A PNG of `doc_rect`, the pick's document rect (CSS pixels) on the
+    /// page shown.
+    pub fn capture(&self, doc_rect: &Rect) -> Result<CapturedImage, String> {
+        self.core.capture(doc_rect)
     }
 
     /// Scroll the shown page so that the absolute document `rect` is visible.
@@ -142,7 +183,10 @@ impl View {
         if !core.mark_closed() {
             return;
         }
-        core.update_state(|s| s.status = Status::Idle);
+        core.update_state(|s| {
+            s.status = Status::Idle;
+            s.annotate = false;
+        });
         if let (Some(client), Ok(session)) = (core.client.get(), core.active_session()) {
             core.release_overlay(&session); // the page keeps running: no overlay left in it
                                             // No waiting: the connection ends right after, which detaches the
@@ -171,22 +215,22 @@ impl View {
         session.map_or(Ok(()), |session| self.core.resize_to(&session, size))
     }
 
+    /// Load `url` in the shown page. Returns once sent: `Page.navigate`
+    /// answers only when the navigation commits, which a slow server can
+    /// delay past any timeout; progress and failure arrive as the state's
+    /// `loading` and `error`.
     pub fn navigate(&self, url: &str) -> Result<(), String> {
-        let url = url.trim();
-        if url.is_empty() || url.len() > MAX_URL_LEN || url.chars().any(char::is_control) {
-            return Err("invalid url".into());
-        }
-        let result = self
-            .core
-            .call_active("Page.navigate", json!({ "url": url }))?;
-        result["errorText"]
-            .as_str()
-            .map_or(Ok(()), |error| Err(error.to_owned()))
+        let url = checked_url(url)?;
+        let session = self.core.active_session()?;
+        let client = self.core.client.get().ok_or("cdp not connected")?;
+        self.core.stamp_user_activation(); // the user chose this page
+        client.post(Some(&session), "Page.navigate", json!({ "url": url }))
     }
 
     /// Go `delta` entries back (negative) or forward; out of range does
     /// nothing.
     pub fn history(&self, delta: i32) -> Result<(), String> {
+        self.core.stamp_user_activation();
         let history = self
             .core
             .call_active("Page.getNavigationHistory", json!({}))?;
@@ -204,53 +248,63 @@ impl View {
             .map(drop)
     }
 
-    fn create_page(&self, url: &str) -> Result<String, String> {
-        let created = self
-            .core
-            .call(None, "Target.createTarget", json!({ "url": url }))?;
+    /// A new blank page, listed at once.
+    fn create_page(&self) -> Result<String, String> {
+        let created =
+            self.core
+                .call(None, "Target.createTarget", json!({ "url": "about:blank" }))?;
         let target = created["targetId"]
             .as_str()
             .ok_or("createTarget returned no target")?
             .to_owned();
-        lock(&self.core.inner).upsert_page(&json!({ "targetId": target, "url": url }));
+        lock(&self.core.inner).upsert_page(&json!({ "targetId": target, "url": "about:blank" }));
         Ok(target)
     }
 
-    /// Open a tab and show it.
-    pub fn tab_new(&self, url: Option<&str>) -> Result<(), String> {
+    /// Open a blank tab and show it.
+    pub fn tab_new(&self) -> Result<(), String> {
         self.core.stamp_user_activation(); // the new page is the user's choice, not the agent's
-        let target = self.create_page(url.map_or("about:blank", str::trim))?;
+        let target = self.create_page()?;
         self.core.switch_to(&target)
     }
 
-    /// Close a tab; the last one is replaced by a blank page.
+    /// Close one of the listed tabs; the last one is replaced by a blank
+    /// page.
     pub fn tab_close(&self, target_id: &str) -> Result<(), String> {
+        self.core.require_tab(target_id)?;
         self.core.stamp_user_activation();
         let only = lock(&self.core.inner).pages.len() <= 1;
         if only {
-            self.create_page("about:blank")?;
+            self.create_page()?;
         }
         self.core
             .call(None, "Target.closeTarget", json!({ "targetId": target_id }))
             .map(drop)
     }
 
+    /// Show one of the listed tabs.
     pub fn tab_activate(&self, target_id: &str) -> Result<(), String> {
+        self.core.require_tab(target_id)?;
         self.core.stamp_user_activation();
         self.core.switch_to(target_id)
     }
 
     /// Queue an input event for the page shown now; events are sent in
     /// order, and one still queued when another page is shown is dropped,
-    /// not sent to that page.
+    /// not sent to that page. Acting on the page (anything but moving the
+    /// pointer) holds the view there, as picking a tab does.
     pub fn input(&self, event: &InputEvent) -> Result<(), String> {
         let (method, params) = event.to_command()?;
+        if event.is_deliberate() {
+            self.core.stamp_user_activation();
+        }
         let (session, generation) = self.core.activation()?;
         let item = InputItem {
             session,
             generation,
             method,
             params,
+            release: event.is_release(),
         };
         self.input.try_send(item).map_err(|e| match e {
             TrySendError::Full(_) => "browser is busy".to_owned(),
@@ -260,36 +314,15 @@ impl View {
 
     /// `Runtime.evaluate` of `expression` in the active page.
     #[cfg(test)]
-    pub(super) fn evaluate_for_test(&self, expression: &str) -> Result<serde_json::Value, String> {
+    pub(in crate::browser) fn evaluate_for_test(
+        &self,
+        expression: &str,
+    ) -> Result<serde_json::Value, String> {
         let result = self.core.call_active(
             "Runtime.evaluate",
             json!({ "expression": expression, "returnByValue": true }),
         )?;
         Ok(result["result"]["value"].clone())
-    }
-
-    /// Keeps the input sender from sending while the guard lives.
-    #[cfg(test)]
-    pub(super) fn pause_input_for_test(&self) -> std::sync::MutexGuard<'_, ()> {
-        lock(&self.core.input_gate)
-    }
-
-    /// Shorten (or lengthen) how long a tab the user picked is kept.
-    #[cfg(test)]
-    pub(super) fn set_follow_hold_for_test(&self, hold: Duration) {
-        lock(&self.core.inner).follow_hold = hold;
-    }
-
-    /// Keeps the worker from taking a follow report while the guard lives.
-    #[cfg(test)]
-    pub(super) fn pause_follow_for_test(&self) -> std::sync::MutexGuard<'_, ()> {
-        lock(&self.core.follow_gate)
-    }
-
-    /// How many pages the view has shown so far.
-    #[cfg(test)]
-    pub(super) fn activations_for_test(&self) -> u64 {
-        lock(&self.core.inner).activations()
     }
 }
 

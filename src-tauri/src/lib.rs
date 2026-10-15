@@ -77,9 +77,6 @@ struct StartSessionArgs {
     /// Which omp profile this tab runs under (`None`/`"default"` = omp's own
     /// `~/.omp/agent` tree); resolved by `profiles::ProfileStore::resolve`.
     profile: Option<String>,
-    /// The user's Chromium choice for the browser panel (`browserPath` tweak);
-    /// `None` or empty = find one automatically (`browser::locate`).
-    browser_path: Option<String>,
 }
 
 /// Register the tab with the terminal, start an omp process for it, then
@@ -115,16 +112,13 @@ fn start_session(
         .resolve(cwd_opt.map(Path::new));
     terminal.register_tab(&args.session_id, cwd_opt.map(Path::new));
     // The tab's browser (idempotent: a respawn under the same tab id reuses
-    // it). Without one the session starts without `--config` and omp falls
-    // back to its own browser.
-    let browser_pref = args
-        .browser_path
-        .as_deref()
-        .filter(|p| !p.is_empty())
-        .map(Path::new);
+    // it). Which Chromium it runs is Rust's `browser.json` setting, read at
+    // launch time. Without one the session starts without `--config` and omp
+    // falls back to its own browser (logged: a respawn racing the tab's
+    // close lands here with "still closing").
     let overlay = app
         .state::<browser::BrowserManager>()
-        .allocate(&args.session_id, browser_pref)
+        .allocate(&args.session_id)
         .map_err(|e| {
             eprintln!(
                 "[omp-desktop] browser unavailable for {}: {e}",
@@ -502,29 +496,79 @@ async fn terminal_pick_shell(
     window: tauri::WebviewWindow,
     terminal: State<'_, Arc<terminal::TerminalManager>>,
 ) -> Result<Option<terminal::TerminalSettings>, String> {
+    let picked = pick_program(&window, "Choose a Shell");
+    with_blocking(&terminal, move |t| {
+        picked_program(&picked)?.map_or(Ok(None), |path| t.set_shell(&path).map(Some))
+    })
+    .await
+}
+
+/// Open the native "pick a program" dialog over `window` (`.exe` only on
+/// Windows); the receiver yields the choice, `None` when cancelled.
+fn pick_program(
+    window: &tauri::WebviewWindow,
+    title: &str,
+) -> std::sync::mpsc::Receiver<Option<tauri_plugin_dialog::FilePath>> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = std::sync::mpsc::channel();
-    let dialog = window
-        .dialog()
-        .file()
-        .set_title("Choose a Shell")
-        .set_parent(&window);
+    let dialog = window.dialog().file().set_title(title).set_parent(window);
     #[cfg(windows)]
     let dialog = dialog.add_filter("Programs", &["exe"]);
     dialog.pick_file(move |result| {
         let _ = tx.send(result);
     });
-    with_blocking(&terminal, move |t| {
-        let Some(picked) = rx.recv().map_err(|e| format!("channel error: {e}"))? else {
-            return Ok(None);
-        };
-        let path = picked
-            .into_path()
-            .map_err(|e| format!("invalid picked path: {e}"))?;
-        let path = path
-            .to_str()
-            .ok_or_else(|| format!("{} is not a UTF-8 path", path.display()))?;
-        t.set_shell(path).map(Some)
+    rx
+}
+
+/// Wait (blocking) for [`pick_program`]'s answer: the picked path as UTF-8,
+/// `None` when the dialog was cancelled.
+fn picked_program(
+    picked: &std::sync::mpsc::Receiver<Option<tauri_plugin_dialog::FilePath>>,
+) -> Result<Option<String>, String> {
+    let Some(picked) = picked.recv().map_err(|e| format!("channel error: {e}"))? else {
+        return Ok(None);
+    };
+    let path = picked
+        .into_path()
+        .map_err(|e| format!("invalid picked path: {e}"))?;
+    path.into_os_string()
+        .into_string()
+        .map(Some)
+        .map_err(|p| format!("{} is not a UTF-8 path", p.to_string_lossy()))
+}
+
+/// The browser panel's Chromium setting, what automatic discovery finds and
+/// whether the stored browser still works. `spawn_blocking`: discovery
+/// checks files.
+#[tauri::command]
+async fn browser_settings(
+    settings: State<'_, Arc<browser::SettingsStore>>,
+) -> Result<browser::BrowserSettings, String> {
+    with_blocking(&settings, |s| Ok(s.settings())).await
+}
+
+/// Store the Chromium setting (empty = automatic, else an absolute path to
+/// an executable file; surrounding quotes are dropped) in `browser.json`;
+/// the next launch uses it.
+#[tauri::command]
+async fn browser_set_path(
+    path: String,
+    settings: State<'_, Arc<browser::SettingsStore>>,
+) -> Result<browser::BrowserSettings, String> {
+    with_blocking(&settings, move |s| s.set_path(&path)).await
+}
+
+/// "other…" in the browser menu: pick a program with the native file dialog
+/// and store it as `browser_set_path` would; `None` when cancelled. The path
+/// comes from the OS dialog, never from the webview.
+#[tauri::command]
+async fn browser_pick_path(
+    window: tauri::WebviewWindow,
+    settings: State<'_, Arc<browser::SettingsStore>>,
+) -> Result<Option<browser::BrowserSettings>, String> {
+    let picked = pick_program(&window, "Choose a Browser");
+    with_blocking(&settings, move |s| {
+        picked_program(&picked)?.map_or(Ok(None), |path| s.set_path(&path).map(Some))
     })
     .await
 }
@@ -1229,6 +1273,19 @@ fn setup(app: &tauri::App) {
             .as_deref()
             .map(|dir| dir.join("approval-mode.json")),
     )));
+    // The browser panel's Chromium setting: <app_config_dir>/browser.json.
+    // No temp-dir fallback: another account could plant the browser this one
+    // runs; without a config dir the setting stays in memory. An
+    // unresolvable home only loses omp's Chrome-for-Testing candidates.
+    let browser_store = Arc::new(browser::SettingsStore::load(
+        resolved_config_dir
+            .as_deref()
+            .map(|dir| dir.join("browser.json")),
+        app.path()
+            .home_dir()
+            .unwrap_or_else(|_| std::env::temp_dir()),
+    ));
+    app.manage(Arc::clone(&browser_store));
     // Falls back to the temp dir if the config dir can't be resolved
     // (e.g. a locked-down test environment) rather than failing
     // startup — approval grants and profiles just won't survive a
@@ -1237,22 +1294,30 @@ fn setup(app: &tauri::App) {
     // Per-tab headless Chromium + the overlay omp reads its `cdpUrl` from.
     // It lives under the per-user app cache dir (user-owned, unlike a shared
     // temp dir); without one the manager is unavailable and sessions start
-    // without a managed browser. An unresolvable home only loses the
-    // Chrome-for-Testing candidates, not the installed browsers.
-    let browser_home = app
-        .path()
-        .home_dir()
-        .unwrap_or_else(|_| std::env::temp_dir());
+    // without a managed browser.
     let browser = app
         .path()
         .app_cache_dir()
         .map_err(|e| format!("no app cache dir: {e}"))
-        .and_then(|dir| browser::BrowserManager::new(dir.join("browser"), browser_home))
+        .and_then(|dir| browser::BrowserManager::new(&dir.join("browser"), browser_store))
         .unwrap_or_else(|reason| {
             eprintln!("[omp-desktop] managed browser disabled: {reason}");
             browser::BrowserManager::unavailable(reason)
         });
     app.manage(browser);
+    // What crashed earlier runs left under the browser root: reaping their
+    // browsers can take seconds, so not on the main thread.
+    let pruner = app.handle().clone(); // the thread owns its handle
+    let pruning = std::thread::Builder::new()
+        .name("browser-prune".into())
+        .spawn(move || {
+            pruner
+                .state::<browser::BrowserManager>()
+                .prune_stale_instances();
+        });
+    if let Err(e) = pruning {
+        eprintln!("[omp-desktop] browser leftovers not pruned: {e}");
+    }
     // Approval-rule store: project-scoped grants persist under
     // <app_config_dir>/approval-rules/<project-hash>.json.
     app.manage(Arc::new(RuleBook::new(config_dir.join("approval-rules"))));
@@ -1364,6 +1429,9 @@ pub fn run() {
             terminal_settings,
             terminal_set_shell,
             terminal_pick_shell,
+            browser_settings,
+            browser_set_path,
+            browser_pick_path,
             close_tab,
             close_all_tabs,
             browser::commands::browser_open_panel,
@@ -1375,6 +1443,7 @@ pub fn run() {
             browser::commands::browser_tab_close,
             browser::commands::browser_tab_activate,
             browser::commands::browser_input,
+            browser::commands::browser_frame_ack,
             browser::commands::browser_annotate,
             browser::commands::browser_capture,
             browser::commands::browser_scroll_to,
@@ -1467,14 +1536,12 @@ mod tests {
             "cwd": "/home/dev/project",
             "resume": null,
             "profile": "work",
-            "browserPath": "/opt/chromium/chrome",
         });
         let args: StartSessionArgs = serde_json::from_value(payload).expect("deserialize");
         assert_eq!(args.session_id, "session-1");
         assert_eq!(args.cwd, "/home/dev/project");
         assert_eq!(args.resume, None);
         assert_eq!(args.profile.as_deref(), Some("work"));
-        assert_eq!(args.browser_path.as_deref(), Some("/opt/chromium/chrome"));
     }
 
     /// The contract `deny_unknown_fields` exists for (see the attribute's
@@ -1490,7 +1557,6 @@ mod tests {
             "cwd": "/home/dev/project",
             "resume": null,
             "profileId": "work",
-            "browserPath": null,
         });
         assert!(
             serde_json::from_value::<StartSessionArgs>(payload).is_err(),

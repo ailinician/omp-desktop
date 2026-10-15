@@ -105,11 +105,12 @@ impl SettingsStore {
         }
     }
 
-    /// Store `shell` (trimmed; empty = the default) after checking it is an
-    /// absolute path to an executable file, and return the new settings.
-    /// Refuses to replace a file it cannot read. Blocking file I/O.
+    /// Store `shell` ([`shell::typed_path`]: trimmed, one pair of surrounding
+    /// quotes dropped; empty = the default) after checking it is an absolute
+    /// path to an executable file, and return the new settings. Refuses to
+    /// replace a file it cannot read. Blocking file I/O.
     pub fn set_shell(&self, shell: &str) -> Result<TerminalSettings, String> {
-        let shell = shell.trim();
+        let shell = shell::typed_path(shell);
         if !shell.is_empty() {
             shell::validate_shell(shell)?;
         }

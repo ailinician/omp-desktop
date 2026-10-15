@@ -326,6 +326,38 @@
     return isLeadingCommand(cmds, text) || invokesSkill(cmds, text);
   }
 
+  // Where a composer submit goes: `{ isCmd, via }`, `via` one of
+  //   "goal"     goal mode starts a goal with it (never a command)
+  //   "followUp" the follow-up chord queues it
+  //   "steer"    a turn is running
+  //   "prompt"   idle and connected
+  //   "local"    no connection: the draft is kept as a local bubble
+  // `text` is the typed draft, classified *before* browser annotations
+  // (page data) merge in, so a page can never turn a message into a
+  // command; a command carries no annotations (they wait for the next
+  // message), so `isCmd` also says whether chips ride along.
+  function routeSubmit(cmds, text, { goalMode = false, followUp = false, streaming = false, connected = false } = {}) {
+    const isCmd = isCommandInvocation(cmds, text);
+    let via;
+    if (goalMode && !isCmd) via = "goal";
+    else if (followUp) via = "followUp";
+    else if (streaming) via = "steer";
+    else if (connected) via = "prompt";
+    else via = "local";
+    return { isCmd, via };
+  }
+
+  // The RPC frame of a steer / follow-up (`kind` "steer" | "followUp"). A
+  // command goes as a `prompt` with omp's `streamingBehavior`: the
+  // dedicated `steer` / `follow_up` frames skip command and skill dispatch,
+  // so it would reach the model as literal text. Every frame is a literal
+  // `{ type: "…" }`: agent/mod.rs checks them against ALLOWED_COMMAND_TYPES.
+  function queuedFrame(kind, text, images, isCmd) {
+    if (isCmd) return { type: "prompt", message: text, images, streamingBehavior: kind };
+    if (kind === "steer") return { type: "steer", message: text, images };
+    return { type: "follow_up", message: text, images };
+  }
+
   window.OMP_SLASH = {
     LOCAL_COMMANDS,
     isDesktop,
@@ -337,5 +369,7 @@
     matchesQuery,
     insertText,
     isCommandInvocation,
+    routeSubmit,
+    queuedFrame,
   };
 })();

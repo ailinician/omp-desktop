@@ -1,5 +1,8 @@
 /* browser-toolbar.jsx — the browser panel's tab strip and control bar
-   (browser-panel.jsx renders it). `ui` is app/use-browser.jsx's result. */
+   (browser-panel.jsx renders it). `ui` is app/use-browser.jsx's result.
+   Page tabs wear the project tab bar's look (`.tab`, `.tab-name`,
+   `.tab-close`, `.tab-add`; layout/chrome.css), sized down for the panel in
+   layout/browser.css. The name is a button so the keyboard reaches it. */
 
 const { Icon: _BT_Icon, OMP_BROWSER: _BT } = window;
 
@@ -7,18 +10,21 @@ function BrowserTabs({ ui }) {
   return (
     <div className="browser-tabs">
       <div className="browser-tabs-scroll">
-        {ui.tabs.map((t) => (
-          <div key={t.targetId} className={`browser-tab${t.active ? " active" : ""}`} title={t.url}>
-            <button className="browser-tab-title" onClick={() => ui.activateTab(t.targetId)}>
-              {t.title || t.url || "new tab"}
-            </button>
-            <button className="browser-tab-close" aria-label="close tab" onClick={() => ui.closeTab(t.targetId)}>
-              <_BT_Icon name="close" size={9} />
-            </button>
-          </div>
-        ))}
+        {ui.tabs.map((t) => {
+          const name = t.title || t.url || "new tab";
+          return (
+            <div key={t.targetId} className={`tab${t.active ? " active" : ""}`} title={t.url || name}
+              onClick={() => ui.activateTab(t.targetId)}>
+              <button type="button" className="tab-name" aria-current={t.active ? "page" : undefined}>{name}</button>
+              <button type="button" className="tab-close" aria-label={`close ${name}`}
+                onClick={(e) => { e.stopPropagation(); ui.closeTab(t.targetId); }}>
+                <_BT_Icon name="close" size={9} />
+              </button>
+            </div>
+          );
+        })}
       </div>
-      <button className="btn icon ghost" title="new tab" aria-label="new tab" onClick={() => ui.newTab()}>
+      <button type="button" className="tab-add" title="new tab" aria-label="new tab" onClick={() => ui.newTab()}>
         <_BT_Icon name="plus" size={11} />
       </button>
     </div>

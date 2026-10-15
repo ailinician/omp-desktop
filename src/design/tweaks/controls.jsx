@@ -113,13 +113,11 @@ function TweakSelect({ label, value, options, onChange }) {
   );
 }
 
-// `onBlur` fires when the field loses focus (apply-on-leave settings); `note`
-// is a short right-aligned remark beside the label.
-function TweakText({ label, value, placeholder, onChange, onBlur, note }) {
+function TweakText({ label, value, placeholder, onChange }) {
   return (
-    <_TC_TweakRow label={label} value={note}>
+    <_TC_TweakRow label={label}>
       <input className="twk-field" type="text" value={value} placeholder={placeholder}
-             onChange={(e) => onChange(e.target.value)} onBlur={onBlur} />
+             onChange={(e) => onChange(e.target.value)} />
     </_TC_TweakRow>
   );
 }

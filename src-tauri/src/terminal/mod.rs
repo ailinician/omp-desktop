@@ -53,6 +53,8 @@ use base64::Engine;
 
 pub use pump::Emit;
 pub use settings::TerminalSettings;
+/// Shared with the browser's Chromium setting (`browser/process/settings.rs`).
+pub use shell::{is_executable_file, typed_path};
 pub use wire::{ReplayWire, TauriEmit, TerminalState, TerminalStatus};
 
 use pty::Pty;

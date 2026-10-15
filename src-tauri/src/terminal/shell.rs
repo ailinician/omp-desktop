@@ -29,7 +29,7 @@ pub fn resolve_shell_with(
     preference: &str,
     default: impl FnOnce() -> PathBuf,
 ) -> Result<(PathBuf, Vec<String>), String> {
-    let preference = preference.trim();
+    let preference = typed_path(preference);
     let shell = if preference.is_empty() {
         default()
     } else {
@@ -92,9 +92,20 @@ pub fn default_shell() -> PathBuf {
     PathBuf::from(CommandBuilder::new_default_prog().get_shell())
 }
 
+/// A path setting as the user typed or pasted it: trimmed, and without one
+/// pair of surrounding double quotes (Windows Explorer's "Copy as path"
+/// adds them). Empty means "unset".
+pub fn typed_path(input: &str) -> &str {
+    let input = input.trim();
+    input
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .map_or(input, str::trim)
+}
+
 /// An absolute path to an executable file (unix: any execute bit; Windows:
-/// any file). What a shell setting must be.
-pub(super) fn is_executable_file(path: &Path) -> bool {
+/// any file). What a shell or browser setting must be.
+pub fn is_executable_file(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -221,6 +232,29 @@ mod tests {
         ] {
             assert!(resolve_shell_with(bad, default).is_err(), "{bad}");
         }
+    }
+
+    /// Windows Explorer's "Copy as path" quotes the path; one surrounding
+    /// pair is dropped, inner or unbalanced quotes stay.
+    #[test]
+    fn a_typed_path_loses_whitespace_and_one_pair_of_quotes() {
+        for (typed, expected) in [
+            ("  /usr/bin/fish ", "/usr/bin/fish"),
+            (
+                r#""C:\Program Files\Git\bin\bash.exe""#,
+                r"C:\Program Files\Git\bin\bash.exe",
+            ),
+            (r#" " /x " "#, "/x"),
+            (r#""/x"#, r#""/x"#),
+            (r#"/a"b"#, r#"/a"b"#),
+            (r#""""#, ""),
+            ("", ""),
+        ] {
+            assert_eq!(typed_path(typed), expected, "{typed:?}");
+        }
+        let exe = std::env::current_exe().unwrap();
+        let quoted = format!("\"{}\"", exe.display());
+        assert_eq!(resolve_shell_with(&quoted, PathBuf::new).unwrap().0, exe);
     }
 
     /// The default comes from `portable-pty` in-process: an absolute path

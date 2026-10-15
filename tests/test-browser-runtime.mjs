@@ -1,95 +1,278 @@
+#!/usr/bin/env node
+// Runtime regression for the browser panel's DOM side (app/browser-screen.js)
+// and its hook (app/use-browser.jsx) against minimal stubs: frame decode,
+// paint and acks, the pixel-ratio watch, input routing through the focus
+// sink, and the open/close effect's queued resize / URL across tab switches.
+// The hook runs under a small effect-running React stand-in, so nothing
+// here depends on the order of its hook calls.
+// Run: node tests/test-browser-runtime.mjs
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 
 const source = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
-const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
-const target = () => ({ addEventListener() {}, removeEventListener() {} });
+const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+// Objects the modules build live in the vm's realm (other prototypes), which
+// strict deep equality refuses; compare their plain-data copy instead.
+const own = (v) => JSON.parse(JSON.stringify(v));
 
-test("screen schedules resize paint, publishes painted geometry, and releases bitmap", async () => {
-  const frames = new Map();
-  const painted = [];
-  const pages = [];
+/** An EventTarget stand-in: `fire(type, ev)` runs the listeners, returns `ev`. */
+function node(extra = {}) {
+  const on = new Map();
+  return {
+    ...extra,
+    addEventListener(type, fn) { if (!on.has(type)) on.set(type, new Set()); on.get(type).add(fn); },
+    removeEventListener(type, fn) { on.get(type)?.delete(fn); },
+    listeners: (type) => on.get(type)?.size ?? 0,
+    fire(type, ev = {}) {
+      ev.defaultPrevented ??= false;
+      ev.preventDefault = () => { ev.defaultPrevented = true; };
+      for (const fn of [...(on.get(type) ?? [])]) fn(ev);
+      return ev;
+    },
+  };
+}
+
+/** The real browser.js + image-attach.js on `window`, as index.html loads them. */
+function loadHelpers(window) {
+  runInNewContext(source("src/app/image-attach.js"), { window, atob, Uint8Array });
+  runInNewContext(source("src/app/browser.js"), { window, URL });
+}
+
+function screenHarness({ bypass = () => false, escape = () => null } = {}) {
+  const frames = new Map(); // rAF id → callback
+  const timers = [];
+  const queries = [];
   let next = 0;
   let observe;
-  let closed = 0;
-  const bitmap = { close: () => { closed++; } };
-  const window = { ...target(), OMP_BROWSER: {}, devicePixelRatio: 2 };
+  const window = {
+    ...node(), devicePixelRatio: 2,
+    OMP_KEYMAP: { guestShouldBypass: (e) => bypass(e) },
+    matchMedia: (q) => { const m = node({ media: q }); queries.push(m); return m; },
+  };
+  loadHelpers(window);
+  const bitmaps = [];
+  const decode = { fail: false };
   runInNewContext(source("src/app/browser-screen.js"), {
-    window, Blob, atob, Uint8Array,
-    createImageBitmap: async () => bitmap,
+    window, Blob,
+    createImageBitmap: async () => {
+      if (decode.fail) throw new Error("bad jpeg");
+      const bmp = { closed: false, close() { this.closed = true; } };
+      bitmaps.push(bmp);
+      return bmp;
+    },
     requestAnimationFrame: (fn) => { frames.set(++next, fn); return next; },
     cancelAnimationFrame: (id) => frames.delete(id),
-    ResizeObserver: class {
-      constructor(fn) { observe = fn; }
-      observe() {}
-      disconnect() {}
-    },
-    setTimeout: () => 1, clearTimeout() {},
+    ResizeObserver: class { constructor(fn) { observe = fn; } observe() {} disconnect() {} },
+    setTimeout: (fn) => { timers.push(fn); return timers.length; },
+    clearTimeout() {},
   });
+  const painted = [];
+  const sent = [];
+  const acks = [];
+  const resized = [];
+  const pages = [];
+  const escapes = [];
   const canvas = { width: 0, height: 0, getContext: () => ({ drawImage: (...args) => painted.push(args) }) };
-  const view = { ...target(), getBoundingClientRect: () => ({ width: 400, height: 300 }) };
-  const screen = window.OMP_BROWSER_SCREEN.createScreen({
-    view, canvas, send() {}, onResize() {}, onPage: (page) => pages.push(page), swallowKey: () => false,
+  const panel = node();
+  const size = { width: 400, height: 300 };
+  const view = node({
+    getBoundingClientRect: () => ({ left: 0, top: 0, ...size }),
+    closest: (sel) => (sel === ".browser-panel" ? panel : null),
   });
-  observe();
-  assert.equal(frames.size, 1, "resize schedules paint");
-  for (const [id, paint] of frames) { frames.delete(id); paint(); }
-  assert.equal(canvas.width, 800);
-  assert.equal(canvas.height, 600);
-  screen.frame({ b64: "AA==", cssW: 400, cssH: 300 });
+  const sink = node({ value: "", focused: 0, focus() { this.focused++; } });
+  const screen = window.OMP_BROWSER_SCREEN.createScreen({
+    view, canvas, sink,
+    send: (ev) => sent.push(ev),
+    ack: (seq) => acks.push(seq),
+    onResize: (...args) => resized.push(args),
+    onPage: (page) => pages.push(page),
+    escape,
+    onEscape: (action) => escapes.push(action),
+  });
+  const paintAll = () => { for (const [id, paint] of [...frames]) { frames.delete(id); paint(); } };
+  const runTimers = () => { for (const fn of timers.splice(0)) fn(); };
+  return {
+    window, screen, canvas, view, sink, panel, size, bitmaps, decode, painted, sent, acks, resized, pages, escapes,
+    queries, frames, paintAll, runTimers, observe: () => observe(),
+  };
+}
+
+test("screen paints the newest frame, publishes painted geometry and acks every frame once", async () => {
+  const h = screenHarness();
+  h.observe();
+  assert.equal(h.frames.size, 1, "resize schedules paint");
+  h.paintAll();
+  assert.equal(h.canvas.width, 800);
+  assert.equal(h.canvas.height, 600);
+  h.screen.frame({ b64: "AA==", cssW: 400, cssH: 300, seq: 1 });
   await flush();
-  assert.equal(pages.length, 0, "unpainted geometry stays unpublished");
-  assert.equal(frames.size, 1, "decoded bitmap schedules another paint");
-  for (const [id, paint] of frames) { frames.delete(id); paint(); }
-  assert.deepEqual(painted, [[bitmap, 0, 0, 800, 600]]);
-  assert.equal(pages[0].cssW, 400);
-  assert.equal(pages[0].cssH, 300);
-  screen.destroy();
-  assert.equal(closed, 1);
-  assert.equal(frames.size, 0);
+  assert.equal(h.pages.length, 0, "unpainted geometry stays unpublished");
+  assert.deepEqual(h.acks, [], "no ack before the paint");
+  h.paintAll();
+  assert.deepEqual(h.painted, [[h.bitmaps[0], 0, 0, 800, 600]]);
+  assert.deepEqual(own(h.pages), [{ cssW: 400, cssH: 300 }]);
+  assert.deepEqual(h.acks, [1], "acked after the paint");
+  // Two frames before a decode finishes: the superseded one is acked as
+  // dropped, the newest after its paint.
+  h.screen.frame({ b64: "AA==", cssW: 400, cssH: 300, seq: 2 });
+  h.screen.frame({ b64: "AA==", cssW: 400, cssH: 300, seq: 3 });
+  await flush();
+  h.paintAll();
+  assert.deepEqual(h.acks, [1, 2, 3]);
+  // An undecodable frame is dropped and acked, so the stream goes on.
+  h.decode.fail = true;
+  h.screen.frame({ b64: "AA==", cssW: 400, cssH: 300, seq: 4 });
+  await flush();
+  assert.deepEqual(h.acks, [1, 2, 3, 4]);
+  h.screen.destroy();
+  assert.ok(h.bitmaps.every((b) => b.closed), "every bitmap released");
+  assert.equal(h.frames.size, 0);
 });
 
-test("stale open completion cannot release newer effect's queued resize and URL", async () => {
-  const states = [];
-  const refs = [];
-  const effects = [];
+test("screen re-sends its size when the display's pixel ratio changes", () => {
+  const h = screenHarness();
+  assert.equal(h.queries.at(-1).media, "(resolution: 2dppx)");
+  h.window.devicePixelRatio = 1.5;
+  h.queries.at(-1).fire("change");
+  assert.equal(h.queries.at(-1).media, "(resolution: 1.5dppx)", "re-armed for the new ratio");
+  assert.equal(h.queries.at(-2).listeners("change"), 0, "the old query is let go");
+  h.runTimers();
+  assert.deepEqual(h.resized, [[400, 300, 1.5]]);
+  h.screen.destroy();
+  assert.equal(h.queries.at(-1).listeners("change"), 0);
+});
+
+test("screen input: typed keys, text through the sink, paste, side buttons", async () => {
+  const h = screenHarness({ bypass: (e) => e.key === "B" && e.ctrlKey && e.shiftKey });
+  h.screen.frame({ b64: "AA==", cssW: 800, cssH: 600, seq: 1 });
+  await flush();
+  // A printable key goes out with its text and never lands in the sink.
+  const a = h.sink.fire("keydown", { target: h.sink, key: "a", code: "KeyA" });
+  assert.equal(a.defaultPrevented, true);
+  assert.equal(h.sent.at(-1).text, "a");
+  // A dead key / IME composition stays in the sink; its result goes as text once.
+  const dead = h.sink.fire("keydown", { target: h.sink, key: "Dead", code: "BracketLeft" });
+  assert.equal(dead.defaultPrevented, false);
+  const count = h.sent.length;
+  h.sink.value = "é";
+  h.sink.fire("compositionend", { target: h.sink, data: "é" });
+  h.sink.fire("input", { target: h.sink, isComposing: false });
+  assert.deepEqual(own(h.sent.slice(count)), [{ kind: "text", text: "é" }]);
+  assert.equal(h.sink.value, "");
+  // Paste: the keydown is left to the native paste, the text goes out.
+  const v = h.sink.fire("keydown", { target: h.sink, key: "v", code: "KeyV", ctrlKey: true });
+  assert.equal(v.defaultPrevented, false);
+  const paste = h.sink.fire("paste", { target: h.sink, clipboardData: { getData: () => "hello" } });
+  assert.equal(paste.defaultPrevented, true);
+  assert.deepEqual(own(h.sent.at(-1)), { kind: "text", text: "hello" });
+  // An app chord (guestShouldBypass) bubbles on to the keymap untouched.
+  const before = h.sent.length;
+  const toggle = h.sink.fire("keydown", { target: h.sink, key: "B", code: "KeyB", ctrlKey: true, shiftKey: true });
+  assert.equal(toggle.defaultPrevented, false);
+  assert.equal(h.sent.length, before);
+  // Side buttons: history back, not a left click; the press focuses the sink.
+  const canvas = h.canvas;
+  h.view.fire("mousedown", { target: canvas, button: 3, buttons: 8, clientX: 200, clientY: 150, detail: 1 });
+  h.window.fire("mouseup", { target: canvas, button: 3, buttons: 0, clientX: 200, clientY: 150, detail: 1 });
+  assert.deepEqual(h.sent.slice(-2).map((e) => [e.type, e.button, e.x, e.y]), [
+    ["mousePressed", "back", 400, 300], ["mouseReleased", "back", 400, 300],
+  ]);
+  assert.equal(h.sink.focused, 1);
+  h.screen.destroy();
+});
+
+test("screen Esc while annotating is the panel's: not the page's, not the keymap's interrupt", () => {
+  let action = "cancelPick";
+  const h = screenHarness({ escape: () => action });
+  const esc = { target: h.sink, key: "Escape", code: "Escape" };
+  h.sink.fire("keydown", esc);
+  assert.equal(h.sent.length, 0, "the page never sees it");
+  const bubbled = h.panel.fire("keydown", esc);
+  assert.equal(bubbled.defaultPrevented, true, "prevented, so use-keymap ignores it");
+  assert.deepEqual(h.escapes, ["cancelPick"]);
+  action = null;
+  const plain = h.sink.fire("keydown", { target: h.sink, key: "Escape", code: "Escape" });
+  assert.equal(plain.defaultPrevented, true);
+  assert.equal(h.sent.at(-1).key, "Escape", "outside annotate mode Esc is the page's");
+  h.panel.fire("keydown", plain);
+  assert.deepEqual(h.escapes, ["cancelPick"]);
+  h.screen.destroy();
+  assert.equal(h.panel.listeners("keydown"), 0);
+});
+
+// ---- use-browser.jsx --------------------------------------------------------
+
+/** Enough of React for one hook: state, refs, memo/callback by deps, and
+ *  effects that run after a render when their deps changed (cleanup first),
+ *  like React's commit. Slots are per call position, as in React itself;
+ *  the test only talks to what the hook returns. */
+function fakeReact() {
+  const slots = [];
+  let i = 0;
+  const changed = (a, b) => !a || !b || a.length !== b.length || a.some((v, k) => !Object.is(v, b[k]));
+  let pending = [];
+  const React = {
+    useState(initial) {
+      const k = i++;
+      if (!(k in slots)) slots[k] = { value: typeof initial === "function" ? initial() : initial };
+      const s = slots[k];
+      return [s.value, (v) => { s.value = typeof v === "function" ? v(s.value) : v; }];
+    },
+    useRef(initial) {
+      const k = i++;
+      return (slots[k] ??= { current: initial });
+    },
+    useMemo(fn, deps) {
+      const k = i++;
+      if (!slots[k] || changed(slots[k].deps, deps)) slots[k] = { deps, value: fn() };
+      return slots[k].value;
+    },
+    useCallback(fn, deps) { return React.useMemo(() => fn, deps); },
+    useEffect(fn, deps) {
+      const k = i++;
+      const prev = slots[k];
+      if (!prev || changed(prev.deps, deps)) pending.push(() => { prev?.cleanup?.(); slots[k] = { deps, cleanup: fn() }; });
+    },
+  };
+  const render = (hook) => {
+    i = 0;
+    pending = [];
+    const out = hook();
+    for (const run of pending) run();
+    return out;
+  };
+  const unmount = () => { for (const s of slots) s?.cleanup?.(); };
+  return { React, render, unmount };
+}
+
+test("hook: a stale open completion cannot release the newer tab's queued resize and URL", async () => {
   const screens = [];
   const opens = [];
   const resized = [];
   const navigated = [];
-  let stateIndex = 0;
-  let refIndex = 0;
-  let effectIndex = 0;
+  const closed = [];
   const picks = new Map();
+  const states = new Map();
   let capture;
-  const React = {
-    useState(initial) {
-      const i = stateIndex++;
-      if (!(i in states)) states[i] = initial;
-      return [states[i], (value) => { states[i] = typeof value === "function" ? value(states[i]) : value; }];
-    },
-    useRef(initial) {
-      const i = refIndex++;
-      return refs[i] ??= { current: initial };
-    },
-    useCallback: (fn) => fn,
-    useMemo: (fn) => fn(),
-    useEffect(fn) { effects[effectIndex++] = fn; },
-  };
+  const { React, render, unmount } = fakeReact();
   const window = {
-    OMP_BROWSER_SCREEN: { createScreen(options) {
-      screens.push(options);
-      return { frame() {}, destroy() {}, size: () => ({ width: 400, height: 300, dpr: 1 }) };
-    } },
+    OMP_BROWSER_SCREEN: {
+      createScreen(options) {
+        screens.push(options);
+        return { frame() {}, destroy() {}, size: () => ({ width: 400, height: 300, dpr: 1 }) };
+      },
+      watchLocalLinks: () => () => {},
+    },
   };
-  runInNewContext(source("src/app/image-attach.js"), { window });
-  runInNewContext(source("src/app/browser.js"), { window });
+  loadHelpers(window);
+  window.OMP_IMAGES.normalizeImage = async (img) => img; // DOM canvas work, covered by the app
   const useBrowser = runInNewContext(source("src/app/use-browser.jsx") + "\nuseBrowser", { window, React });
   const bridge = {
     onBrowserEvent(sid, kind, handler) {
       if (kind === "pick") picks.set(sid, handler);
+      if (kind === "state") states.set(sid, handler);
       const off = () => {};
       off.ready = Promise.resolve();
       return off;
@@ -97,29 +280,31 @@ test("stale open completion cannot release newer effect's queued resize and URL"
     browserOpenPanel: (sid) => new Promise((resolve) => opens.push({ sid, resolve })),
     browserResize: (...args) => resized.push(args),
     browserNavigate: (...args) => navigated.push(args),
-    browserClosePanel() {},
+    browserClosePanel: (sid) => closed.push(sid),
     browserAnnotate() {},
-    browserCapture: () => new Promise(resolve => { capture = resolve; }),
+    browserFrameAck() {},
+    browserCapture: () => new Promise((resolve) => { capture = resolve; }),
   };
-  const render = (sid) => {
-    stateIndex = refIndex = effectIndex = 0;
-    return useBrowser({ bridge, activeSessionId: sid, sessionIds: ["old", "new"] });
+  const elements = (ui) => {
+    ui.canvasRef.current = {};
+    ui.viewRef.current = {};
+    ui.sinkRef.current = {};
   };
-  let ui = render("old");
+  const show = (sid) => render(() => useBrowser({ bridge, activeSessionId: sid, sessionIds: ["old", "new"], tweaks: {} }));
+
+  let ui = show("old");
+  elements(ui);
   ui.toggle();
-  ui = render("old");
-  refs[0].current = {};
-  refs[1].current = { ...target(), closest: () => null };
-  const stopOld = effects[1]();
+  ui = show("old");
+  assert.equal(ui.open, true);
   await flush();
-  stopOld();
-  ui = render("new");
+  ui = show("new"); // the old tab's effect is cleaned up
+  assert.deepEqual(closed, ["old"]);
   ui.toggle();
-  ui = render("new");
-  const stopNew = effects[1]();
+  ui = show("new");
   await flush();
-  assert.deepEqual(opens.map((open) => open.sid), ["old", "new"]);
-  opens[0].resolve();
+  assert.deepEqual(opens.map((o) => o.sid), ["old", "new"]);
+  opens[0].resolve(); // the old tab's open settles late
   await flush();
   screens[1].onResize(500, 350, 2);
   ui.openUrl("http://localhost:3000/new");
@@ -129,16 +314,38 @@ test("stale open completion cannot release newer effect's queued resize and URL"
   await flush();
   assert.deepEqual(resized, [["new", 500, 350, 2]]);
   assert.deepEqual(navigated, [["new", "http://localhost:3000/new"]]);
-  ui.setAnnotate(true);
-  ui = render("new");
+
+  // Rust's state is the annotate truth; a pick captured across a restart is dropped.
+  states.get("new")({ status: "running", annotate: true });
+  ui = show("new");
   assert.equal(ui.annotate, true);
-  const picking = picks.get("new")({ rect: { x: 0, y: 0, w: 10, h: 10 } });
+  const picking = picks.get("new")({ rect: { x: 0, y: 0, w: 10, h: 10 }, docRect: { x: 0, y: 0, w: 10, h: 10 } });
   ui.restart();
-  ui = render("new");
+  ui = show("new");
   assert.equal(ui.annotate, false, "restart leaves annotate mode");
   capture({ ok: true, value: { data: "AA==", mimeType: "image/png" } });
   await picking;
-  ui = render("new");
+  ui = show("new");
   assert.equal(ui.pending, null, "pre-restart capture cannot create a stale popover");
-  stopNew();
+
+  // Esc while the popover is open closes it (and is the panel's); Rust
+  // turning annotate off (the agent acted) is mirrored.
+  states.get("new")({ status: "running", annotate: true });
+  ui = show("new");
+  const second = picks.get("new")({ rect: { x: 0, y: 0, w: 10, h: 10 }, docRect: { x: 0, y: 0, w: 10, h: 10 } });
+  capture({ ok: false, error: "page moved" });
+  await second;
+  ui = show("new");
+  assert.equal(ui.pending.image, null, "a failed capture still opens the popover, text only");
+  assert.equal(screens[1].escape(), "cancelPick");
+  screens[1].onEscape("cancelPick");
+  ui = show("new");
+  assert.equal(ui.pending, null);
+  assert.equal(screens[1].escape(), "leaveAnnotate");
+  states.get("new")({ status: "running", annotate: false });
+  ui = show("new");
+  assert.equal(ui.annotate, false);
+  assert.equal(screens[1].escape(), null);
+  unmount();
+  assert.deepEqual(closed, ["old", "new"]);
 });

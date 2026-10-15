@@ -55,8 +55,9 @@
 .profile-trigger { display: flex; align-items: center; gap: 6px; max-width: 220px; }
 .profile-trigger-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Dropdown chrome shared by the profile, tab-group and thinking menus
-   (thinking-menu.jsx, positioned in composer.css). */
-.profile-pop, .tab-group-pop, .thinking-pop {
+   (thinking-menu.jsx, positioned in composer.css) and the browser panel's
+   annotate popover (positioned in browser.css). */
+.profile-pop, .tab-group-pop, .thinking-pop, .browser-popover {
   position: absolute; z-index: 40;
   padding: 4px;
   display: flex; flex-direction: column; gap: 1px;

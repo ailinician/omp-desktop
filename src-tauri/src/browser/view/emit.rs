@@ -6,7 +6,8 @@ use tauri::{AppHandle, Emitter};
 
 /// One screencast frame. `b64` is Chromium's JPEG, base64 already.
 /// `w`/`h` are image pixels; `css_w`/`css_h` the page's CSS viewport the
-/// frame shows (clicks map through those).
+/// frame shows (clicks map through those). `seq` numbers the frames a view
+/// emits; the webview acks it (`browser_frame_ack`) once painted or dropped.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Frame {
@@ -15,6 +16,7 @@ pub struct Frame {
     pub h: u32,
     pub css_w: u32,
     pub css_h: u32,
+    pub seq: u64,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -43,6 +45,8 @@ pub enum Status {
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+// The `browser://state` wire shape: independent flags the webview reads.
+#[allow(clippy::struct_excessive_bools)]
 pub struct ViewState {
     pub status: Status,
     pub error: Option<String>,
@@ -50,6 +54,8 @@ pub struct ViewState {
     pub loading: bool,
     pub can_back: bool,
     pub can_forward: bool,
+    /// Annotate mode is on (Rust's truth; the toolbar shows it).
+    pub annotate: bool,
 }
 
 impl ViewState {
@@ -61,6 +67,7 @@ impl ViewState {
             loading: false,
             can_back: false,
             can_forward: false,
+            annotate: false,
         }
     }
 }
@@ -122,7 +129,8 @@ impl BrowserEmit for TauriBrowserEmit {
 impl Frame {
     /// A frame of Chromium's base64 JPEG, untouched. The image size is read
     /// from the JPEG header (the screencast metadata only carries the CSS
-    /// size); without a readable header it falls back to the CSS size.
+    /// size); without a readable header it falls back to the CSS size. `seq`
+    /// is given when the frame is emitted.
     pub fn new(b64: String, css_w: u32, css_h: u32) -> Self {
         let (w, h) = jpeg_size(&b64).unwrap_or((css_w, css_h));
         Self {
@@ -131,6 +139,7 @@ impl Frame {
             h,
             css_w,
             css_h,
+            seq: 0,
         }
     }
 
@@ -251,6 +260,7 @@ mod tests {
             h,
             css_w,
             css_h,
+            seq: 0,
         };
         assert!(frame(800, 600, 400, 300).has_css_proportions());
         assert!(frame(1280, 657, 1280, 657).has_css_proportions());

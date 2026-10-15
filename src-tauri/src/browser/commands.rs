@@ -8,8 +8,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, State};
 
 use super::annotate::CapturedImage;
-use super::emit::{BrowserEmit, Rect, Status, TauriBrowserEmit, ViewState};
-use super::view::{InputEvent, View};
+use super::view::{BrowserEmit, InputEvent, Rect, Size, Status, TauriBrowserEmit, View, ViewState};
 use super::{lock, BrowserManager, Entry};
 
 /// Panel commands for a session that was never allocated a browser.
@@ -83,6 +82,8 @@ impl BrowserManager {
         emit: Arc<dyn BrowserEmit>,
         before_install: impl FnOnce(&Arc<View>),
     ) -> Result<(), String> {
+        // A bad size fails before Chromium is launched for it.
+        let size = Size::new(width, height, dpr)?;
         let entry = self.entry(session_id)?;
         let (generation, old, last_agent) = {
             let mut panel = lock(&entry.view);
@@ -99,7 +100,7 @@ impl BrowserManager {
         emit.state(session_id, &ViewState::new(Status::Starting));
         let started = self.chromium_port(session_id).and_then(|port| {
             let view = Arc::new(View::connect(session_id, port, Arc::clone(&emit))?);
-            match view.open(width, height, dpr, last_agent.as_deref()) {
+            match view.open(size, last_agent.as_deref()) {
                 Ok(()) => Ok(view),
                 Err(e) => {
                     view.close();
@@ -243,7 +244,7 @@ pub async fn browser_history(session_id: String, delta: i32, app: AppHandle) -> 
 
 #[tauri::command]
 pub async fn browser_tab_new(session_id: String, app: AppHandle) -> Result<(), String> {
-    with_view(app, session_id, |v| v.tab_new(None)).await
+    with_view(app, session_id, View::tab_new).await
 }
 
 #[tauri::command]
@@ -274,6 +275,18 @@ pub fn browser_input(
     browser: State<'_, BrowserManager>,
 ) -> Result<(), String> {
     browser.panel(&session_id)?.input(&event)
+}
+
+/// Synchronous and cheap: the webview painted or dropped frame `seq`, so
+/// the panel's next frame may follow (see `view/frames.rs`).
+#[tauri::command]
+pub fn browser_frame_ack(
+    session_id: String,
+    seq: u64,
+    browser: State<'_, BrowserManager>,
+) -> Result<(), String> {
+    browser.panel(&session_id)?.frame_ack(seq);
+    Ok(())
 }
 
 #[tauri::command]

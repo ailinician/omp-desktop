@@ -386,8 +386,8 @@ input, textarea { font: inherit; color: inherit; background: transparent; border
 
 /* <Icon> (ui/icons.jsx) sets --icon-size in rem: icons follow the font-size
    tweak. The icon-only boxes around them (.btn.icon, tab close, sidebar
-   actions, …) are rem-sized for the same reason. A crowded flex row (the
-   status bar) squeezes its text, never an icon. */
+   actions, …) are rem-sized for the same reason. A crowded flex row never
+   squeezes an icon. */
 .ui-icon { width: var(--icon-size); height: var(--icon-size); flex-shrink: 0; }
 
 /* button base */

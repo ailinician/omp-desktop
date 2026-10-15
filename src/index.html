@@ -56,8 +56,10 @@
        composer.jsx and chat/ask-*.jsx call its isSubmitEnter helper,
        and app-live.jsx destructures the rest. -->
   <script src="app/constants.js"></script>
-  <!-- Keymap registry + chord algebra. Dependency-free IIFE; must load before
-       any Babel file (composer.jsx, use-keymap.jsx, shortcuts-modal.jsx). -->
+  <!-- Keymap registry + chord algebra, and guestShouldBypass (which keys a
+       focused guest — terminal, browser panel — leaves to the app).
+       Dependency-free IIFE; must load before any Babel file (composer.jsx,
+       use-keymap.jsx, shortcuts-modal.jsx). -->
   <script src="app/keymap.js"></script>
 
   <!-- Mention-parsing helpers. Dependency-free IIFE; composer.jsx
@@ -65,9 +67,9 @@
        before it. -->
   <script src="mentions.js"></script>
 
-  <!-- Image attach/paste helpers. Dependency-free IIFE; composer.jsx
-       destructures window.OMP_IMAGES at top level, so this must load
-       before it. -->
+  <!-- Image attach/paste helpers (and b64Bytes). Dependency-free IIFE;
+       composer.jsx destructures window.OMP_IMAGES at top level and live.js
+       destructures b64Bytes at its init, so this must load before both. -->
   <script src="app/image-attach.js"></script>
 
   <!-- Slash-command palette: local desktop list + RPC merge/filter helpers.
@@ -191,8 +193,8 @@
        level, so it must load before both. -->
   <script src="app/extension-widgets.js"></script>
   <!-- Terminal panel: pure per-tab panel state over Rust's shell status,
-       key bypass, clipboard chords, shell label and height clamp. IIFE that
-       calls window.OMP_KEYMAP.detectMac() at load (so after app/keymap.js);
+       clipboard chords, shell label and height clamp. IIFE that calls
+       window.OMP_KEYMAP.detectMac() at load (so after app/keymap.js);
        app/use-terminal.jsx and design/terminal-panel.jsx destructure
        window.OMP_TERMINAL at top level, so it must load before them. -->
   <script src="app/terminal.js"></script>
@@ -203,9 +205,10 @@
   <script src="app/terminal-stream.js"></script>
   <!-- Terminal xterm setup: builds a tab's xterm and its key routing, the
        ConPTY option, theme colours and the lines written into it. IIFE;
-       window.Terminal / window.FitAddon (above) and window.OMP_TERMINAL are
-       read at call time; app/use-terminal.jsx destructures
-       window.OMP_TERMINAL_XTERM at top level, so it must load before it. -->
+       window.Terminal / window.FitAddon (above), window.OMP_TERMINAL and
+       window.OMP_KEYMAP are read at call time; app/use-terminal.jsx
+       destructures window.OMP_TERMINAL_XTERM at top level, so it must load
+       before it. -->
   <script src="app/terminal-xterm.js"></script>
   <!-- Git browser view helpers over the Rust git_browser_* payloads (tree
        rows, filter, hunks, ages, edit-card paths). Dependency-free IIFE;
@@ -216,13 +219,16 @@
 
   <!-- Browser panel pure helpers (address normalisation, annotation text and
        merge into the outgoing message, page coordinates, CDP key events,
-       per-session chips, width clamp). Reads OMP_IMAGES.MAX_ATTACHMENTS at
-       load time (image-attach.js above), and OMP_MARKDOWN.fenceCode at send
-       time; precedes app/use-browser.jsx and app-live.jsx. -->
+       per-session chips, width clamp, Tweaks chromium menu). Reads
+       OMP_IMAGES.MAX_ATTACHMENTS at load time (image-attach.js above), and
+       OMP_MARKDOWN.fenceCode / OMP_PROJECT_NAV at call time; precedes
+       app/use-browser.jsx, design/browser-tweaks.jsx and app-live.jsx. -->
   <script src="app/browser.js"></script>
-  <!-- DOM side of the panel: paints the screencast on the canvas and forwards
-       input (createScreen). Dependency-free IIFE; reads window.OMP_BROWSER at
-       call time; app/use-browser.jsx destructures window.OMP_BROWSER_SCREEN. -->
+  <!-- DOM side of the panel: paints the screencast on the canvas, forwards
+       input (createScreen) and watches local links (watchLocalLinks).
+       Dependency-free IIFE; reads window.OMP_BROWSER, OMP_IMAGES.b64Bytes
+       and OMP_KEYMAP at call time; app/use-browser.jsx destructures
+       window.OMP_BROWSER_SCREEN. -->
   <script src="app/browser-screen.js"></script>
 
   <!-- Design components (unchanged — from src/design/ copy) -->
@@ -232,7 +238,7 @@
   <script type="text/babel" src="design/tweaks/controls.jsx"></script>
   <!-- Outside-click / Escape dismissal shared by the dropdown menus
        (profile-menu.jsx, tab-group-chip.jsx, thinking-menu.jsx,
-       terminal-tweaks.jsx). -->
+       terminal-tweaks.jsx's PathPicker, also used by browser-tweaks.jsx). -->
   <script src="design/ui/use-popover-dismiss.js"></script>
   <!-- Pointer drag-to-reorder (#40) for the tab bar, the group chip's
        dropdown and the project sidebar: chrome.jsx and project-sidebar.jsx
@@ -344,11 +350,16 @@
        window.Icon and window.OMP_TERMINAL (app/terminal.js, above) at top
        level. -->
   <script type="text/babel" src="design/terminal-panel.jsx"></script>
-  <!-- Tweaks → Terminal section (with its shell-setting state);
+  <!-- Tweaks → Terminal section (with its shell-setting state) and the
+       path setting hook + menu it shares (usePathSetting, PathPicker);
        destructures window.TweakSection, window.TweakRow,
        window.TweakToggle (tweaks/, above) and window.Icon (ui/icons.jsx,
        above) at top level. -->
   <script type="text/babel" src="design/terminal-tweaks.jsx"></script>
+  <!-- Tweaks → Browser's Chromium row; destructures window.usePathSetting
+       and window.PathPicker (terminal-tweaks.jsx, just above) at top level
+       and reads window.OMP_BROWSER (app/browser.js) at render time. -->
+  <script type="text/babel" src="design/browser-tweaks.jsx"></script>
 
   <!-- Live data layer (must load before app-live.jsx) -->
   <script src="model-names.js"></script>

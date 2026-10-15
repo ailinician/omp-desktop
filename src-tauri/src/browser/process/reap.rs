@@ -4,11 +4,13 @@
 use std::path::Path;
 
 #[cfg(unix)]
-use crate::agent::supervisor::pid_is_alive;
+use crate::agent::supervisor::{kill_group_if_leader, pid_is_alive};
 
-/// Return false if a verified browser could still recreate its profile.
+/// Kill the browsers a dead instance directory recorded (its
+/// `profiles/*.pid`); `false` if a verified browser could still be running
+/// and recreate its profile, so the directory must stay.
 #[cfg(unix)]
-pub(super) fn before_pruning(instance: &Path) -> bool {
+pub fn before_pruning(instance: &Path) -> bool {
     let profiles = instance.join("profiles");
     match std::fs::symlink_metadata(&profiles) {
         Ok(meta) if meta.is_dir() => {}
@@ -34,12 +36,17 @@ pub(super) fn before_pruning(instance: &Path) -> bool {
     stopped
 }
 
+/// Windows: the Job Object killed every browser of a process when that
+/// process died, so a dead instance's directory has nothing left to reap.
 #[cfg(not(unix))]
-pub(super) const fn before_pruning(_instance: &std::path::Path) -> bool {
-    // Windows PID liveness conservatively prevents stale-instance pruning.
+pub const fn before_pruning(_instance: &std::path::Path) -> bool {
     true
 }
 
+/// Kill the browser `pid_file` names if it is still the one we launched:
+/// alive, started with exactly that profile, and leading its own process
+/// group (what `launch.rs` sets up), which is killed as a whole. `false`
+/// only while it survives the kill.
 #[cfg(unix)]
 fn reap_browser(pid_file: &Path) -> bool {
     use std::time::{Duration, Instant};
@@ -50,21 +57,13 @@ fn reap_browser(pid_file: &Path) -> bool {
     else {
         return true;
     };
-    let Ok(group) = libc::pid_t::try_from(pid) else {
-        return true;
-    };
-    // SAFETY: getpgid takes a positive PID and does not modify the process.
-    if !pid_is_alive(pid) || !is_group_leader(group, unsafe { libc::getpgid(group) }) {
-        return true;
-    }
     let profile = pid_file.with_extension("");
-    if !uses_profile(pid, &profile) {
+    if !pid_is_alive(pid) || !uses_profile(pid, &profile) {
         return true;
     }
-    // SAFETY: only a live group leader with the matching profile flag is targeted;
-    // the negative, nonzero PID signals its own process group, not ours.
-    if unsafe { libc::kill(-group, libc::SIGKILL) } != 0 {
-        return !pid_is_alive(pid);
+    if !kill_group_if_leader(pid) {
+        // Not a group leader: a reused pid that is not our browser.
+        return true;
     }
     let deadline = Instant::now() + Duration::from_secs(2);
     while pid_is_alive(pid) {
@@ -74,11 +73,6 @@ fn reap_browser(pid_file: &Path) -> bool {
         std::thread::sleep(Duration::from_millis(20));
     }
     true
-}
-
-#[cfg(unix)]
-const fn is_group_leader(pid: libc::pid_t, group: libc::pid_t) -> bool {
-    pid > 0 && pid == group
 }
 
 // Chromium rewrites Linux argv into a space-joined process title; macOS ps
@@ -192,24 +186,6 @@ mod tests {
         ];
         for &(name, cmdline, expected) in cases {
             assert_eq!(has_flag(cmdline, flag), expected, "{name}");
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn only_positive_pids_leading_their_own_group_are_eligible() {
-        for (pid, group, expected) in [
-            (42, 42, true),
-            (42, 41, false),
-            (42, -1, false),
-            (0, 0, false),
-            (-1, -1, false),
-        ] {
-            assert_eq!(
-                super::is_group_leader(pid, group),
-                expected,
-                "pid={pid}, group={group}"
-            );
         }
     }
 }

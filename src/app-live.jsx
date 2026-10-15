@@ -20,14 +20,14 @@
 const {
   Icon, ChatView, Composer, CommandBridge, WindowChrome, TabBar, SubagentPane, ProjectSidebar, EmptyWorkspace,
   StatusBar, AmbientRail, ConversationTree, PlanKanban, HistoryModal, GitBrowser, ApprovalRulesPanel, UsageStatsPanel, PromptHistoryModal, UpdateModal, useTweaks,
-  TweaksPanel, TweakSection, TweakRow, TweakRadio, TweakToggle, TweakColor, TweakSlider, TweakButton, TweakText,
+  TweaksPanel, TweakSection, TweakRow, TweakRadio, TweakToggle, TweakColor, TweakSlider, TweakButton,
   useWidgets, WidgetCard, WidgetErrorCard, WidgetApprovalCard, WidgetBoundary,
   TWEAK_DEFAULTS, NULL_MODEL, EMPTY_PROJECT, DEFAULT_PROFILE_ID,
   INTENT_FRAMING, APPROVAL_PROMPT,
   useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, useTerminal, TerminalPanels, TerminalTweaks, timeNow,
-  useKeymap, useKeymapDispatch, ShortcutsModal, useBrowser, BrowserDock,
+  useKeymap, useKeymapDispatch, ShortcutsModal, useBrowser, BrowserDock, BrowserTweaks,
 } = window;
-const { isCommandInvocation } = window.OMP_SLASH;
+const { routeSubmit: _routeSubmit } = window.OMP_SLASH;
 const { sendWithChips: _sendBrowser, normalizeUrl: _normalizeUrl } = window.OMP_BROWSER;
 const { recentRows, groupKey, moveGroup, moveMember, shiftGroup } = window.OMP_PROJECT_NAV;
 const {
@@ -142,8 +142,6 @@ function App() {
   React.useEffect(() => {
     bridge?.setPromptHistoryLimit(t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT);
   }, [bridge, t.promptHistoryLimit]);
-  // Apply persisted and live tweaks alike; the next tab uses the latest path.
-  React.useEffect(() => { bridge?.setBrowserPath(t.browserPath); }, [bridge, t.browserPath]);
   // Refuse a file or link drop no handler took (`refusesStrayDrop`), so the
   // webview never navigates to it now that Tauri's native file drop is off
   // (#50). The composer's handlers run first and accept their own drops.
@@ -317,8 +315,13 @@ function App() {
   useKeymapDispatch(handlersRef);
 
   // ── Handlers ──────────────────────────────────────────────────────────────
-  const sendWithBrowserChips = (text, images, isCmd, send) => _sendBrowser({
-    text, images: images ?? [], chips: isCmd ? [] : browser.sendableChips,
+  // Where a submit goes (OMP_SLASH.routeSubmit): decided on the typed draft.
+  const routeOf = (msg, followUp) => _routeSubmit(data.commands, msg, {
+    goalMode: goalUi.mode, followUp, streaming, connected: Boolean(bridge?.isConnected),
+  });
+  // A command carries no browser annotations: they wait for the next message.
+  const sendWithBrowserChips = (text, images, route, send) => _sendBrowser({
+    text, images: images ?? [], chips: route.isCmd ? [] : browser.sendableChips,
     reserveChips: browser.reserveChips,
     spendChips: browser.spendChips,
     releaseChips: browser.releaseChips,
@@ -337,17 +340,18 @@ function App() {
     // plan-mode rewrites below would otherwise skip by mistake. A skill
     // invoked mid-prompt ("review this /skill:code-review", #30) counts as
     // a command too: it is sent as typed, like a leading `/skill:x`.
-    const isCmd = isCommandInvocation(data.commands, msg);
-    // Goal mode (app/use-goal-mode.jsx): the text is the goal's objective.
-    // Plan mode cannot be on at the same time; a command still runs as one.
-    // Browser annotations ride along in the objective and are spent once omp
-    // accepts the goal; a refusal hands the typed draft back, chips intact.
-    if (goalUi.mode && !isCmd) {
-      sendWithBrowserChips(msg, images, isCmd,
-        out => goalUi.start(out.text, out.images, { text: msg, images }));
+    // `routeOf` classifies the typed draft, before any page data merges.
+    const route = routeOf(msg, false);
+    // Goal mode (app/use-goal-mode.jsx): the typed text is the goal's
+    // objective. Plan mode cannot be on at the same time; a command still
+    // runs as one. Browser annotations ride along in the goal's first
+    // prompt (not in the stored objective) and are spent once omp accepts
+    // it; a refusal hands the typed draft back, chips intact.
+    if (route.via === "goal") {
+      sendWithBrowserChips(msg, images, route, out => goalUi.start({ text: msg, images }, out));
       return;
     }
-    if (plan.mode && !isCmd) {
+    if (plan.mode && !route.isCmd) {
       if (hasAnnotations) {
         // Feedback with block comments — always takes priority over intent framing
         const lineComments = Object.entries(plan.annotations)
@@ -379,9 +383,9 @@ function App() {
     // acknowledgment, not the IPC hand-off) and released on a refusal,
     // timeout or a locally kept draft (no connection). Chips added while
     // the send is in flight are left alone.
-    sendWithBrowserChips(msg, images, isCmd, out => {
-      if (streaming) return bridge?.steer(out.text, out.images, isCmd);
-      if (bridge?.isConnected) return bridge.send(out.text, out.images);
+    sendWithBrowserChips(msg, images, route, out => {
+      if (route.via === "steer") return bridge?.steer(out.text, out.images, route.isCmd);
+      if (route.via === "prompt") return bridge.send(out.text, out.images);
       // A locally kept draft is not delivered; release its chips.
       setMessages(prev => [...prev, { kind: "user", time: timeNow(), text: out.text, images: out.images }]);
       return false;
@@ -433,14 +437,13 @@ function App() {
   // only on delivery, releasing them on a refusal or timeout.
   const handleFollowUp = (text, images) => {
     const msg = text.trim();
-    const isCmd = isCommandInvocation(data.commands, msg);
-    if (goalUi.mode && !isCmd) {
-      sendWithBrowserChips(msg, images, isCmd,
-        out => goalUi.start(out.text, out.images, { text: msg, images }));
+    const route = routeOf(msg, true);
+    if (route.via === "goal") {
+      sendWithBrowserChips(msg, images, route, out => goalUi.start({ text: msg, images }, out));
       return;
     }
-    sendWithBrowserChips(msg, images, isCmd,
-      out => bridge?.followUp(out.text, out.images, isCmd));
+    sendWithBrowserChips(msg, images, route,
+      out => bridge?.followUp(out.text, out.images, route.isCmd));
   };
   // Queue strip actions: resolve `true` once omp edited its queue.
   const handleRemoveQueued  = (text, kind) => bridge?.removeQueuedMessage(text, kind);
@@ -818,24 +821,6 @@ function App() {
                     extraSendable={browser.sendableCount > 0}
                   />
                 </>)}
-                <StatusBar
-                  ctx={liveCtx}
-                  todoDone={todoCounts.done}
-                  todoTotal={todoCounts.total}
-                  onTodo={() => setPlanOpen(true)}
-                  onChanges={() => setGitOpen({ path: null })}
-                  onRules={() => setRulesOpen(true)}
-                  approvalMode={approvalCell}
-                  onStats={() => setStatsOpen(true)}
-                  onTree={() => showTree(!treeOpen)}
-                  onTerminal={() => terminal.toggle(planKey)}
-                  terminalOpen={_TERM_entryOf(terminal.state, planKey).open}
-                  onBrowser={toggleBrowser}
-                  browserOpen={browser.open}
-                  onTweaks={openTweaks}
-                  autosave={t.autosave ?? true}
-                  onAutosave={v => setTweak("autosave", v)}
-                />
               </main>
 
               {showSplit && (
@@ -904,6 +889,26 @@ function App() {
               )}
             </div>
           </div>
+          {/* Full window width under the workspace: no side column (rail,
+              tree, browser panel, subagent split) ever narrows it. */}
+          <StatusBar
+            ctx={liveCtx}
+            todoDone={todoCounts.done}
+            todoTotal={todoCounts.total}
+            onTodo={() => setPlanOpen(true)}
+            onChanges={() => setGitOpen({ path: null })}
+            onRules={() => setRulesOpen(true)}
+            approvalMode={approvalCell}
+            onStats={() => setStatsOpen(true)}
+            onTree={() => showTree(!treeOpen)}
+            onTerminal={() => terminal.toggle(planKey)}
+            terminalOpen={_TERM_entryOf(terminal.state, planKey).open}
+            onBrowser={toggleBrowser}
+            browserOpen={browser.open}
+            onTweaks={openTweaks}
+            autosave={t.autosave ?? true}
+            onAutosave={v => setTweak("autosave", v)}
+          />
         </div>
       </div>
 
@@ -1063,9 +1068,7 @@ function App() {
         <TerminalTweaks bridge={bridge} height={terminal.height} autoOpen={t.terminalAutoOpen ?? false}
           onAutoOpen={v => setTweak("terminalAutoOpen", v)} />
         <TweakSection label="Browser">
-          <TweakText label="chromium path" value={t.browserPath ?? ""} placeholder="automatic"
-            note="applies to new tabs"
-            onChange={v => setTweak("browserPath", v)} />
+          <BrowserTweaks bridge={bridge} />
           <TweakToggle label="open localhost links in panel" value={t.browserLocalhostInPanel ?? true}
             onChange={v => setTweak("browserLocalhostInPanel", v)} />
         </TweakSection>

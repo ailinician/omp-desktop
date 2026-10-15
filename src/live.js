@@ -12,7 +12,7 @@
 (function () {
   "use strict";
   const { timeNow } = window;
-  const { LOCAL_COMMANDS, adaptAvailableCommands, mergeSlashCommands, isCommandInvocation } = window.OMP_SLASH;
+  const { LOCAL_COMMANDS, adaptAvailableCommands, mergeSlashCommands, isCommandInvocation, queuedFrame } = window.OMP_SLASH;
   const SUB = window.OMP_SUBAGENTS;
   const STITLE = window.OMP_SESSION_TITLE;
   const QUEUE = window.OMP_QUEUE;
@@ -190,10 +190,6 @@
   // job. Dropped as soon as a tab is active, so closing the last tab falls
   // back to the startup default as before.
   let _noTabProfileId = null;
-  // The user's Chromium choice for the browser panel (tweak `browserPath`,
-  // pushed through `setBrowserPath`); `null` = the backend finds one. Sent
-  // with every `start_session`, so a change applies to the next spawn.
-  let _browserPath = null;
   // Notes filed while no tab is open (a failed "Open with"): there is no
   // transcript to hold them, and `_resetSessionVars` would drop them from
   // `state.messages`. The empty workspace shows them; the next tab that
@@ -1012,13 +1008,9 @@
   // rpc_chunk frames. Each carries a base64 segment of the original UTF-8 JSON.
   const MAX_REASSEMBLED_FRAME = 64 * 1024 * 1024; // matches ready.maxReassembledFrameBytes
 
-  /** Decode base64 (rpc_chunk segments, terminal output) to its bytes. */
-  function _b64Bytes(b64) {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return bytes;
-  }
+  // Decode base64 (rpc_chunk segments, terminal output) to its bytes; shared
+  // with the browser panel's frames (app/image-attach.js loads before this).
+  const { b64Bytes: _b64Bytes } = window.OMP_IMAGES;
 
   // Pure: validate a complete set of rpc_chunk frames for one chunkId and
   // return the parsed JSON object. Throws on any inconsistency.
@@ -1080,7 +1072,7 @@
    *  directly. */
   async function _spawnSession(id, cwd, { resume = null, profile }) {
     const approvalMode = await window.__TAURI__.core.invoke("start_session", {
-      args: { sessionId: id, cwd: cwd ?? "", resume, profile, browserPath: _browserPath || null },
+      args: { sessionId: id, cwd: cwd ?? "", resume, profile },
     });
     // A fresh incarnation owns this id now, and `start_session` cleared the
     // backend's cached error for it — so a *new* startup failure must be
@@ -2550,8 +2542,9 @@
     // `prompt_result` closes an accepted prompt once the agent yielded, after
     // that run's `agent_end`. Only a failed agent turn matters here: the
     // frame adds omp's cleaned error text and its `retryable` verdict to the
-    // failure `agent_end` just showed. Not id-correlated — an ordinary
-    // prompt is sent without one.
+    // failure `agent_end` just showed. Not matched by id: the prompt's own
+    // response (`_sendPromptAck`) is the id-correlated ack, and this frame
+    // only decorates whichever turn just failed.
     if (type === "prompt_result") {
       if (ev.agentInvoked === true && ev.status === "error") {
         _showFailure(prev => TURN.withPromptError(prev, ev.error));
@@ -3179,12 +3172,10 @@
     },
     // Both route a real slash command — or a skill invocation, even
     // mid-prompt (#30) — through `prompt` with the matching
-    // `streamingBehavior` instead of their own dedicated RPC command: omp's
-    // `steer`/`follow_up` frames skip command and skill dispatch entirely
-    // (only `prompt` runs it), so a command sent mid-stream through the
-    // dedicated frame would just reach the model as literal text — this is
-    // the transport's problem. Annotated callers pass classification of the
-    // typed draft before page data is merged; other callers classify here.
+    // `streamingBehavior` (`OMP_SLASH.queuedFrame`): omp's `steer` /
+    // `follow_up` frames skip command and skill dispatch entirely. Callers
+    // that merged browser annotations pass the classification of the typed
+    // draft (`OMP_SLASH.routeSubmit`); other callers classify here.
     // See `_sendQueued` for how the message shows until omp delivers it.
     /** The user's follow-up / steer. Resolves `true` once omp acknowledged
      *  the hand-off, `false` when the process is gone or refused (a
@@ -3193,15 +3184,11 @@
      *  not need delivery knowledge; the browser chips spend only on `true`. */
     followUp(text, images, isCmd = isCommandInvocation(state.commands, text)) {
       const imgs = images ?? [];
-      return _sendQueued("followUp", text, imgs, isCmd
-        ? () => _sendWithResponse({ type: "prompt", message: text, images: imgs, streamingBehavior: "followUp" })
-        : () => _sendWithResponse({ type: "follow_up", message: text, images: imgs }));
+      return _sendQueued("followUp", text, imgs, () => _sendWithResponse(queuedFrame("followUp", text, imgs, isCmd)));
     },
     steer(text, images, isCmd = isCommandInvocation(state.commands, text)) {
       const imgs = images ?? [];
-      return _sendQueued("steering", text, imgs, isCmd
-        ? () => _sendWithResponse({ type: "prompt", message: text, images: imgs, streamingBehavior: "steer" })
-        : () => _sendWithResponse({ type: "steer", message: text, images: imgs }));
+      return _sendQueued("steering", text, imgs, () => _sendWithResponse(queuedFrame("steer", text, imgs, isCmd)));
     },
     /** ✕ / ✎ on a queue-strip row (`queue`: "steering" | "followUp"):
      *  `true` once omp removed the message, `false` when it was no longer
@@ -3244,7 +3231,10 @@
      *  (`goal.continuationModes` holds "rpc") omp then starts a goal turn
      *  by itself; otherwise the objective goes out as the first prompt, as
      *  omp's own `/goal` does — as a steer when a turn is running. Images
-     *  are steered on with it rather than dropped.
+     *  are steered on with it rather than dropped. `prompt` is what that
+     *  delivery carries (default: the objective) — the objective with the
+     *  tab's browser annotations merged in; the goal itself stores only
+     *  the typed `objective`.
      *  Resolves `{ok}` or `{ok: false, error}` (omp refuses in plan
      *  mode, with a paused goal…). Success also requires the
      *  objective's delivery to be acknowledged — a refusal or timeout
@@ -3258,10 +3248,11 @@
      *  switch is replayed on the way back and the sequence goes on there.
      *  IPC end to end; the decisions are app/goal.js's (`ompStartedTurn`,
      *  test-goal.mjs), the sequence was live-tested against omp 18.6.0. */
-    async goalStart(objective, tokenBudget, images) {
+    async goalStart(objective, tokenBudget, images, prompt) {
       const text = String(objective ?? "").trim();
       const imgs = images ?? [];
       if (!text) return { ok: false, error: "Describe the goal first." };
+      const message = String(prompt ?? "").trim() || text;
       const origin = activeSessionId;
       if (!origin) return { ok: false, error: "Not connected" };
       const wasStreaming = state.isStreaming;
@@ -3279,10 +3270,10 @@
       if (origin !== activeSessionId) return { ok: true };
       const bridge = window.OMP_BRIDGE;
       if (wasStreaming) {
-        // The objective (and its images) is steered into the running turn;
-        // that steer's acknowledgment is the delivery the caller's spend
-        // depends on.
-        const delivered = await bridge.steer(text, imgs);
+        // The objective (and its images and annotations) is steered into
+        // the running turn; that steer's acknowledgment is the delivery the
+        // caller's spend depends on.
+        const delivered = await bridge.steer(message, imgs);
         return delivered ? { ok: true } : { ok: false, created: true, error: "omp did not acknowledge the objective." };
       }
       let rpcState = null;
@@ -3305,17 +3296,17 @@
       // not spent.
       if (GOAL.ompStartedTurn(rpcState)) {
         // The objective is already in the goal (omp started its own turn);
-        // only its screenshots ride a steer, and that steer's ack is the
-        // delivery the caller's spend depends on.
-        if (imgs.length === 0) return { ok: true };
-        const delivered = await bridge.steer(text, imgs);
+        // only its screenshots and annotations ride a steer, and that
+        // steer's ack is the delivery the caller's spend depends on.
+        if (imgs.length === 0 && message === text) return { ok: true };
+        const delivered = await bridge.steer(message, imgs);
         return delivered ? { ok: true } : { ok: false, created: true, error: "omp did not acknowledge the objective." };
       } else if (rpcState?.isSettled === false) {
-        const ack = _sendQueued("steering", text, imgs,
-          () => _sendWithResponse({ type: "prompt", message: text, images: imgs, streamingBehavior: "steer" }));
+        const ack = _sendQueued("steering", message, imgs,
+          () => _sendWithResponse({ type: "prompt", message, images: imgs, streamingBehavior: "steer" }));
         return (await ack) ? { ok: true } : { ok: false, created: true, error: "omp did not acknowledge the objective." };
       }
-      const ack = _sendPrompt(text, imgs, "steer");
+      const ack = _sendPrompt(message, imgs, "steer");
       return (await ack) ? { ok: true } : { ok: false, created: true, error: "omp did not acknowledge the objective." };
     },
     /** `pause` / `resume` / `drop` the active tab's goal. */
@@ -3799,6 +3790,30 @@
       return res.ok ? { ok: true, settings: res.value ?? null } : res;
     },
 
+    /** The saved Chromium setting for the browser panel: `{ path,
+     *  automatic, installed, error }` (`path` "" = automatic, `automatic` =
+     *  what auto-detection finds now, `installed` = the browsers the menu
+     *  offers, `error` = why the stored path no longer works); `null`
+     *  without Tauri or when Rust refused. Rust reads it at each launch. */
+    browserSettings() {
+      return _invokeSafe("browser_settings", {}, null);
+    },
+
+    /** Save the Chromium path ("" = automatic). Rust validates and persists
+     *  it: `{ ok: true, settings }` or `{ ok: false, error }`. */
+    async browserSetPath(path) {
+      const res = await _invokeResult("browser_set_path", { path: typeof path === "string" ? path : "" });
+      return res.ok ? { ok: true, settings: res.value } : res;
+    },
+
+    /** "other…": Rust opens the native file dialog and stores the browser
+     *  picked. `{ ok: true, settings }` (`settings` null = cancelled) or
+     *  `{ ok: false, error }`. */
+    async browserPickPath() {
+      const res = await _invokeResult("browser_pick_path", {});
+      return res.ok ? { ok: true, settings: res.value ?? null } : res;
+    },
+
     // ── Browser panel (src-tauri/src/browser/commands.rs) ──────────────────
     // Sizes are CSS pixels (integers); `dpr` scales the screencast.
     browserOpenPanel(sid, width, height, dpr) {
@@ -3841,6 +3856,14 @@
         _browserInputLogged.set(sid, now);
         console.error("[live] browser_input error:", err);
       });
+    },
+    /** Frame `seq` of `browser://frame/{sid}` was painted or dropped as
+     *  superseded: Rust sends the next one (one frame in flight per view).
+     *  Fire and forget — the panel closing is not a fault, and Rust's own
+     *  timeout covers a lost ack. */
+    browserFrameAck(sid, seq) {
+      if (!window.__TAURI__) return;
+      window.__TAURI__.core.invoke("browser_frame_ack", { sessionId: sid, seq }).catch(() => {});
     },
     browserAnnotate(sid, on) {
       return _invokeSafe("browser_annotate", { sessionId: sid, on });
@@ -4254,13 +4277,6 @@
       if (window.OMP_PROMPT_HISTORY.trimAll(promptHistories, promptHistoryLimit)) notify();
     },
 
-    /** Chromium path for the browser panel's tabs (tweak `browserPath`;
-     *  empty = automatic). Sent with each `start_session`, so a tab picks it
-     *  up at its next spawn (new tab, profile switch). */
-    setBrowserPath(path) {
-      _browserPath = typeof path === "string" && path.trim() ? path.trim() : null;
-    },
-
     /** Subscribe to state snapshots. Returns an unsubscribe function. */
     onUpdate(cb) {
       subscribers.add(cb);
@@ -4274,17 +4290,6 @@
   // ── Connect to Tauri IPC ──────────────────────────────────────────────────
   if (window.__TAURI__) {
     document.documentElement.classList.add("tauri-native");
-
-    // The persisted Chromium override must reach the bridge before the
-    // restored tabs spawn below (`_restoreOpenTabs`): `_spawnSession`
-    // sends `_browserPath` with every `start_session`, and the restore's
-    // spawn is the first one. `useTweaks` (design/tweaks/use-tweaks.js)
-    // reads the same localStorage key; a malformed store keeps the
-    // automatic choice.
-    try {
-      const tweaks = JSON.parse(localStorage.getItem("omp-desktop:tweaks") ?? "{}");
-      window.OMP_BRIDGE.setBrowserPath(tweaks.browserPath);
-    } catch { /* automatic */ }
 
     // No tab at launch: `lib.rs::setup` spawns nothing. Load the persisted
     // profile list + ticked default first — with no tab to inherit from, it

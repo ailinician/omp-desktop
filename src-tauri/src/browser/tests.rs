@@ -1,13 +1,19 @@
-use super::locate::find_chromium;
+//! The manager's lifecycle, and the test support every browser suite shares
+//! (real-Chromium skipping, managers, panels, a fake CDP server).
+
+use super::view::{BrowserEmit, InputEvent, View};
 use super::*;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use serde_json::{json, Value};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
+use tungstenite::Message;
 
 /// Real-browser tests share one lock across modules. Hold it from before
 /// fixture creation through teardown; `lock` recovers after a test panics.
 pub(super) static CHROMIUM: Mutex<()> = Mutex::new(());
 
+/// A fresh, empty scratch directory for `name` (unique per test process).
 pub(super) fn tempdir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("omp-browser-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -23,47 +29,200 @@ pub(super) fn home_dir() -> PathBuf {
 }
 
 /// Minimal HTTP/1.1 GET against `127.0.0.1:port`; returns the body, read by
-/// its `Content-Length` (Chromium ignores `Connection: close`).
-fn http_get(port: u16, path: &str) -> Option<String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .ok()?;
+/// its `Content-Length` (Chromium and the fakes ignore `Connection: close`).
+pub(super) fn http_get(port: u16, path: &str) -> io::Result<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     write!(
         stream,
         "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-    )
-    .ok()?;
+    )?;
     let mut reader = BufReader::new(stream);
     let mut length = 0;
     loop {
         let mut line = String::new();
-        reader.read_line(&mut line).ok()?;
+        reader.read_line(&mut line)?;
         let line = line.trim();
         if line.is_empty() {
             break;
         }
         if let Some((name, value)) = line.split_once(':') {
             if name.eq_ignore_ascii_case("content-length") {
-                length = value.trim().parse().ok()?;
+                length = value
+                    .trim()
+                    .parse()
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             }
         }
     }
     let mut body = vec![0; length];
-    reader.read_exact(&mut body).ok()?;
-    String::from_utf8(body).ok()
+    reader.read_exact(&mut body)?;
+    String::from_utf8(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Poll `check` every 20 ms until it returns `Some`, for at most `timeout`.
+pub(super) fn eventually<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(found) = check() {
+            return Some(found);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The Chromium a real-browser test runs, as the app would find it. `None`
+/// (the test passes with a note) when there is none, unless the
+/// environment sets `OMP_REQUIRE_CHROMIUM=1` (CI): then a missing browser
+/// fails the test instead of letting it pass without running.
+pub(super) fn chromium_or_skip(test: &str) -> Option<PathBuf> {
+    let found = SettingsStore::load(None, home_dir())
+        .launch_candidates()
+        .and_then(|binaries| binaries.into_iter().next().ok_or_else(|| "none".to_owned()));
+    let required = std::env::var_os("OMP_REQUIRE_CHROMIUM").is_some_and(|v| v == "1");
+    require_chromium(test, found, required)
+}
+
+/// [`chromium_or_skip`] over what discovery `found` and whether a browser
+/// is `required`.
+fn require_chromium(test: &str, found: Result<PathBuf, String>, required: bool) -> Option<PathBuf> {
+    match found {
+        Ok(binary) => Some(binary),
+        Err(why) if required => panic!("{test}: OMP_REQUIRE_CHROMIUM=1 but no Chromium: {why}"),
+        Err(why) => {
+            eprintln!("skip {test}: no chromium ({why})");
+            None
+        }
+    }
+}
+
+/// A manager on a fresh root with automatic browser discovery. Needs no
+/// Chromium until something launches one.
+pub(super) fn manager(name: &str) -> BrowserManager {
+    BrowserManager::new(
+        &tempdir(name),
+        Arc::new(SettingsStore::load(None, home_dir())),
+    )
+    .expect("manager")
+}
+
+/// [`manager`] when a real Chromium exists, else `None` (see
+/// [`chromium_or_skip`], which prints the skip). Only a missing browser
+/// skips: a manager that fails to build fails the test.
+pub(super) fn manager_with_chromium(name: &str) -> Option<BrowserManager> {
+    chromium_or_skip(name)?;
+    Some(manager(name))
+}
+
+/// A manager on `root` whose browser setting is `binary`.
+#[cfg(unix)]
+fn manager_using(root: &Path, binary: &Path) -> BrowserManager {
+    let settings = SettingsStore::load(None, home_dir());
+    settings
+        .set_path(&binary.display().to_string())
+        .expect("an executable test browser");
+    BrowserManager::new(root, Arc::new(settings)).expect("manager")
+}
+
+/// A real-Chromium manager with session `s1`'s panel open at 400×300 CSS px
+/// and `dpr`, reporting to `emit`; `None` without Chromium.
+pub(super) fn panel(
+    name: &str,
+    dpr: f64,
+    emit: Arc<dyn BrowserEmit>,
+) -> Option<(BrowserManager, Arc<View>)> {
+    let m = manager_with_chromium(name)?;
+    m.allocate("s1").unwrap();
+    m.open_panel("s1", 400, 300, dpr, emit).unwrap();
+    let view = m.panel("s1").unwrap();
+    Some((m, view))
+}
+
+/// A left-button gesture step: `mouseMoved` has no button, the other two do.
+pub(super) fn mouse(kind: &str, x: f64, y: f64) -> InputEvent {
+    let moved = kind == "mouseMoved";
+    InputEvent::Mouse {
+        r#type: kind.into(),
+        x,
+        y,
+        button: if moved { "none" } else { "left" }.into(),
+        buttons: u32::from(kind == "mousePressed"),
+        click_count: u32::from(!moved),
+        modifiers: 0,
+    }
+}
+
+/// A one-connection CDP stand-in; returns its browser WebSocket URL. Each
+/// request goes to `reply`: `None` closes the socket, `Some(messages)` sends
+/// them as they are (none = no answer). Build replies with [`cdp_result`] /
+/// [`cdp_error`].
+pub(super) fn fake_cdp(
+    mut reply: impl FnMut(&Value) -> Option<Vec<Value>> + Send + 'static,
+) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        let Ok(mut ws) = tungstenite::accept(stream) else {
+            return;
+        };
+        while let Ok(Message::Text(text)) = ws.read() {
+            let Ok(request) = serde_json::from_str::<Value>(text.as_str()) else {
+                return;
+            };
+            let Some(messages) = reply(&request) else {
+                return;
+            };
+            for message in messages {
+                if ws.send(Message::text(message.to_string())).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    format!("ws://127.0.0.1:{port}/devtools/browser/x")
+}
+
+/// The success reply to `request`.
+pub(super) fn cdp_result(request: &Value, result: Value) -> Value {
+    let mut reply = serde_json::Map::new();
+    reply.insert("id".into(), request["id"].clone()); // the reply carries its own copy
+    reply.insert("result".into(), result);
+    Value::Object(reply)
+}
+
+/// The error reply to `request`.
+pub(super) fn cdp_error(request: &Value, message: &str) -> Value {
+    json!({ "id": request["id"], "error": { "code": -32000, "message": message } })
+}
+
+#[test]
+fn a_missing_chromium_skips_unless_required() {
+    let bin = PathBuf::from("/opt/google/chrome/chrome");
+    assert_eq!(require_chromium("t", Ok(bin.clone()), true), Some(bin));
+    assert_eq!(require_chromium("t", Err("none".into()), false), None);
+    let required = std::panic::catch_unwind(|| require_chromium("t", Err("none".into()), true));
+    assert!(
+        required.is_err(),
+        "OMP_REQUIRE_CHROMIUM=1 turns the skip into a failure"
+    );
 }
 
 #[test]
 fn allocate_is_idempotent_and_writes_overlay() {
-    let m = BrowserManager::new(tempdir("mgr"), home_dir()).unwrap();
-    let p1 = m.allocate("s1", None).unwrap();
-    let p2 = m.allocate("s1", None).unwrap();
+    let m = manager("mgr");
+    let p1 = m.allocate("s1").unwrap();
+    let p2 = m.allocate("s1").unwrap();
     assert_eq!(p1, p2);
     let port = m.port("s1").unwrap();
     assert_eq!(
         std::fs::read_to_string(&p1).unwrap(),
-        format!("browser:\n  cdpUrl: \"http://127.0.0.1:{port}\"\n")
+        format!("browser:\n  cdpUrl: \"http://127.0.0.1:{port}\"\n  relay: false\n")
     );
     m.release("s1");
     assert!(!p1.exists());
@@ -72,16 +231,57 @@ fn allocate_is_idempotent_and_writes_overlay() {
 
 #[test]
 fn session_ids_that_are_not_file_name_safe_are_refused() {
-    let m = BrowserManager::new(tempdir("ids"), home_dir()).unwrap();
+    let m = manager("ids");
     for id in ["", "../x", "a/b", "a.yml", "a b", &"x".repeat(65)] {
-        assert!(m.allocate(id, None).is_err(), "{id:?}");
+        assert!(m.allocate(id).is_err(), "{id:?}");
     }
-    assert!(m.allocate("session-1700000000000_a", None).is_ok());
+    assert!(m.allocate("session-1700000000000_a").is_ok());
+}
+
+/// The settings store, not the webview, says what runs, and it is read at
+/// every launch: a change applies to the next one.
+#[cfg(unix)]
+#[test]
+fn the_browser_setting_is_read_at_launch_time() {
+    let dir = tempdir("mgr-setting");
+    let (a, b) = (dir.join("a"), dir.join("b"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let (bin_a, bin_b) = (fake_chromium(&a, "0"), fake_chromium(&b, "0"));
+    let settings = Arc::new(SettingsStore::load(None, home_dir()));
+    settings.set_path(&bin_a.display().to_string()).unwrap();
+    let m = BrowserManager::new(&dir.join("root"), Arc::clone(&settings)).unwrap();
+    m.allocate("s1").unwrap();
+    m.chromium_port("s1").unwrap();
+    assert_eq!((launch_count(&a), launch_count(&b)), (1, 0));
+    settings.set_path(&bin_b.display().to_string()).unwrap();
+    m.kill_chromium_for_test("s1");
+    m.chromium_port("s1").unwrap();
+    assert_eq!((launch_count(&a), launch_count(&b)), (1, 1));
+}
+
+/// A configured browser that is gone at launch is the launch's error (the
+/// panel shows it); no other browser stands in.
+#[cfg(unix)]
+#[test]
+fn a_configured_browser_that_vanished_is_an_error_not_a_fallback() {
+    let dir = tempdir("mgr-vanished");
+    let bin = fake_chromium(&dir, "0");
+    let m = manager_using(&dir.join("root"), &bin);
+    m.allocate("s1").unwrap();
+    std::fs::remove_file(&bin).unwrap();
+    let err = m.chromium_port("s1").unwrap_err();
+    assert!(err.contains("Tweaks → Browser"), "{err}");
+    assert_eq!(launch_count(&dir), 0);
+    assert!(
+        m.profile_dir_for_test("s1").is_none(),
+        "nothing was launched"
+    );
 }
 
 #[cfg(unix)]
 #[test]
-fn startup_deletes_only_the_directories_of_dead_processes() {
+fn pruning_deletes_only_the_directories_of_dead_processes() {
     let root = tempdir("leftovers");
     let mut finished = std::process::Command::new("true").spawn().unwrap();
     let dead = finished.id();
@@ -96,7 +296,12 @@ fn startup_deletes_only_the_directories_of_dead_processes() {
     std::fs::write(root.join("keep.txt"), "x").unwrap();
     std::fs::create_dir(root.join("keep-dir")).unwrap();
 
-    let _m = BrowserManager::new(root.clone(), home_dir()).unwrap();
+    let m = BrowserManager::new(&root, Arc::new(SettingsStore::load(None, home_dir()))).unwrap();
+    assert!(
+        root.join(dead.to_string()).exists(),
+        "startup itself prunes nothing"
+    );
+    m.prune_stale_instances();
     assert!(
         !root.join(dead.to_string()).exists(),
         "dead pid's dir removed"
@@ -145,22 +350,33 @@ fn orphan_browser(profile: Option<&Path>, own_group: bool) -> std::process::Chil
     command.spawn().unwrap()
 }
 
+/// Waits for `child` on a thread of its own (real orphans are reaped by
+/// init); the receiver gets its exit status.
+#[cfg(unix)]
+fn reap_concurrently(
+    mut child: std::process::Child,
+) -> std::sync::mpsc::Receiver<std::process::ExitStatus> {
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sent.send(child.wait().unwrap()).unwrap());
+    received
+}
+
 #[cfg(unix)]
 #[test]
-fn startup_reaps_orphaned_browser_before_deleting_dead_instance() {
+fn pruning_reaps_an_orphaned_browser_before_deleting_its_dead_instance() {
     use crate::agent::supervisor::ProcessSupervisor;
     let root = tempdir("reap-orphan");
     let profile = stale_profile(&root);
     let instance = profile.parent().unwrap().parent().unwrap();
-    let mut child = orphan_browser(Some(&profile), true);
+    let child = orphan_browser(Some(&profile), true);
     // Ensure cleanup even when the regression assertion panics.
     let _supervisor = ProcessSupervisor::attach(&child);
     std::fs::write(profile.with_extension("pid"), child.id().to_string()).unwrap();
-    let (sent, received) = std::sync::mpsc::channel();
-    // Real orphans are reaped by init; reap our test child concurrently.
-    let reaper = std::thread::spawn(move || sent.send(child.wait().unwrap()).unwrap());
-    let _manager = BrowserManager::new(root, home_dir()).unwrap();
-    let status = received
+    let status = reap_concurrently(child);
+    BrowserManager::new(&root, Arc::new(SettingsStore::load(None, home_dir())))
+        .unwrap()
+        .prune_stale_instances();
+    let status = status
         .recv_timeout(Duration::from_secs(2))
         .expect("orphaned browser must be killed");
     assert!(!status.success(), "browser killed, not exited normally");
@@ -168,12 +384,37 @@ fn startup_reaps_orphaned_browser_before_deleting_dead_instance() {
         !instance.exists(),
         "dead instance removed after browser exits"
     );
-    reaper.join().unwrap();
+}
+
+/// A directory with our own pid is a crashed earlier run's (pid reuse):
+/// its browser is reaped and the directory starts empty.
+#[cfg(unix)]
+#[test]
+fn a_leftover_directory_with_our_own_pid_is_reaped_and_recreated() {
+    use crate::agent::supervisor::ProcessSupervisor;
+    let root = tempdir("reap-own-pid");
+    let instance = root.join(std::process::id().to_string());
+    let profile = instance.join("profiles/session-1-0");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(instance.join("session-1.yml"), "stale").unwrap();
+    let child = orphan_browser(Some(&profile), true);
+    let _supervisor = ProcessSupervisor::attach(&child);
+    std::fs::write(profile.with_extension("pid"), child.id().to_string()).unwrap();
+    let status = reap_concurrently(child);
+    let m = BrowserManager::new(&root, Arc::new(SettingsStore::load(None, home_dir()))).unwrap();
+    assert!(!status
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the earlier run's browser is killed")
+        .success());
+    assert!(instance.is_dir(), "recreated");
+    assert_eq!(std::fs::read_dir(&instance).unwrap().count(), 0, "empty");
+    // The stale overlay name is free again.
+    assert!(m.allocate("session-1").is_ok());
 }
 
 #[cfg(unix)]
 #[test]
-fn startup_does_not_kill_a_pid_without_the_exact_profile_argument() {
+fn pruning_does_not_kill_a_pid_without_the_exact_profile_argument() {
     use crate::agent::supervisor::ProcessSupervisor;
     for suffix in [None, Some("-other")] {
         let root = tempdir(if suffix.is_some() {
@@ -186,7 +427,9 @@ fn startup_does_not_kill_a_pid_without_the_exact_profile_argument() {
         let mut child = orphan_browser(suffix.map(|_| other.as_path()), true);
         let supervisor = ProcessSupervisor::attach(&child);
         std::fs::write(profile.with_extension("pid"), child.id().to_string()).unwrap();
-        let _manager = BrowserManager::new(root, home_dir()).unwrap();
+        BrowserManager::new(&root, Arc::new(SettingsStore::load(None, home_dir())))
+            .unwrap()
+            .prune_stale_instances();
         assert!(
             child.try_wait().unwrap().is_none(),
             "unrelated process stays alive"
@@ -198,7 +441,7 @@ fn startup_does_not_kill_a_pid_without_the_exact_profile_argument() {
 
 #[cfg(unix)]
 #[test]
-fn startup_does_not_kill_a_matching_pid_that_is_not_its_group_leader() {
+fn pruning_does_not_kill_a_matching_pid_that_is_not_its_group_leader() {
     let root = tempdir("reap-not-leader");
     let profile = stale_profile(&root);
     // Shell builtins only: killing this child cannot leave descendants.
@@ -210,26 +453,13 @@ fn startup_does_not_kill_a_matching_pid_that_is_not_its_group_leader() {
         .spawn()
         .unwrap();
     std::fs::write(profile.with_extension("pid"), child.id().to_string()).unwrap();
-    let _manager = BrowserManager::new(root, home_dir()).unwrap();
+    BrowserManager::new(&root, Arc::new(SettingsStore::load(None, home_dir())))
+        .unwrap()
+        .prune_stale_instances();
     let alive = child.try_wait().unwrap().is_none();
     child.kill().unwrap();
     child.wait().unwrap();
     assert!(alive, "non-leader stays alive");
-}
-
-#[cfg(unix)]
-#[test]
-fn a_second_manager_on_the_same_root_leaves_the_first_ones_files() {
-    let dir = tempdir("mgr-two");
-    let bin = fake_chromium(&dir, "0");
-    let first = BrowserManager::new(dir.clone(), home_dir()).unwrap();
-    let overlay = first.allocate("s1", Some(&bin)).unwrap();
-    first.chromium_port("s1").unwrap();
-    let profile = first.profile_dir_for_test("s1").unwrap();
-    let _second = BrowserManager::new(dir, home_dir()).unwrap();
-    assert!(overlay.exists(), "first manager's overlay survives");
-    assert!(profile.exists(), "first manager's profile survives");
-    assert_eq!(first.allocate("s1", None).unwrap(), overlay);
 }
 
 #[cfg(unix)]
@@ -240,7 +470,7 @@ fn a_symlinked_root_is_refused() {
     std::fs::create_dir(&target).unwrap();
     let link = dir.join("link");
     std::os::unix::fs::symlink(&target, &link).unwrap();
-    assert!(BrowserManager::new(link, home_dir()).is_err());
+    assert!(BrowserManager::new(&link, Arc::new(SettingsStore::load(None, home_dir()))).is_err());
     assert_eq!(
         std::fs::read_dir(&target).unwrap().count(),
         0,
@@ -252,12 +482,13 @@ fn a_symlinked_root_is_refused() {
 #[test]
 fn an_overlay_path_that_is_a_symlink_is_not_written_through() {
     let dir = tempdir("mgr-link-overlay");
-    let m = BrowserManager::new(dir.clone(), home_dir()).unwrap();
+    let root = dir.join("root");
+    let m = BrowserManager::new(&root, Arc::new(SettingsStore::load(None, home_dir()))).unwrap();
     let victim = dir.join("victim");
     std::fs::write(&victim, "precious").unwrap();
-    let instance = dir.join(std::process::id().to_string());
+    let instance = root.join(std::process::id().to_string());
     std::os::unix::fs::symlink(&victim, instance.join("s1.yml")).unwrap();
-    assert!(m.allocate("s1", None).is_err());
+    assert!(m.allocate("s1").is_err());
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
     assert!(m.port("s1").is_none(), "no entry for the failed allocation");
 }
@@ -268,12 +499,13 @@ fn instance_dir_profiles_and_overlay_are_private() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempdir("mgr-modes");
     let bin = fake_chromium(&dir, "0");
-    let m = BrowserManager::new(dir.clone(), home_dir()).unwrap();
-    let overlay = m.allocate("s1", Some(&bin)).unwrap();
+    let root = dir.join("root");
+    let m = manager_using(&root, &bin);
+    let overlay = m.allocate("s1").unwrap();
     m.chromium_port("s1").unwrap();
     let profile = m.profile_dir_for_test("s1").unwrap();
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(&dir.join(std::process::id().to_string())), 0o700);
+    assert_eq!(mode(&root.join(std::process::id().to_string())), 0o700);
     assert_eq!(mode(profile.parent().unwrap()), 0o700);
     assert_eq!(mode(&overlay), 0o600);
     let pid_file = profile.with_extension("pid");
@@ -287,21 +519,22 @@ fn instance_dir_profiles_and_overlay_are_private() {
 #[test]
 fn an_unavailable_manager_refuses_to_allocate() {
     let m = BrowserManager::unavailable("no cache dir".into());
-    assert_eq!(m.allocate("s1", None), Err("no cache dir".into()));
+    assert_eq!(m.allocate("s1"), Err("no cache dir".into()));
     m.release("s1");
+    m.prune_stale_instances();
     m.shutdown_all();
 }
 
 #[test]
 fn shutdown_all_removes_only_its_own_instance_directory() {
     let dir = tempdir("mgr-shutdown-dir");
-    // The manager needs an owned root; this test later inspects that root.
-    let m = BrowserManager::new(dir.clone(), home_dir()).unwrap();
+    let m = BrowserManager::new(&dir, Arc::new(SettingsStore::load(None, home_dir()))).unwrap();
     let instance = dir.join(std::process::id().to_string());
     let other = dir.join("other-instance");
     std::fs::create_dir(&other).unwrap();
     std::fs::create_dir(instance.join("profiles")).unwrap();
-    let overlay = m.allocate("s1", None).unwrap();
+    let overlay = m.allocate("s1").unwrap();
+    m.allocate("s2").unwrap();
     m.shutdown_all();
     m.shutdown_all(); // idempotent, including directory cleanup
     assert!(!overlay.exists());
@@ -309,10 +542,11 @@ fn shutdown_all_removes_only_its_own_instance_directory() {
     assert!(other.is_dir(), "other instance remains");
 }
 
-/// A fake browser (unix): appends a line to `launches` per start, publishes
-/// port `40000 + <launch count>` after `delay` seconds, then idles.
+/// A fake browser (unix) at `dir/fake-chromium`: appends a line to
+/// `dir/launches` per start, records its pid in `dir/pid`, publishes port
+/// `40000 + <launch count>` after `delay` seconds, then idles.
 #[cfg(unix)]
-fn fake_chromium(dir: &Path, delay: &str) -> PathBuf {
+pub(super) fn fake_chromium(dir: &Path, delay: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = dir.join("fake-chromium");
     let log = dir.join("launches");
@@ -345,8 +579,8 @@ fn launch_count(dir: &Path) -> usize {
 fn concurrent_ensures_launch_one_chromium() {
     let dir = tempdir("mgr-once");
     let bin = fake_chromium(&dir, "0.3");
-    let m = BrowserManager::new(dir.clone(), home_dir()).unwrap();
-    m.allocate("s1", Some(&bin)).unwrap();
+    let m = manager_using(&dir.join("root"), &bin);
+    m.allocate("s1").unwrap();
     let ports: Vec<_> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..5)
             .map(|_| s.spawn(|| m.chromium_port("s1").unwrap()))
@@ -362,17 +596,16 @@ fn concurrent_ensures_launch_one_chromium() {
 fn a_slow_launch_blocks_no_other_session() {
     let dir = tempdir("mgr-slow");
     let bin = fake_chromium(&dir, "1");
-    let m = BrowserManager::new(dir.clone(), home_dir()).unwrap();
-    m.allocate("slow", Some(&bin)).unwrap();
+    let m = manager_using(&dir.join("root"), &bin);
+    m.allocate("slow").unwrap();
     std::thread::scope(|s| {
         let launching = s.spawn(|| m.chromium_port("slow").unwrap());
-        // Wait until the launch is in flight.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while launch_count(&dir) == 0 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        eventually(Duration::from_secs(5), || {
+            (launch_count(&dir) > 0).then_some(())
+        })
+        .expect("launch in flight");
         let started = Instant::now();
-        m.allocate("other", Some(&bin)).unwrap();
+        m.allocate("other").unwrap();
         assert!(m.port("other").is_some());
         m.release("other");
         assert!(
@@ -389,8 +622,8 @@ fn a_slow_launch_blocks_no_other_session() {
 fn relaunch_after_crash_uses_a_fresh_profile_and_port() {
     let dir = tempdir("mgr-relaunch-fake");
     let bin = fake_chromium(&dir, "0");
-    let m = BrowserManager::new(dir, home_dir()).unwrap();
-    m.allocate("s1", Some(&bin)).unwrap();
+    let m = manager_using(&dir.join("root"), &bin);
+    m.allocate("s1").unwrap();
     let placeholder = m.port("s1").unwrap();
     let first = m.chromium_port("s1").unwrap();
     let first_profile = m.profile_dir_for_test("s1").unwrap();
@@ -407,8 +640,8 @@ fn relaunch_after_crash_uses_a_fresh_profile_and_port() {
 fn release_removes_profile_and_overlay_and_refuses_later_launches() {
     let dir = tempdir("mgr-release-fake");
     let bin = fake_chromium(&dir, "0");
-    let m = BrowserManager::new(dir.clone(), home_dir()).unwrap();
-    let overlay = m.allocate("s1", Some(&bin)).unwrap();
+    let m = manager_using(&dir.join("root"), &bin);
+    let overlay = m.allocate("s1").unwrap();
     m.chromium_port("s1").unwrap();
     let profile = m.profile_dir_for_test("s1").unwrap();
     assert!(profile.exists());
@@ -430,21 +663,20 @@ fn release_removes_profile_and_overlay_and_refuses_later_launches() {
 fn second_closer_waits_for_the_release_in_flight(name: &str, second_closer: fn(&BrowserManager)) {
     let dir = tempdir(name);
     let bin = fake_chromium(&dir, "1");
-    let m = BrowserManager::new(dir.clone(), home_dir()).unwrap();
-    m.allocate("s1", Some(&bin)).unwrap();
+    let m = manager_using(&dir.join("root"), &bin);
+    m.allocate("s1").unwrap();
     std::thread::scope(|s| {
         let launching = s.spawn(|| m.chromium_port("s1"));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while launch_count(&dir) == 0 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(launch_count(&dir), 1, "launch in flight");
+        eventually(Duration::from_secs(5), || {
+            (launch_count(&dir) > 0).then_some(())
+        })
+        .expect("launch in flight");
         let profile = m.profile_dir_for_test("s1").unwrap();
         let releasing = s.spawn(|| m.release("s1"));
-        while m.port("s1").is_some() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(m.port("s1").is_none(), "release took the entry out");
+        eventually(Duration::from_secs(5), || {
+            m.port("s1").is_none().then_some(())
+        })
+        .expect("release took the entry out");
         second_closer(&m);
         assert!(!profile.exists(), "profile removed when the closer returns");
         let pid: u32 = std::fs::read_to_string(dir.join("pid"))
@@ -473,20 +705,13 @@ fn a_second_release_waits_for_the_first_to_finish() {
     second_closer_waits_for_the_release_in_flight("mgr-release-twice", |m| m.release("s1"));
 }
 
-/// `None` (test passes with a note) when no Chromium is installed.
-pub(super) fn manager_with_chromium(name: &str) -> Option<BrowserManager> {
-    find_chromium(None, &home_dir())?;
-    BrowserManager::new(tempdir(name), home_dir()).ok()
-}
-
 #[test]
 fn relaunch_after_crash_keeps_placeholder_port() {
     let _chromium = lock(&CHROMIUM);
     let Some(m) = manager_with_chromium("relaunch") else {
-        eprintln!("skip: no chromium");
         return;
     };
-    m.allocate("s1", None).unwrap();
+    m.allocate("s1").unwrap();
     let placeholder = m.port("s1").unwrap();
     assert!(http_get(placeholder, "/json/version")
         .unwrap()
@@ -509,10 +734,9 @@ fn relaunch_after_crash_keeps_placeholder_port() {
 fn release_closes_connections_kills_chromium_removes_profile() {
     let _chromium = lock(&CHROMIUM);
     let Some(m) = manager_with_chromium("release") else {
-        eprintln!("skip: no chromium");
         return;
     };
-    m.allocate("s1", None).unwrap();
+    m.allocate("s1").unwrap();
     let placeholder = m.port("s1").unwrap();
     let body = http_get(placeholder, "/json/version").unwrap();
     let ws_path = body

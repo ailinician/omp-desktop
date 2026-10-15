@@ -1,5 +1,5 @@
 // The annotate overlay, run in the isolated world "omp-annotate" of every page
-// of the browser panel (see `annotate.rs`). It reports through the binding
+// of the browser panel (see `annotate/mod.rs`). It reports through the binding
 // `__ompAnnotate`, which Chromium exposes in that world only: the page's own
 // scripts can neither call it nor see this file's state.
 //
@@ -16,6 +16,7 @@
   const DRAG_PX = 4;
   const MAX_HTML = 20000;
   const MAX_TEXT = 500;
+  const MAX_FIELD = 8192;
   const MAX_ANCESTORS = 6;
   const MAX_CLASSES = 2;
   const LAYER = '2147483647';
@@ -23,11 +24,14 @@
   // the page keeps scrolling, and Esc is the panel's business.
   const SWALLOWED = [
     'pointerdown', 'pointerup', 'pointermove', 'pointerover', 'pointerout',
+    'pointerenter', 'pointerleave',
     'mousedown', 'mouseup', 'mousemove', 'mouseover', 'mouseout',
+    'mouseenter', 'mouseleave',
     'click', 'dblclick', 'auxclick', 'contextmenu',
   ];
 
   let on = false;
+  let hidden = 0; // captures in progress, each hiding the overlay
   let host = null;
   let hoverBox = null;
   let hoverLabel = null;
@@ -42,6 +46,7 @@
     return el;
   };
 
+  // Needs no document element: the boxes exist from the first event on.
   const build = () => {
     host = document.createElement('omp-annotate-overlay');
     Object.assign(host.style, {
@@ -64,13 +69,17 @@
     });
   };
 
+  const show = () => {
+    if (host) host.style.visibility = hidden > 0 ? 'hidden' : '';
+  };
+
   const mount = () => {
-    if (!on || (host && host.isConnected)) return;
+    if (!host) build();
+    if (!on || host.isConnected) return;
     if (!document.documentElement) {
       document.addEventListener('DOMContentLoaded', mount, { once: true });
       return;
     }
-    if (!host) build();
     document.documentElement.appendChild(host);
   };
 
@@ -90,20 +99,23 @@
   const cls = (el) => Array.from(el.classList).slice(0, MAX_CLASSES)
     .map((c) => '.' + CSS.escape(c)).join('');
 
-  // `s.slice(0, n)` may cut between the two 16-bit halves of a surrogate
-  // pair (astral code points: emoji, ...); a lone surrogate is invalid
-  // UTF-8, so the pick could not leave the webview.
+  // At most `n` UTF-16 units, never ending in half a surrogate pair, and no
+  // lone surrogate anywhere: `JSON.stringify` would escape one as `\udXXX`,
+  // which the Rust side refuses, dropping the whole pick.
   const trim = (s, n) => {
-    if (s.length <= n) return s;
-    const cut = s.slice(0, n);
-    const last = cut.charCodeAt(cut.length - 1);
-    return last >= 0xd800 && last <= 0xdbff
-      ? cut.slice(0, -1)
-      : cut;
+    let cut = s;
+    if (s.length > n) {
+      cut = s.slice(0, n);
+      const last = cut.charCodeAt(cut.length - 1);
+      if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+    }
+    return typeof cut.toWellFormed === 'function' ? cut.toWellFormed() : cut;
   };
 
+  // `localName` keeps the case of SVG names (`foreignObject`), which their
+  // type selectors need.
   const segment = (el) => {
-    let seg = CSS.escape(el.tagName.toLowerCase()) + cls(el);
+    let seg = CSS.escape(el.localName) + cls(el);
     const parent = el.parentElement;
     if (parent) {
       // `:nth-of-type(n)` only when the tag+class still matches a sibling:
@@ -118,6 +130,7 @@
   };
 
   const unique = (selector, el) => {
+    if (selector.length > MAX_FIELD) return false;
     try {
       const found = document.querySelectorAll(selector);
       return found.length === 1 && found[0] === el;
@@ -161,7 +174,7 @@
 
   const report = (payload) => {
     try {
-      window.__ompAnnotate(JSON.stringify(payload));
+      window.__ompAnnotate(JSON.stringify({ ...payload, url: trim(location.href, MAX_FIELD) }));
     } catch (_) {
       // No binding (the panel detached): nothing to tell.
     }
@@ -169,32 +182,25 @@
 
   const reportElement = (el) => {
     const r = el.getBoundingClientRect();
+    const rect = { x: r.x, y: r.y, w: r.width, h: r.height };
     const text = el.innerText === undefined ? el.textContent : el.innerText;
     report({
       kind: 'element',
-      selector: selectorOf(el),
-      tag: el.tagName.toLowerCase(),
-      rect: { x: r.x, y: r.y, w: r.width, h: r.height },
-      docRect: documentRect({ x: r.x, y: r.y, w: r.width, h: r.height }),
+      selector: trim(selectorOf(el), MAX_FIELD),
+      tag: trim(el.localName, MAX_FIELD),
+      rect,
+      docRect: documentRect(rect),
       html: trim(el.outerHTML, MAX_HTML),
       text: trim(text || '', MAX_TEXT),
-      url: location.href,
     });
   };
 
-  const reportArea = (a, b) => {
+  const reportArea = (rect) => {
     report({
       kind: 'area',
       selector: null, tag: null, html: null, text: null,
-      rect: {
-        x: Math.min(a.x, b.x), y: Math.min(a.y, b.y),
-        w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y),
-      },
-      docRect: documentRect({
-        x: Math.min(a.x, b.x), y: Math.min(a.y, b.y),
-        w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y),
-      }),
-      url: location.href,
+      rect,
+      docRect: documentRect(rect),
     });
   };
 
@@ -210,13 +216,15 @@
   };
 
   const onEvent = (e) => {
-    if (!on) return;
+    // Synthetic events (`el.click()` from the page's scripts or the agent)
+    // are not the user's: they reach the page untouched.
+    if (!on || !e.isTrusted) return;
     // Cancelling a pointerdown would also suppress the mouse events that
     // follow it, which this overlay is driven by: only stop those.
     if (!e.type.startsWith('pointer')) e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
-    if (!e.isTrusted || e.button > 0 || !e.type.startsWith('mouse')) return;
+    if (e.button > 0 || !e.type.startsWith('mouse')) return;
     const point = { x: e.clientX, y: e.clientY };
     if (e.type === 'mousedown') {
       start = point;
@@ -236,8 +244,14 @@
       const from = start;
       const wasDragging = dragging;
       clear();
-      if (wasDragging) {
-        reportArea(from, point);
+      const area = {
+        x: Math.min(from.x, point.x), y: Math.min(from.y, point.y),
+        w: Math.abs(from.x - point.x), h: Math.abs(from.y - point.y),
+      };
+      // A drag thinner than a pixel has no area to capture: the element
+      // under the release is what was meant.
+      if (wasDragging && area.w >= 1 && area.h >= 1) {
+        reportArea(area);
       } else {
         const el = elementAt(point.x, point.y);
         if (el) reportElement(el);
@@ -252,10 +266,24 @@
   window.__ompAnnotateSet = (value) => {
     on = Boolean(value);
     if (on) {
+      hidden = 0;
       mount();
+      show();
     } else {
       clear();
       if (host) host.remove();
     }
+  };
+
+  // Hide (`true`) or show again (`false`) for a capture, only visually: `on`
+  // stays, so clicks are still swallowed. Gives the viewport in document CSS
+  // pixels, read here where the page cannot redefine `scrollX`.
+  window.__ompAnnotateHide = (hide) => {
+    hidden = Math.max(0, hidden + (hide ? 1 : -1));
+    show();
+    return {
+      x: window.scrollX, y: window.scrollY,
+      w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio,
+    };
   };
 })();

@@ -1,33 +1,36 @@
 // app/browser-screen.js — DOM side of the browser panel (docs/architecture/browser.md):
 // paints the latest screencast frame on a canvas and
-// forwards the user's pointer, wheel, key and paste input to the page.
-//   createScreen({ view, canvas, send, onResize, onPage, swallowKey })
+// forwards the user's pointer, wheel, key, text and paste input to the page.
+//   createScreen({ view, canvas, sink, send, ack, onResize, onPage, escape, onEscape })
 //     -> { frame(f), size(), destroy() }
-// `view` is the focusable wrapper (tabIndex 0) the canvas fills; `send(ev)`
-// takes an `InputEvent` (app/browser.js); `onResize(w, h, dpr)` fires 100 ms
-// after the view's CSS size settled on a new value; `onPage({cssW, cssH})`
-// when the painted frame's CSS size changes; `swallowKey(e)` keeps a key from the
-// page (annotate's Esc). Pure mappings live in app/browser.js; DOM scheduling
-// and painting have a minimal-stub regression in tests/test-browser-runtime.mjs.
+//   watchLocalLinks(open) -> unsubscribe
+// `view` is the wrapper the canvas fills; `sink` a hidden <textarea> inside
+// it that holds keyboard focus for the page, so paste, IME composition and
+// dead keys work (an editable target): keys that type nothing go out as key
+// events, composed text and pastes as `{ kind: "text" }`. `send(ev)` takes
+// an `InputEvent` (app/browser.js). `ack(seq)` tells Rust a frame was
+// painted or dropped (one frame in flight per view). `onResize(w, h, dpr)`
+// fires 100 ms after the view's CSS size or the display's pixel ratio
+// settled on a new value; `onPage({cssW, cssH})` when the painted frame's
+// CSS size changes. `escape()` is what Esc on the panel does now
+// (OMP_BROWSER.escapeAction, null = the page's key), `onEscape(action)`
+// does it. Chords the app keymap takes leave the page the way they leave
+// the terminal (OMP_KEYMAP.guestShouldBypass). Pure mappings live in app/browser.js;
+// DOM scheduling and painting have a minimal-stub regression in
+// tests/test-browser-runtime.mjs.
 (function () {
   const RESIZE_MS = 100;
   const LINE_PX = 16;
 
-  function bytesOf(b64) {
-    const bin = atob(b64);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-  }
-
-  function createScreen({ view, canvas, send, onResize, onPage, swallowKey }) {
+  function createScreen({ view, canvas, sink, send, ack, onResize, onPage, escape, onEscape }) {
     const B = window.OMP_BROWSER;
+    const bytesOf = window.OMP_IMAGES.b64Bytes;
     const ctx = canvas.getContext("2d");
     let dead = false;
     let last = null; // newest frame received: its CSS size maps the clicks
     let incoming = null; // newest frame not yet decoded
     let decoding = false;
-    let ready = null; // decoded, not yet painted: { bmp, cssW, cssH }
+    let ready = null; // decoded, not yet painted: { bmp, cssW, cssH, seq }
     let shown = null; // painted: { bmp, cssW, cssH }; kept to redraw after a resize
     let paintRaf = 0;
     let published = null; // geometry sent with the last painted frame
@@ -35,6 +38,11 @@
     let move = null;
     let pressed = false;
     let resizeTimer = 0;
+    let dprQuery = null;
+
+    // Every frame Rust sent is acked exactly once: painted, or dropped
+    // (superseded before decode or paint, undecodable).
+    const done = (f) => { if (f && f.seq != null) ack(f.seq); };
 
     const dpr = () => window.devicePixelRatio || 1;
     const sizeNow = () => {
@@ -56,9 +64,11 @@
       paintRaf = 0;
       if (dead) return;
       fit();
+      let painted = null;
       if (ready) {
         shown?.bmp.close();
-        shown = ready;
+        painted = ready;
+        shown = { bmp: ready.bmp, cssW: ready.cssW, cssH: ready.cssH };
         ready = null;
       }
       if (shown) {
@@ -70,6 +80,7 @@
           onPage(published);
         }
       }
+      done(painted);
     }
     const schedule = () => { if (!paintRaf) paintRaf = requestAnimationFrame(paint); };
 
@@ -84,11 +95,11 @@
         try {
           const bmp = await createImageBitmap(new Blob([bytesOf(f.b64)], { type: "image/jpeg" }));
           if (dead) { bmp.close(); break; }
-          ready?.bmp.close();
-          ready = { bmp, cssW: f.cssW, cssH: f.cssH };
+          if (ready) { ready.bmp.close(); done(ready); }
+          ready = { bmp, cssW: f.cssW, cssH: f.cssH, seq: f.seq };
           schedule();
         } catch {
-          // an undecodable frame is dropped; the next one replaces it
+          done(f); // an undecodable frame is dropped; the next one replaces it
         }
       }
       decoding = false;
@@ -97,11 +108,15 @@
     function frame(f) {
       if (dead || !f?.b64) return;
       last = f;
+      done(incoming);
       incoming = f;
       void pump();
     }
 
-    const ro = new ResizeObserver(() => {
+    // A size reaches Rust once it held for RESIZE_MS: the view's CSS size
+    // (ResizeObserver) or the display's pixel ratio (moving the window to a
+    // monitor with another scale changes no CSS size).
+    function settle() {
       schedule();
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
@@ -111,8 +126,22 @@
         sent = s;
         onResize(s.width, s.height, s.dpr);
       }, RESIZE_MS);
-    });
+    }
+    const ro = new ResizeObserver(settle);
     ro.observe(view);
+    // A `(resolution: Ndppx)` query matches only the current ratio, so it is
+    // re-armed for the new one on every change.
+    function watchDpr() {
+      dprQuery?.removeEventListener("change", onDpr);
+      dprQuery = window.matchMedia?.(`(resolution: ${dpr()}dppx)`) ?? null;
+      dprQuery?.addEventListener("change", onDpr);
+    }
+    function onDpr() {
+      if (dead) return;
+      watchDpr();
+      settle();
+    }
+    watchDpr();
 
     // ---- input ---------------------------------------------------------------
 
@@ -139,16 +168,16 @@
     const onDown = (e) => {
       if (e.target !== canvas) return;
       e.preventDefault(); // keeps the page selection ours, so focus is taken by hand
-      view.focus();
+      sink.focus({ preventScroll: true });
       pressed = true;
       flushMove();
-      mouse("mousePressed", e, ["left", "middle", "right"][e.button] ?? "left");
+      mouse("mousePressed", e, B.mouseButton(e.button));
     };
     const onUp = (e) => {
       if (!pressed) return;
       pressed = false;
       flushMove();
-      mouse("mouseReleased", e, ["left", "middle", "right"][e.button] ?? "left");
+      mouse("mouseReleased", e, B.mouseButton(e.button));
     };
     // Moves are coalesced to one per frame; a drag keeps reporting after the
     // pointer left the view.
@@ -175,26 +204,50 @@
     };
     const onContext = (e) => { if (e.target === canvas) e.preventDefault(); };
 
-    // Only keys typed on the view itself (not in the popover or toolbar).
+    // Only keys typed into the sink (not in the popover or toolbar). A key
+    // the IME or a dead key is working on stays in the sink: its result
+    // arrives as text. Ctrl/⌘+V pastes natively into the sink (WebKit only
+    // enables paste on an editable target) and reaches the page as text.
+    const composing = (e) => e.isComposing || e.key === "Process" || e.key === "Dead";
     const isPaste = (e) => (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v";
+    const appKey = (e) => (e.key === "Escape" && escape() !== null) || window.OMP_KEYMAP.guestShouldBypass(e);
     const onKey = (type) => (e) => {
-      if (e.target !== view || e.isComposing || swallowKey(e) || isPaste(e)) return; // paste arrives as text
+      if (e.target !== sink || composing(e) || isPaste(e) || appKey(e)) return;
       e.preventDefault();
       send(B.keyEventToCdp(e, type));
     };
     const onKeyDown = onKey("keyDown");
     const onKeyUp = onKey("keyUp");
+    // Whatever text landed in the sink (a finished composition, a dead-key
+    // character) goes to the page once and the sink is emptied.
+    const flushText = () => {
+      const text = sink.value;
+      sink.value = "";
+      if (text) send({ kind: "text", text });
+    };
+    const onInput = (e) => { if (!e.isComposing) flushText(); };
     const onPaste = (e) => {
       const text = e.clipboardData?.getData("text/plain");
-      if (e.target !== view || !text) return;
       e.preventDefault();
-      send({ kind: "text", text });
+      if (text) send({ kind: "text", text });
+    };
+
+    // Esc on the panel while annotating is the panel's: never the page's,
+    // never the app keymap's interrupt (which ignores a prevented key).
+    // Bound on the panel, so Esc in the composer is not ours.
+    const panel = view.closest?.(".browser-panel") ?? view;
+    const onEsc = (e) => {
+      const action = e.key === "Escape" ? escape() : null;
+      if (!action) return;
+      e.preventDefault();
+      onEscape(action);
     };
 
     const on = [
-      [view, "mousedown", onDown], [window, "mouseup", onUp], [window, "mousemove", onMove],
+      [panel, "keydown", onEsc], [view, "mousedown", onDown], [window, "mouseup", onUp], [window, "mousemove", onMove],
       [view, "wheel", onWheel, { passive: false }], [view, "contextmenu", onContext],
-      [view, "keydown", onKeyDown], [view, "keyup", onKeyUp], [view, "paste", onPaste],
+      [sink, "keydown", onKeyDown], [sink, "keyup", onKeyUp], [sink, "paste", onPaste],
+      [sink, "input", onInput], [sink, "compositionend", flushText],
     ];
     for (const [t, type, fn, opt] of on) t.addEventListener(type, fn, opt);
 
@@ -202,6 +255,7 @@
       dead = true;
       for (const [t, type, fn, opt] of on) t.removeEventListener(type, fn, opt);
       ro.disconnect();
+      dprQuery?.removeEventListener("change", onDpr);
       clearTimeout(resizeTimer);
       cancelAnimationFrame(paintRaf);
       cancelAnimationFrame(moveRaf);
@@ -213,5 +267,19 @@
     return { frame, size: sizeNow, destroy };
   }
 
-  window.OMP_BROWSER_SCREEN = { createScreen };
+  // Primary clicks on localhost links in the chat (OMP_BROWSER.linkClick)
+  // go to `open(url, external)` instead of the webview. Returns the
+  // unsubscribe.
+  function watchLocalLinks(open) {
+    const onClick = (e) => {
+      const link = window.OMP_BROWSER.linkClick(e);
+      if (!link) return;
+      e.preventDefault();
+      open(link.url, link.external);
+    };
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
+  }
+
+  window.OMP_BROWSER_SCREEN = { createScreen, watchLocalLinks };
 })();

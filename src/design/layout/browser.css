@@ -8,57 +8,57 @@
 }
 
 /* ── Tabs ──────────────────────────────────────────────────────────── */
+/* The project tab bar's `.tab` / `.tab-name` / `.tab-close` / `.tab-add`
+   (chrome.css), shorter and smaller for the panel. `+` sits right after
+   the last tab, as in the tab bar. */
 .browser-tabs {
-  display: flex; align-items: center; gap: 4px;
-  height: 28px; padding: 0 6px;
+  display: flex; align-items: stretch; flex: none;
+  height: 28px;
   border-bottom: 1px solid var(--line-soft);
 }
 .browser-tabs-scroll {
-  display: flex; gap: 2px;
-  flex: 1; min-width: 0;
+  display: flex; align-items: stretch;
+  flex: 0 1 auto; min-width: 0;
   overflow-x: auto; scrollbar-width: none;
 }
 .browser-tabs-scroll::-webkit-scrollbar { display: none; }
-.browser-tab {
-  display: flex; align-items: center;
-  flex: 0 0 auto; max-width: 160px;
-  height: 22px;
-  border-radius: var(--r-1);
-  color: var(--fg-3);
+.browser-tabs .tab { flex: none; min-width: 0; max-width: 180px; padding: 0 8px 0 12px; gap: 6px; }
+/* A reset button, so it is reachable by keyboard but not a native button. */
+.browser-tabs .tab-name {
+  appearance: none; border: 0; background: transparent; padding: 0;
+  color: inherit; cursor: inherit; text-align: left;
+  font-size: var(--d-text-xs); max-width: 150px;
 }
-.browser-tab:hover { background: var(--bg-hover); }
-.browser-tab.active { background: var(--bg-active); color: var(--fg); }
-.browser-tab-title {
-  min-width: 0; padding: 0 4px 0 8px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: var(--d-text-xs); color: inherit;
-}
-.browser-tab-close {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 16px; height: 16px; margin-right: 3px;
-  border-radius: 4px; color: var(--fg-4);
-}
-.browser-tab-close:hover { background: var(--bg-hover); color: var(--fg); }
+.browser-tabs .tab-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
+.browser-tabs .tab:focus-within > .tab-close { opacity: 1; }
+.browser-tabs .tab-add:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 /* ── Control bar ───────────────────────────────────────────────────── */
 .browser-bar {
-  display: flex; align-items: center; gap: 2px;
+  display: flex; align-items: center; gap: 2px; flex: none;
   height: 34px; padding: 0 6px;
   border-bottom: 1px solid var(--line);
 }
 .browser-bar .btn.icon.active { color: var(--accent); background: var(--accent-soft); }
+/* `.btn` has no disabled look of its own (cf. `.queue-btn:disabled`). */
+.browser-bar .btn:disabled { opacity: 0.4; cursor: default; }
+.browser-bar .btn:disabled:hover { background: transparent; color: var(--fg-3); }
 .browser-address {
   flex: 1; min-width: 0; margin: 0 4px;
   height: 24px;
   background: var(--bg-input);
   border: 1px solid var(--line);
   border-radius: var(--r-1);
+  transition: border-color 120ms;
 }
-.browser-address:focus-within { border-color: var(--line-bright); }
+/* The field's border shows focus, as `.composer-row` does: no inner ring. */
+.browser-address:focus-within { border-color: var(--accent); }
 .browser-address input {
   width: 100%; height: 100%; padding: 0 8px;
   font-size: var(--d-text-xs);
 }
+.browser-address input:focus-visible { outline: none; }
+.browser-address input::placeholder { color: var(--fg-4); }
 .browser-address.shake { animation: browserShake 280ms var(--ease-out); border-color: var(--rose); }
 @keyframes browserShake {
   20% { transform: translateX(-4px); }
@@ -79,9 +79,23 @@
   position: relative; flex: 1; min-width: 0;
   overflow: hidden;
   background: var(--bg-app);
-  outline: none;
 }
-.browser-view:focus-visible { box-shadow: inset 0 0 0 1px var(--line-bright); }
+/* The page's keyboard focus sink (browser-panel.jsx): focusable, so never
+   display:none or visibility:hidden, but invisible and inert to the pointer;
+   the view's ring below stands in for its focus. */
+.browser-sink {
+  position: absolute; left: 0; top: 0;
+  width: 1px; height: 1px; padding: 0; border: 0;
+  opacity: 0; resize: none; overflow: hidden;
+  pointer-events: none; caret-color: transparent;
+}
+.browser-sink:focus-visible { outline: none; }
+/* Over the canvas (an inset shadow on the view would sit under it). */
+.browser-view:has(> .browser-sink:focus-visible)::after {
+  content: ""; position: absolute; inset: 0; z-index: 2;
+  box-shadow: inset 0 0 0 1px var(--line-bright);
+  pointer-events: none;
+}
 .browser-view.annotating { cursor: crosshair; }
 .browser-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .browser-status {
@@ -94,21 +108,24 @@
 .browser-status.error { color: var(--rose); }
 
 /* ── Annotations ───────────────────────────────────────────────────── */
+/* On the accent, text takes the window colour (the `.twk-btn` precedent):
+   it follows the theme, as `.btn.primary`'s per-theme overrides do. */
 .browser-marker {
   position: absolute; z-index: 1;
   display: flex; align-items: center; justify-content: center;
-  width: 16px; height: 16px;
+  width: 1rem; height: 1rem;
   transform: translate(-50%, -50%);
   border-radius: 50%;
-  background: var(--accent); color: #06241B;
-  font-size: 10px; font-weight: 600;
+  background: var(--accent); color: var(--bg-window);
+  font-size: var(--d-text-xs); font-weight: 600;
   pointer-events: none;
 }
+/* Surface (background, border, radius, shadow) from the shared menu rule
+   `.profile-pop, .tab-group-pop, .thinking-pop, .browser-popover` (chrome.css). */
 .browser-popover {
-  position: absolute; z-index: 3;
-  display: flex; flex-direction: column; gap: 6px;
+  z-index: 3;
+  gap: 6px;
   width: min(260px, calc(100% - 16px)); padding: 8px;
-  box-shadow: var(--shadow-card);
 }
 .browser-popover-what {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -123,8 +140,12 @@
   border: 1px solid var(--line);
   border-radius: var(--r-1);
   font-size: var(--d-text-sm);
+  transition: border-color 120ms;
 }
-.browser-popover textarea:focus-visible { border-color: var(--line-bright); }
+/* The border shows focus, as on the address field: no second ring. */
+.browser-popover textarea:focus-visible { outline: none; }
+.browser-popover textarea:focus { border-color: var(--accent); }
+.browser-popover textarea::placeholder { color: var(--fg-4); }
 
 /* ── Stage slot: panel + resize handle ─────────────────────────────── */
 .stage.with-browser { grid-template-columns: minmax(0, 1fr) auto; }
@@ -142,22 +163,33 @@
 .browser-resize:hover, .browser-resize.dragging { background: color-mix(in oklab, var(--accent) 35%, transparent); }
 
 /* ── Composer: annotation chips ────────────────────────────────────── */
+/* Laid out like `.paste-chip` (composer.css): a reset-button label with
+   the `#n selector` in mono, then ×; both carry their own focus ring. */
 .browser-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 2px 8px; }
 .browser-chip {
-  display: flex; align-items: center; gap: 5px;
-  max-width: 100%; padding: 3px 4px 3px 7px;
+  display: flex; align-items: center; gap: 2px;
+  max-width: 100%; padding: 0 4px 0 0;
   border: 1px solid color-mix(in oklab, var(--accent) 35%, var(--line-bright)); border-radius: 6px;
   background: var(--bg-elevated);
   font-size: var(--d-text-xs); color: var(--fg-2);
+  overflow: hidden;
 }
 .browser-chip.reserved { opacity: 0.55; }
-.browser-chip.clickable { cursor: pointer; }
+.browser-chip-label {
+  display: flex; align-items: center; gap: 5px;
+  min-width: 0; padding: 3px 4px 3px 7px;
+  appearance: none; border: 0; background: transparent;
+  color: inherit; text-align: left;
+}
+button.browser-chip-label:hover { background: var(--bg-hover); color: var(--fg); }
+button.browser-chip-label:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .browser-chip-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .browser-chip-remove {
   display: flex; align-items: center; justify-content: center; flex: none;
-  width: 16px; height: 16px; padding: 0;
-  border: none; border-radius: 50%; background: none;
+  width: 1rem; height: 1rem; padding: 0;
+  appearance: none; border: 0; border-radius: 50%; background: transparent;
   color: var(--fg-3); cursor: pointer;
 }
 .browser-chip-remove:hover { color: var(--rose); background: var(--bg-hover); }
+.browser-chip-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .browser-chips-note { flex-basis: 100%; font-size: var(--d-text-xs); color: var(--amber); }

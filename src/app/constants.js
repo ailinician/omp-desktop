@@ -12,8 +12,9 @@
 (function () {
   // `foldThinking` / `foldTools`: null until picked (OMP_COLLAPSE.foldModes).
   // `browserWidth`: px of the browser panel, 0 = half the stage (OMP_BROWSER.clampWidth).
-  // `browserPath`: Chromium override, "" = find one. `browserLocalhostInPanel`:
-  // a plain click on a localhost chat link opens the panel instead of the system browser.
+  // `browserLocalhostInPanel`: a plain click on a localhost chat link opens
+  // the panel instead of the system browser. (The Chromium path is a Rust
+  // setting, browser.json — never a tweak.)
   const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
     "theme": "aurora",
     "density": "compact",
@@ -37,7 +38,6 @@
     "terminalAutoOpen": false,
     "terminalHeight": 240,
     "browserWidth": 0,
-    "browserPath": "",
     "browserLocalhostInPanel": true
   }/*EDITMODE-END*/;
 

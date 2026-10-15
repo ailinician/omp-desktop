@@ -84,21 +84,22 @@ function useGoalMode({ bridge, tabId, sessionIds, goal, planMode, profileId, run
   const toggle = () => { if (mode || !goalBlocked) update(tabId, _UG_toggle); };
   const enter = () => { if (!goalBlocked) update(tabId, _UG_enter); };
 
-  /** The goal-mode send: `goal create` plus, when omp does not start on
-   *  its own, the objective as the first prompt (OMP_BRIDGE.goalStart).
+  /** The goal-mode send: `goal create` with the typed objective plus, when
+   *  omp does not start on its own, the first prompt (OMP_BRIDGE.goalStart).
    *  Leaves goal mode on success; on a refusal keeps it, shows omp's
-   *  reason in the strip and hands the objective back — but a goal that
-   *  was already created (`res.created`) leaves goal mode off again,
+   *  reason in the strip and hands the typed objective back — but a goal
+   *  that was already created (`res.created`) leaves goal mode off again,
    *  since re-sending would `goal create` over the existing goal.
-   *  `back` is what goes
-   *  back into the composer then when it differs from what was sent (the
-   *  objective with browser annotations merged in). Resolves whether omp
-   *  accepted the goal. */
-  const start = async (text, images, back = { text, images }) => {
+   *  `typed` is `{ text, images }` as the user wrote it: `text` becomes the
+   *  goal's objective and both go back into the composer on a failure.
+   *  `out` is what the first prompt delivers (the typed text and images
+   *  with the tab's browser annotations merged in); it defaults to
+   *  `typed`. Resolves whether omp accepted the goal and its prompt. */
+  const start = async (typed, out = typed) => {
     const id = tabId;
     const budget = draft.budget;
     update(id, d => (d.error ? { ...d, error: null } : d));
-    const res = await bridge?.goalStart(text, budget, images);
+    const res = await bridge?.goalStart(typed.text, budget, out.images, out.text);
     if (res?.ok) {
       update(id, () => _UG_IDLE);
       return true;
@@ -111,7 +112,7 @@ function useGoalMode({ bridge, tabId, sessionIds, goal, planMode, profileId, run
     // send above released them, it did not spend them (app-live.jsx).
     const rearm = !res?.created;
     update(id, d => ({ ...d, mode: rearm, error: res?.error ?? "Could not start the goal." }));
-    if (tabRef.current === id) onRestoreDraft?.(back.text, back.images);
+    if (tabRef.current === id) onRestoreDraft?.(typed.text, typed.images);
     return false;
   };
 

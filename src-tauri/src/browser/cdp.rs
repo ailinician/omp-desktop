@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -69,12 +69,9 @@ impl CdpClient {
             .map_err(|e| format!("cdp address {authority}: {e}"))?
             .find(|a| a.ip().is_loopback())
             .ok_or_else(|| format!("cdp address {authority} is not on this machine"))?;
-        let stream = TcpStream::connect_timeout(&addr, IO_TIMEOUT)
-            .map_err(|e| format!("cdp connect: {e}"))?;
+        let stream = loopback_stream(addr).map_err(|e| format!("cdp connect: {e}"))?;
         let setup = |e: std::io::Error| format!("cdp socket: {e}");
         stream.set_nodelay(true).map_err(setup)?;
-        stream.set_read_timeout(Some(IO_TIMEOUT)).map_err(setup)?;
-        stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(setup)?;
         let peek = stream.try_clone().map_err(setup)?;
         let control = stream.try_clone().map_err(setup)?;
         let (ws, _) =
@@ -131,8 +128,16 @@ impl CdpClient {
     /// Send a command without waiting for the response (it is discarded).
     /// For the event handler, which must not block on the reader.
     pub fn notify(&self, session: Option<&str>, method: &str, params: Value) {
+        let _ = self.post(session, method, params);
+    }
+
+    /// [`notify`](Self::notify) that says whether the command went out.
+    pub fn post(&self, session: Option<&str>, method: &str, params: Value) -> Result<(), String> {
+        if self.shared.closed.load(Ordering::SeqCst) {
+            return Err("cdp connection closed".into());
+        }
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
-        let _ = self.send(id, session, method, params);
+        self.send(id, session, method, params)
     }
 
     fn send(
@@ -250,13 +255,20 @@ fn dispatch(shared: &Shared, on_event: &EventHandler, text: &str) {
     }
 }
 
+/// A TCP connection to `addr` on this machine with the connect, read and
+/// write deadlines of every CDP socket.
+fn loopback_stream(addr: SocketAddr) -> std::io::Result<TcpStream> {
+    let stream = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    Ok(stream)
+}
+
 /// The browser-level `DevTools` WebSocket URL of the Chromium on `port`
 /// (`/json/version`).
 pub fn browser_ws_url(port: u16) -> Result<String, String> {
     let err = |e: std::io::Error| format!("chromium /json/version: {e}");
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(err)?;
-    stream.set_read_timeout(Some(IO_TIMEOUT)).map_err(err)?;
-    stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(err)?;
+    let mut stream = loopback_stream(SocketAddr::from((Ipv4Addr::LOCALHOST, port))).map_err(err)?;
     write!(
         stream,
         "GET /json/version HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
@@ -286,4 +298,133 @@ pub fn browser_ws_url(port: u16) -> Result<String, String> {
         .ok()
         .and_then(|v| v["webSocketDebuggerUrl"].as_str().map(str::to_owned))
         .ok_or_else(|| "chromium /json/version has no webSocketDebuggerUrl".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::{self, Receiver};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use serde_json::{json, Value};
+
+    use super::super::tests::{cdp_error, cdp_result, fake_cdp};
+    use super::{CdpClient, DISCONNECTED};
+
+    /// A one-connection CDP stand-in: `echo` answers with its params, `event`
+    /// sends an event first, `fail` answers with an error, `drop` closes the
+    /// socket without answering.
+    fn fake_server() -> String {
+        fake_cdp(|request| match request["method"].as_str() {
+            Some("event") => Some(vec![
+                json!({ "method": "Fake.event", "sessionId": "s1", "params": { "n": 1 } }),
+                cdp_result(request, json!({})),
+            ]),
+            Some("fail") => Some(vec![cdp_error(request, "nope")]),
+            Some("drop") => None,
+            _ => Some(vec![cdp_result(request, request["params"].clone())]), // the reply owns its result
+        })
+    }
+
+    type Seen = (Option<String>, String, Value);
+
+    fn connect(url: &str) -> (CdpClient, Receiver<Seen>) {
+        let (tx, rx) = mpsc::channel();
+        let client = CdpClient::connect(
+            url,
+            Box::new(move |session, method, params| {
+                let _ = tx.send((
+                    session.map(str::to_owned),
+                    method.to_owned(),
+                    params.clone(), // the handler only borrows it
+                ));
+            }),
+        )
+        .unwrap();
+        (client, rx)
+    }
+
+    #[test]
+    fn calls_get_their_own_responses_and_events_reach_the_handler() {
+        let (client, events) = connect(&fake_server());
+        assert_eq!(
+            client.call(None, "echo", json!({ "a": 1 })).unwrap(),
+            json!({ "a": 1 })
+        );
+        client.call(Some("s1"), "event", json!({})).unwrap();
+        let (session, method, params) = events.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(session.as_deref(), Some("s1"));
+        assert_eq!(method, "Fake.event");
+        assert_eq!(params["n"], 1);
+        client.close();
+    }
+
+    #[test]
+    fn concurrent_calls_are_matched_by_id() {
+        let (client, _events) = connect(&fake_server());
+        thread::scope(|s| {
+            let calls: Vec<_> = (0..8)
+                .map(|i| {
+                    let client = &client;
+                    s.spawn(move || client.call(None, "echo", json!({ "i": i })).unwrap())
+                })
+                .collect();
+            for (i, call) in calls.into_iter().enumerate() {
+                assert_eq!(call.join().unwrap(), json!({ "i": i }));
+            }
+        });
+    }
+
+    #[test]
+    fn an_error_response_is_the_calls_error() {
+        let (client, _events) = connect(&fake_server());
+        assert_eq!(client.call(None, "fail", json!({})), Err("nope".to_owned()));
+    }
+
+    #[test]
+    fn a_post_is_sent_without_waiting_for_the_reply() {
+        let (client, events) = connect(&fake_server());
+        assert_eq!(client.post(Some("s1"), "event", json!({})), Ok(()));
+        let (_, method, _) = events.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "Fake.event", "the command reached the server");
+        client.close();
+        assert!(
+            client.post(None, "echo", json!({})).is_err(),
+            "a closed connection is an error"
+        );
+    }
+
+    #[test]
+    fn a_lost_connection_fails_the_pending_call_and_is_reported_once() {
+        let (client, events) = connect(&fake_server());
+        let started = Instant::now();
+        assert!(client.call(None, "drop", json!({})).is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "not the 10 s timeout"
+        );
+        let (_, method, _) = events.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, DISCONNECTED);
+        assert!(client.call(None, "echo", json!({})).is_err());
+        assert!(events.recv_timeout(Duration::from_millis(300)).is_err());
+    }
+
+    #[test]
+    fn close_ends_the_reader_promptly_without_a_disconnect_event() {
+        let (client, events) = connect(&fake_server());
+        client.call(None, "echo", json!({})).unwrap();
+        let started = Instant::now();
+        client.close();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(client.call(None, "echo", json!({})).is_err());
+        assert!(events.recv_timeout(Duration::from_millis(300)).is_err());
+        client.close(); // idempotent
+    }
+
+    #[test]
+    fn only_loopback_ws_urls_are_accepted() {
+        let handler = || Box::new(|_: Option<&str>, _: &str, _: &Value| {});
+        assert!(CdpClient::connect("http://127.0.0.1:1/x", handler()).is_err());
+        assert!(CdpClient::connect("ws://192.0.2.1:9222/x", handler()).is_err());
+    }
 }

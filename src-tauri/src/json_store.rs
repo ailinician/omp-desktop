@@ -503,7 +503,7 @@ impl Drop for LockGuard<'_> {
 /// the file already exists) holding this call's lock-ownership marker
 /// (see [`lock_contents`]). If creation
 /// fails because the file exists, its contents are inspected: if the owning
-/// pid is no longer alive (Unix only — see [`pid_is_alive`]) or
+/// pid is no longer alive (see [`pid_is_alive`]) or
 /// `stale_after` has elapsed since its timestamp, the lock is considered
 /// abandoned and is forcibly taken over (best-effort remove, then retry —
 /// up to [`LOCK_TAKEOVER_ATTEMPTS`] times). The lock file is removed after

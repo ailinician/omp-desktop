@@ -1,19 +1,37 @@
 //! The view's worker thread: reacts to target and page events with the CDP
-//! calls the reader thread must not make.
+//! calls the reader thread must not make, and shows the agent's page once a
+//! hold that kept it back ends.
 
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
+use std::time::Instant;
 
 use serde_json::{json, Value};
 
-use super::cdp::DISCONNECTED;
+use super::super::cdp::DISCONNECTED;
+use super::super::lock;
+use super::core::Core;
 use super::emit::Status;
-use super::lock;
-use super::view_core::Core;
-use super::view_events::Event;
+use super::events::Event;
 
 pub(super) fn run_worker(core: &Core, events: &Receiver<Event>) {
-    for event in events {
+    loop {
+        // A follow kept back by the user's hold is shown when the hold ends.
+        let deadline = lock(&core.inner).follow_deadline();
+        let event = match deadline {
+            Some(at) => match events.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                Ok(event) => event,
+                Err(RecvTimeoutError::Timeout) => {
+                    on_hold_ended(core);
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+            None => match events.recv() {
+                Ok(event) => event,
+                Err(_) => break,
+            },
+        };
         match event {
             Event::Stop => break,
             Event::Follow => on_follow(core),
@@ -67,9 +85,15 @@ fn on_page_event(core: &Core, method: &str, params: &Value) {
         "Page.frameNavigated" => {
             let frame = &params["frame"];
             if frame.get("parentId").is_none() {
-                if let Some(url) = frame["url"].as_str() {
-                    core.update_state(|s| url.clone_into(&mut s.url));
-                }
+                // A failed load commits an error page that names the URL.
+                let failed = frame["unreachableUrl"].as_str();
+                let url = failed.or_else(|| frame["url"].as_str());
+                core.update_state(|s| {
+                    if let Some(url) = url {
+                        url.clone_into(&mut s.url);
+                    }
+                    s.error = failed.map(|url| format!("could not load {url}"));
+                });
                 let _ = core.refresh_history();
             }
         }
@@ -78,9 +102,11 @@ fn on_page_event(core: &Core, method: &str, params: &Value) {
         "Page.loadEventFired" => {
             core.update_state(|s| s.loading = false);
             let _ = core.refresh_history();
+            let _ = core.refresh_title();
         }
         "Page.navigatedWithinDocument" => {
             let _ = core.refresh_history();
+            let _ = core.refresh_title();
         }
         _ => {}
     }
@@ -94,21 +120,31 @@ fn on_target_event(core: &Core, method: &str, params: &Value) {
     core.publish_tabs(&mut inner);
     drop(inner);
     if let Some(id) = follow {
-        let _ = core.switch_to(&id);
+        core.follow_to(&id);
     }
 }
 
-/// The agent worked in the page in the follow slot (see `tap.rs`): show it,
-/// or show it when it is listed.
+/// The agent worked in the page in the follow slot (see `proxy/`): show it,
+/// or show it when it is listed or the user's hold ends. The agent acting
+/// ends annotate mode: the user's picks would land on a page it changes.
 fn on_follow(core: &Core) {
     #[cfg(test)]
     drop(lock(&core.follow_gate)); // a test holds it to keep the worker from taking the slot
     let Some(target) = core.follow.take() else {
         return;
     };
-    let follow = lock(&core.inner).request_follow(&target);
-    if follow {
-        let _ = core.switch_to(&target);
+    let annotating = lock(&core.annotate).on;
+    if annotating {
+        let _ = core.set_annotate(false);
+    }
+    core.follow_to(&target);
+}
+
+/// The user's hold ended with a follow kept back: show that page now.
+fn on_hold_ended(core: &Core) {
+    let held = lock(&core.inner).take_held_follow();
+    if let Some(target) = held {
+        core.follow_to(&target);
     }
 }
 
@@ -120,8 +156,7 @@ fn on_target_destroyed(core: &Core, target_id: Option<&str>) {
     };
     let next = {
         let mut inner = lock(&core.inner);
-        let before = inner.pages.len();
-        inner.pages.retain(|p| p.target_id != target_id);
+        let removed = inner.remove_page(target_id);
         let was_active = inner
             .active
             .as_ref()
@@ -132,8 +167,8 @@ fn on_target_destroyed(core: &Core, target_id: Option<&str>) {
             }
         }
         core.publish_tabs(&mut inner);
-        (before != inner.pages.len() && was_active)
-            .then(|| inner.pages.last().map(|p| p.target_id.clone())) // owned: the lock must not span the switch
+        (removed && was_active).then(|| inner.pages.last().map(|p| p.target_id.clone()))
+        // owned: the lock must not span the switch
     };
     match next {
         Some(Some(id)) => {

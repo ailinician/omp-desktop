@@ -1,19 +1,21 @@
 //! The view's threads: the connection's event handler (reader thread), the
-//! frame emitter and the input sender; the worker is in `view_worker`.
+//! frame emitter (`frames.rs`) and the input sender; the worker is in
+//! `worker.rs`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use super::annotate;
-use super::cdp::{EventHandler, DISCONNECTED};
+use super::super::annotate;
+use super::super::cdp::{EventHandler, DISCONNECTED};
+use super::super::lock;
+use super::core::Core;
 use super::emit::Frame;
-use super::lock;
-use super::view_core::Core;
-use super::view_worker::run_worker;
+use super::frames::chromium_ack;
+use super::worker::run_worker;
 
 /// What the worker thread is told.
 pub(super) enum Event {
@@ -34,12 +36,13 @@ pub(super) enum Event {
 
 /// A gesture queued for the page that was shown when it was made: it is
 /// dropped, not redirected, when another page is shown by the time it is
-/// sent.
+/// sent. `release` marks a mouse button release.
 pub(super) struct InputItem {
     pub session: String,
     pub generation: u64,
     pub method: &'static str,
     pub params: Value,
+    pub release: bool,
 }
 
 /// Events the worker acts on; the handler drops all others.
@@ -53,54 +56,6 @@ const FORWARDED: [&str; 8] = [
     "Page.loadEventFired",
     "Page.navigatedWithinDocument",
 ];
-
-#[derive(Default)]
-struct Slot {
-    frame: Option<(u64, Frame)>,
-    closed: bool,
-}
-
-/// The latest screencast frame waiting for the emitter: a slower emitter
-/// skips frames instead of queueing them.
-#[derive(Default)]
-pub(super) struct FrameSlot {
-    slot: Mutex<Slot>,
-    ready: Condvar,
-}
-
-impl FrameSlot {
-    fn put(&self, generation: u64, frame: Frame) {
-        lock(&self.slot).frame = Some((generation, frame));
-        self.ready.notify_one();
-    }
-
-    pub fn clear(&self) {
-        lock(&self.slot).frame = None;
-    }
-
-    pub fn close(&self) {
-        lock(&self.slot).closed = true;
-        self.ready.notify_all();
-    }
-
-    /// The newest frame with the activation it was captured for, waiting
-    /// for one; `None` once closed.
-    fn next(&self) -> Option<(u64, Frame)> {
-        let mut slot = lock(&self.slot);
-        loop {
-            if slot.closed {
-                return None;
-            }
-            if let Some(frame) = slot.frame.take() {
-                return Some(frame);
-            }
-            slot = self
-                .ready
-                .wait(slot)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-    }
-}
 
 /// The page the agent worked in last, waiting for the worker. Reports
 /// overwrite each other: a client streaming intents costs one slot and one
@@ -131,8 +86,8 @@ impl FollowSlot {
     }
 }
 
-/// The handler for the connection's reader thread. Frames are acknowledged
-/// and handed to the emitter right here; the rest goes to the worker.
+/// The handler for the connection's reader thread. Frames are handed to
+/// the emitter right here; the rest goes to the worker.
 pub(super) fn handler(core: Weak<Core>, worker: Sender<Event>) -> EventHandler {
     Box::new(move |session, method, params| {
         let Some(core) = core.upgrade() else {
@@ -154,24 +109,16 @@ pub(super) fn handler(core: Weak<Core>, worker: Sender<Event>) -> EventHandler {
     })
 }
 
-/// Acknowledge and queue a frame of the shown page. `true` when the frame
-/// is of the wrong size and the screencast should restart.
+/// Queue a frame of the shown page for the emitter; its ack to Chromium
+/// waits for the webview (see `frames.rs`). `true` when the frame is of the
+/// wrong size and the screencast should restart.
 fn on_frame(core: &Core, session: Option<&str>, params: &Value) -> bool {
     let Some(session) = session else {
         return false;
     };
-    // Acknowledge before anything else, or Chromium stops sending.
-    if let (Some(client), Some(id)) = (
-        core.client.get(),
-        params.get("sessionId").and_then(Value::as_i64),
-    ) {
-        client.notify(
-            Some(session),
-            "Page.screencastFrameAck",
-            json!({ "sessionId": id }),
-        );
-    }
+    let ack = chromium_ack(session, params);
     let Some(data) = params.get("data").and_then(Value::as_str) else {
+        core.ack_chromium(ack); // not queued: acknowledge now, or Chromium stops sending
         return false;
     };
     let mut inner = lock(&core.inner);
@@ -181,6 +128,8 @@ fn on_frame(core: &Core, session: Option<&str>, params: &Value) -> bool {
         .filter(|a| a.session == session)
         .map(|a| a.generation)
     else {
+        drop(inner);
+        core.ack_chromium(ack);
         return false; // a page we no longer show
     };
     // The metadata's device size is the CSS size of what the image shows.
@@ -201,7 +150,9 @@ fn on_frame(core: &Core, session: Option<&str>, params: &Value) -> bool {
     drop(inner);
     // An image that is not what its metadata says would map clicks wrong.
     if proportioned {
-        core.frames.put(generation, frame);
+        core.frames.put(generation, frame, ack);
+    } else {
+        core.ack_chromium(ack);
     }
     restart
 }
@@ -225,14 +176,7 @@ pub(super) fn spawn(
         Box::new(move || run_worker(&worker, &events)),
     )?;
     let emitter = Arc::clone(core);
-    spawn(
-        "browser-frames",
-        Box::new(move || {
-            while let Some((generation, frame)) = emitter.frames.next() {
-                emitter.emit_frame(generation, &frame);
-            }
-        }),
-    )?;
+    spawn("browser-frames", Box::new(move || emitter.run_emitter()))?;
     let sender = Arc::clone(core);
     spawn(
         "browser-input",
@@ -263,10 +207,6 @@ fn run_input(core: &Core, queue: &Receiver<InputItem>) {
 mod tests {
     use super::*;
 
-    fn frame(n: u32) -> Frame {
-        Frame::new(format!("frame{n}"), n, n)
-    }
-
     #[test]
     fn follow_reports_overwrite_each_other_and_wake_once() {
         let slot = FollowSlot::default();
@@ -277,34 +217,5 @@ mod tests {
         assert_eq!(slot.take().as_deref(), Some("t999"), "only the newest");
         assert_eq!(slot.take(), None);
         assert!(slot.put("b"), "after the worker took it, wake again");
-    }
-
-    #[test]
-    fn a_slow_emitter_gets_only_the_latest_frame() {
-        let slot = FrameSlot::default();
-        for n in 1..=3 {
-            slot.put(1, frame(n));
-        }
-        assert_eq!(slot.next(), Some((1, frame(3))), "1 and 2 were skipped");
-        slot.put(1, frame(4));
-        slot.clear();
-        slot.put(2, frame(5));
-        assert_eq!(
-            slot.next(),
-            Some((2, frame(5))),
-            "a cleared frame is gone, the activation stays with its frame"
-        );
-    }
-
-    #[test]
-    fn closing_wakes_a_waiting_emitter() {
-        let slot = Arc::new(FrameSlot::default());
-        let waiting = Arc::clone(&slot);
-        let emitter = thread::spawn(move || waiting.next());
-        thread::sleep(std::time::Duration::from_millis(50));
-        slot.close();
-        assert_eq!(emitter.join().unwrap(), None);
-        slot.put(1, frame(1));
-        assert_eq!(slot.next(), None, "closed stays closed");
     }
 }

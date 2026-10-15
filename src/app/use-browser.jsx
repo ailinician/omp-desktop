@@ -2,12 +2,13 @@
    Rust owns Chromium, the screencast and the annotation
    overlay (src-tauri/src/browser/); this hook tracks which tabs have the panel
    open, mirrors the `browser://` events of the open tab's page, and keeps the
-   annotation chips. Painting and input forwarding are app/browser-screen.js.
-   The panel element must stay mounted while `open` (the effect binds the
-   `viewRef`/`canvasRef` elements of the commit that opened it). */
+   annotation chips. Painting and input forwarding are app/browser-screen.js,
+   the pure decisions app/browser.js. The panel element must stay mounted
+   while `open` (the effect binds the `viewRef`/`canvasRef`/`sinkRef`
+   elements of the commit that opened it). */
 
 const { OMP_BROWSER: _UB, OMP_BROWSER_SCREEN: _UBS } = window;
-const _UB_IDLE = Object.freeze({ status: "idle", error: null, url: "", loading: false, canBack: false, canForward: false });
+const _UB_IDLE = Object.freeze({ status: "idle", error: null, url: "", loading: false, canBack: false, canForward: false, annotate: false });
 const _UB_NO_TABS = Object.freeze([]);
 let _ubChipSeq = 0;
 
@@ -23,6 +24,7 @@ function useBrowser({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) {
   const [chips, setChips] = React.useState(_UB.EMPTY); // sid → chip[]
   const canvasRef = React.useRef(null);
   const viewRef = React.useRef(null);
+  const sinkRef = React.useRef(null);
   const screenRef = React.useRef(null);
   const chipsRef = React.useRef(_UB.EMPTY);
   const open = Boolean(sid && openBy[sid]);
@@ -31,11 +33,11 @@ function useBrowser({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) {
   // The active effect's open token; pending resizes stay local to that run.
   // A stale open completion must not release a newer run's queued work.
   const openInFlight = React.useRef(null);
-  // What the Esc handler (bound once per open) must see current.
+  // What the key handlers (bound once per open) must see current.
   const latest = React.useRef({});
   latest.current = { annotate, pending };
   // Bumped whenever annotate is left, so a capture that settles after the
-  // pick has been dismissed (Esc / annotate toggled off) is dropped.
+  // pick has been dismissed (Esc / annotate off / restart) is dropped.
   const pickGen = React.useRef(0);
 
   const updateChips = React.useCallback((fn) => {
@@ -52,12 +54,17 @@ function useBrowser({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) {
     setPending((p) => (p && ids.includes(p.sid) ? p : null));
   }, [idsKey, updateChips]);
 
-  const setAnnotate = React.useCallback((on) => {
-    if (!sid) return;
+  // Annotate mode as shown; Rust's `state.annotate` is the truth and
+  // overrides it (it also turns off when the agent acts on the page).
+  const showAnnotate = React.useCallback((on) => {
     if (!on) pickGen.current += 1; // a pick made before this must not land
     setAnnotateState(on);
+  }, []);
+  const setAnnotate = React.useCallback((on) => {
+    if (!sid) return;
+    showAnnotate(on);
     bridge?.browserAnnotate(sid, on);
-  }, [bridge, sid]);
+  }, [bridge, sid, showAnnotate]);
 
   // The open tab's panel: attach every listener, then open (the backend's
   // first `state` event fires during the open). Leaving (close, another tab)
@@ -65,7 +72,8 @@ function useBrowser({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) {
   React.useEffect(() => {
     const view = viewRef.current;
     const canvas = canvasRef.current;
-    if (!bridge || !sid || !open || !view || !canvas) return undefined;
+    const sink = sinkRef.current;
+    if (!bridge || !sid || !open || !view || !canvas || !sink) return undefined;
     let live = true;
     // While `browserOpenPanel` settles the view is not live: a resize is
     // queued here (latest wins) and a URL by `wantUrl`, both flushed once
@@ -77,68 +85,53 @@ function useBrowser({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) {
     setTabs(_UB_NO_TABS);
     setPage(null);
     const screen = _UBS.createScreen({
-      view,
-      canvas,
+      view, canvas, sink,
       send: (ev) => bridge.browserInput(sid, ev),
+      ack: (seq) => bridge.browserFrameAck(sid, seq),
       onResize: (w, h, dpr) => {
-        // While `browserOpenPanel` is in flight the view is not live; a
-        // resize in that window is queued (latest wins) and flushed once
-        // the open settles.
         if (opening.pending) pendingSize = { w, h, dpr };
         else bridge.browserResize(sid, w, h, dpr);
       },
       onPage: setPage,
-      // Escape ends annotate mode; a desktop shortcut (tabs, panels, this
-      // panel's toggle) is left to the app keymap instead of the page.
-      swallowKey: (e) => (e.key === "Escape" && latest.current.annotate)
-        || _UB.keyBelongsToApp(window.OMP_KEYMAP.chordFromEvent(e), window.OMP_KEYMAP.lookup),
+      // Esc while annotating closes the comment popover, else leaves annotate.
+      escape: () => _UB.escapeAction(latest.current.annotate, latest.current.pending),
+      onEscape: (action) => (action === "cancelPick" ? setPending(null) : setAnnotate(false)),
     });
     screenRef.current = screen;
+    // A pick stands only if annotate was not left before its capture
+    // settled (`pickGen`). A failed capture still opens the popover:
+    // `image: null` keeps the text flowing, the popover notes the failure.
     const onPick = async (pick) => {
-      // A generation stamp: if annotate is left (Esc / the toolbar toggle)
-      // before the capture settles, this pick no longer stands.
       const gen = pickGen.current;
-      const r = await bridge.browserCapture(sid, pick.rect);
+      const r = await bridge.browserCapture(sid, pick.docRect);
+      const shot = r.ok ? { type: "image", data: r.value.data, mimeType: r.value.mimeType } : null;
+      const image = shot && (await window.OMP_IMAGES.normalizeImage(shot).catch(() => null));
       if (!live || gen !== pickGen.current) return;
-      // A failed capture still opens the popover: `image: null` keeps the
-      // text flowing (mergeIntoMessage skips it) and the popover shows the
-      // failure note instead of a silent chip.
-      const image = r.ok ? { type: "image", data: r.value.data, mimeType: r.value.mimeType } : null;
       setPending({ sid, pick, image });
+    };
+    const onState = (s) => {
+      setState(s);
+      const on = Boolean(s?.annotate);
+      if (on !== latest.current.annotate) showAnnotate(on);
     };
     const offs = [
       bridge.onBrowserEvent(sid, "frame", screen.frame),
       bridge.onBrowserEvent(sid, "tabs", (p) => setTabs(p?.tabs ?? _UB_NO_TABS)),
-      bridge.onBrowserEvent(sid, "state", setState),
+      bridge.onBrowserEvent(sid, "state", onState),
       bridge.onBrowserEvent(sid, "pick", onPick),
     ];
-    // Esc leaves annotate mode (not while the comment popover is open: it
-    // cancels itself). Bound on the panel, so Esc in the composer is not ours.
-    const panel = view.closest(".browser-panel") ?? view;
-    const onEsc = (e) => {
-      if (e.key !== "Escape" || !latest.current.annotate || latest.current.pending) return;
-      e.preventDefault();
-      setAnnotate(false);
-    };
-    panel.addEventListener("keydown", onEsc);
     Promise.all(offs.map((o) => o.ready)).then(async () => {
       if (!live) return;
       const s = screen.size();
-      // `openUrl` and the resize handler read `openInFlight` (set at effect
-      // start) to know the view is not live yet and queue instead.
       try {
         await bridge.browserOpenPanel(sid, s.width, s.height, s.dpr);
       } finally {
         opening.pending = false;
       }
       if (!live) return;
-      // From here on the view is live: apply the latest queued resize, then
-      // the latest queued URL (a `/browser <url>` or localhost link asked for
-      // while Chromium was still starting).
-      if (pendingSize) {
-        bridge.browserResize(sid, pendingSize.w, pendingSize.h, pendingSize.dpr);
-        pendingSize = null;
-      }
+      // Live now: the latest queued resize, then the latest queued URL (a
+      // `/browser <url>` or localhost link asked for while Chromium started).
+      if (pendingSize) bridge.browserResize(sid, pendingSize.w, pendingSize.h, pendingSize.dpr);
       const want = wantUrl.current;
       if (want?.sid === sid) {
         wantUrl.current = null;
@@ -148,15 +141,14 @@ function useBrowser({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) {
     return () => {
       live = false;
       if (openInFlight.current === opening) openInFlight.current = null;
-      panel.removeEventListener("keydown", onEsc);
       for (const off of offs) off();
       screen.destroy();
       screenRef.current = null;
       bridge.browserClosePanel(sid);
-      setAnnotateState(false);
+      showAnnotate(false);
       setPending(null);
     };
-  }, [bridge, sid, open, setAnnotate]);
+  }, [bridge, sid, open, setAnnotate, showAnnotate]);
 
   const setOpen = React.useCallback((on) => {
     if (!sid) return;
@@ -171,8 +163,7 @@ function useBrowser({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) {
   const close = React.useCallback(() => setOpen(false), [setOpen]);
   // Show `url` (already normalised) in the panel, opening it first if needed.
   // While `browserOpenPanel` is still in flight the backend has no view to
-  // navigate yet (`panel not open`), so the URL is queued (latest wins) and
-  // the open flushes it once the panel is live.
+  // navigate yet, so the URL is queued (latest wins) and the open flushes it.
   const openUrl = React.useCallback((url) => {
     if (!sid) return;
     if (open && !openInFlight.current?.pending) {
@@ -184,39 +175,22 @@ function useBrowser({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) {
   }, [bridge, sid, open, setOpen]);
 
   // A plain click on a localhost link in the chat opens it here (when the
-  // tweak is on); a modifier (⌘/Ctrl) click opens it in the system browser
-  // through the external opener — wry has no `on_new_window` handler, so
-  // relying on the native new-window behaviour would open nothing.
+  // tweak is on); a modifier click opens it in the system browser through
+  // the external opener — wry has no `on_new_window` handler, so the native
+  // new-window behaviour would open nothing.
   const localLinks = tweaks?.browserLocalhostInPanel ?? true;
-  const openUrlRef = React.useRef(openUrl);
-  openUrlRef.current = openUrl;
-  const bridgeRef = React.useRef(bridge);
-  bridgeRef.current = bridge;
-  React.useEffect(() => {
-    if (!localLinks || !sid) return undefined;
-    const onClick = (e) => {
-      if (e.defaultPrevented || e.button !== 0) return;
-      const a = e.target instanceof Element ? e.target.closest(".md-content a[href]") : null;
-      const url = a && _UB.localUrl(a.getAttribute("href"));
-      if (!url) return;
-      // ⌘/Ctrl (or Shift/Alt) means "open externally"; route it through the
-      // external opener explicitly rather than the native new-window path.
-      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
-        e.preventDefault();
-        const open = bridgeRef.current?.openExternalUrl;
-        if (!open) return;
-        Promise.resolve(open(url)).then(
-          (res) => { if (res && !res.ok) console.error("[browser] open failed:", res.error); },
-          (err) => console.error("[browser] open failed:", err),
-        );
-        return;
-      }
-      e.preventDefault();
-      openUrlRef.current(url);
-    };
-    document.addEventListener("click", onClick);
-    return () => document.removeEventListener("click", onClick);
-  }, [localLinks, sid]);
+  const openLink = React.useRef(null);
+  openLink.current = (url, external) => {
+    if (!external) return openUrl(url);
+    Promise.resolve(bridge?.openExternalUrl(url)).then(
+      (res) => { if (res && !res.ok) console.error("[browser] open failed:", res.error); },
+      (err) => console.error("[browser] open failed:", err),
+    );
+  };
+  React.useEffect(
+    () => (localLinks && sid ? _UBS.watchLocalLinks((url, external) => openLink.current(url, external)) : undefined),
+    [localLinks, sid],
+  );
 
   const savePending = React.useCallback((comment) => {
     const text = comment.trim();
@@ -226,17 +200,20 @@ function useBrowser({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) {
     setPending(null);
   }, [pending, updateChips]);
   const cancelPending = React.useCallback(() => setPending(null), []);
-  const removeChip = React.useCallback((id) => updateChips((s) => _UB.removeChip(s, sid, id)), [sid, updateChips]);
-  // A successful send spends exactly the chips it carried; chips added
-  // while the send was in flight stay. `id` defaults to the tab shown (a
-  // goal start settles later, possibly on another tab).
-  const spendChips = React.useCallback((ids, id = sid) => updateChips((s) => _UB.removeChips(s, id, ids)), [sid, updateChips]);
-  // A submit reserves its chip ids synchronously, so a second send before
-  // the first settles cannot ship the same annotation twice. `id` defaults
-  // to the tab shown (a goal start settles later, possibly on another tab).
-  const reserveChips = React.useCallback((ids, id = sid) => updateChips((s) => _UB.reserveChips(s, id, ids)), [sid, updateChips]);
-  // A failed or timed-out send puts its reserved chips back.
-  const releaseChips = React.useCallback((ids, id = sid) => updateChips((s) => _UB.releaseChips(s, id, ids)), [sid, updateChips]);
+  // `id` defaults to the tab shown; a send's callbacks keep the tab of the
+  // render that sent it, so a reply after a tab switch hits the right tab.
+  // Reserve: a submit takes its chips out of circulation at once. Spend:
+  // delivered, gone (chips added meanwhile stay). Release: refused or
+  // timed out, back for the next send.
+  const chipActions = React.useMemo(() => {
+    const on = (reduce) => (ids, id = sid) => updateChips((s) => reduce(s, id, ids));
+    return {
+      removeChip: (id) => updateChips((s) => _UB.removeChip(s, sid, id)),
+      spendChips: on(_UB.removeChips),
+      reserveChips: on(_UB.reserveChips),
+      releaseChips: on(_UB.releaseChips),
+    };
+  }, [sid, updateChips]);
 
   // Page actions on the open tab; a refused navigation shows in the page.
   const act = React.useMemo(() => ({
@@ -247,20 +224,17 @@ function useBrowser({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) {
     activateTab: (id) => bridge?.browserTabActivate(sid, id),
     // After a crash the screencast is gone: open the panel again.
     restart: () => {
-      pickGen.current += 1;
-      setAnnotateState(false);
+      showAnnotate(false);
       setPending(null);
       const s = screenRef.current?.size();
       if (s) bridge?.browserOpenPanel(sid, s.width, s.height, s.dpr);
     },
-  }), [bridge, sid]);
+  }), [bridge, sid, showAnnotate]);
 
   const chipsList = _UB.chipsOf(chips, sid);
-  // Reserved chips are out of circulation while their send settles: they
-  // are excluded from every merge (`sendableChips`) and from the composer's
-  // sendable count (`sendableCount`), so a pending send cannot be
-  // re-triggered by its own chips. The strip still shows them, dimmed,
-  // from the full list.
+  // Reserved chips are out of circulation while their send settles: out of
+  // every merge (`sendableChips`) and of the composer's sendable count; the
+  // strip still shows them, dimmed, from the full list.
   const sendableChips = chipsList.filter((c) => !c.reserved);
   return {
     open, toggle, close, openUrl, fullView, setFullView,
@@ -269,8 +243,7 @@ function useBrowser({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) {
     state, tabs, page, annotate, setAnnotate,
     pending, savePending, cancelPending,
     chips: chipsList, sendableChips, sendableCount: sendableChips.length,
-    removeChip, spendChips, reserveChips, releaseChips,
-    canvasRef, viewRef, ...act,
+    ...chipActions, canvasRef, viewRef, sinkRef, ...act,
   };
 }
 

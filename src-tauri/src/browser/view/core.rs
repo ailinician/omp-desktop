@@ -1,54 +1,64 @@
-//! The state and CDP plumbing a [`View`](super::view::View) and its threads
-//! share: viewport, screencast and target switching.
+//! The state and CDP plumbing a [`View`](super::View) and its threads
+//! share: the model, CDP calls, state events, viewport and input. Which page
+//! is shown is in `switching.rs`, frames in `frames.rs`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::annotate::Annotate;
-use super::cdp::CdpClient;
-use super::emit::{BrowserEmit, Frame, Pick, ViewState};
-use super::lock;
-use super::view_events::{FollowSlot, FrameSlot, InputItem};
-use super::view_model::{Inner, Size};
+use super::super::annotate::Annotate;
+use super::super::cdp::CdpClient;
+use super::super::lock;
+use super::emit::{BrowserEmit, Pick, ViewState};
+use super::events::{FollowSlot, InputItem};
+use super::frames::FrameFlow;
+use super::model::{Inner, Size};
 
-pub(super) struct Core {
-    pub sid: String,
-    emit: Arc<dyn BrowserEmit>,
-    pub inner: Mutex<Inner>,
-    pub frames: FrameSlot,
-    pub follow: FollowSlot,
+pub(in crate::browser) struct Core {
+    pub(super) sid: String,
+    pub(super) emit: Arc<dyn BrowserEmit>,
+    pub(in crate::browser) inner: Mutex<Inner>,
+    pub(super) frames: FrameFlow,
+    pub(super) follow: FollowSlot,
     /// Serialises target switches and annotate toggles; never taken by the
     /// reader thread, whose notifications do not block on CDP responses.
-    pub switch: Mutex<()>,
-    pub client: OnceLock<CdpClient>,
+    pub(in crate::browser) switch: Mutex<()>,
+    /// Held across a frame's emit and an activation's `tabs` event (taken
+    /// before `inner`), so frames stay ordered after the event that marks
+    /// their page active.
+    pub(super) emit_order: Mutex<()>,
+    pub(in crate::browser) client: OnceLock<CdpClient>,
     closed: AtomicBool,
-    /// Annotate mode, see `annotate.rs`.
-    pub annotate: Mutex<Annotate>,
+    /// When the panel last released a mouse button on the page.
+    released: Mutex<Option<Instant>>,
+    /// Annotate mode, see `annotate/`.
+    pub(in crate::browser) annotate: Mutex<Annotate>,
     /// Serialises overlay installs (taken before `annotate`, never by the
     /// reader thread).
-    pub overlay_install: Mutex<()>,
+    pub(in crate::browser) overlay_install: Mutex<()>,
     /// Held by a test to keep the input sender from sending.
     #[cfg(test)]
-    pub input_gate: Mutex<()>,
+    pub(super) input_gate: Mutex<()>,
     /// Held by a test to keep the worker from handling a follow.
     #[cfg(test)]
-    pub follow_gate: Mutex<()>,
+    pub(super) follow_gate: Mutex<()>,
 }
 
 impl Core {
-    pub fn new(sid: &str, emit: Arc<dyn BrowserEmit>) -> Self {
+    pub(in crate::browser) fn new(sid: &str, emit: Arc<dyn BrowserEmit>) -> Self {
         Self {
             sid: sid.to_owned(),
             emit,
             inner: Mutex::new(Inner::new()),
-            frames: FrameSlot::default(),
+            frames: FrameFlow::default(),
             follow: FollowSlot::default(),
             switch: Mutex::new(()),
+            emit_order: Mutex::new(()),
             client: OnceLock::new(),
             closed: AtomicBool::new(false),
+            released: Mutex::new(None),
             annotate: Mutex::new(Annotate::default()),
             overlay_install: Mutex::new(()),
             #[cfg(test)]
@@ -58,19 +68,19 @@ impl Core {
         }
     }
 
-    pub fn is_closed(&self) -> bool {
+    pub(in crate::browser) fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
 
     /// Mark the view closed; `false` when it already was.
-    pub fn mark_closed(&self) -> bool {
+    pub(in crate::browser) fn mark_closed(&self) -> bool {
         let mut annotate = lock(&self.annotate);
         let was_open = !self.closed.swap(true, Ordering::SeqCst);
         annotate.on = false;
         was_open
     }
 
-    pub fn call(
+    pub(in crate::browser) fn call(
         &self,
         session: Option<&str>,
         method: &str,
@@ -82,7 +92,7 @@ impl Core {
             .call(session, method, params)
     }
 
-    pub fn active_session(&self) -> Result<String, String> {
+    pub(in crate::browser) fn active_session(&self) -> Result<String, String> {
         lock(&self.inner)
             .active
             .as_ref()
@@ -90,34 +100,38 @@ impl Core {
             .ok_or_else(|| "no page open".to_owned())
     }
 
-    pub fn is_active_session(&self, session: &str) -> bool {
+    pub(super) fn is_active_session(&self, session: &str) -> bool {
         lock(&self.inner)
             .active
             .as_ref()
             .is_some_and(|a| a.session == session)
     }
 
-    pub fn call_active(&self, method: &str, params: Value) -> Result<Value, String> {
+    pub(in crate::browser) fn call_active(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
         let session = self.active_session()?;
         self.call(Some(&session), method, params)
     }
 
     /// Emit `tabs` when the list differs from the last one. Emitting under
     /// the lock keeps events in the order of the changes.
-    pub fn publish_tabs(&self, inner: &mut Inner) {
+    pub(super) fn publish_tabs(&self, inner: &mut Inner) {
         if let Some(tabs) = inner.tabs_if_changed() {
             self.emit.tabs(&self.sid, tabs);
         }
     }
 
     /// Tell the panel about a pick, unless the view is closed.
-    pub fn emit_pick(&self, pick: &Pick) {
+    pub(in crate::browser) fn emit_pick(&self, pick: &Pick) {
         if !self.is_closed() {
             self.emit.pick(&self.sid, pick);
         }
     }
 
-    pub fn update_state(&self, change: impl FnOnce(&mut ViewState)) {
+    pub(in crate::browser) fn update_state(&self, change: impl FnOnce(&mut ViewState)) {
         let mut inner = lock(&self.inner);
         let mut next = inner.state.clone(); // compared with the previous state below
         change(&mut next);
@@ -127,23 +141,8 @@ impl Core {
         }
     }
 
-    /// Emit a frame captured for activation `generation`; one of an earlier
-    /// activation is dropped. The check holds the lock an activation takes
-    /// to emit its `tabs` event, so no frame of the old page follows the
-    /// event that marks the new one active.
-    pub fn emit_frame(&self, generation: u64, frame: &Frame) {
-        let inner = lock(&self.inner);
-        if inner
-            .active
-            .as_ref()
-            .is_some_and(|a| a.generation == generation)
-        {
-            self.emit.frame(&self.sid, frame);
-        }
-    }
-
     /// `url` and back/forward availability from the navigation history.
-    pub fn refresh_history(&self) -> Result<(), String> {
+    pub(super) fn refresh_history(&self) -> Result<(), String> {
         let history = self.call_active("Page.getNavigationHistory", json!({}))?;
         let entries = history["entries"].as_array().map_or(&[][..], Vec::as_slice);
         let current = history["currentIndex"]
@@ -164,14 +163,38 @@ impl Core {
         Ok(())
     }
 
+    /// The shown page's title as Chromium has it now: target events carry
+    /// the title of the moment a navigation commits, often still the URL.
+    pub(super) fn refresh_title(&self) -> Result<(), String> {
+        let active = lock(&self.inner)
+            .active
+            .as_ref()
+            .map(|a| a.target_id.clone()); // owned: the lock must not span the CDP call
+        let Some(target_id) = active else {
+            return Ok(());
+        };
+        let info = self.call(
+            None,
+            "Target.getTargetInfo",
+            json!({ "targetId": target_id }),
+        )?;
+        let mut inner = lock(&self.inner);
+        if inner.is_listed(&target_id) {
+            inner.upsert_page(&info["targetInfo"]);
+            self.publish_tabs(&mut inner);
+        }
+        drop(inner);
+        Ok(())
+    }
+
     /// Make the panel `size`, in effect for new frames of `session`.
-    pub fn resize_to(&self, session: &str, size: Size) -> Result<(), String> {
+    pub(super) fn resize_to(&self, session: &str, size: Size) -> Result<(), String> {
         let _switching = lock(&self.switch);
         self.apply_viewport(session, size)
     }
 
     /// (Re)start the screencast of `session` at `size`.
-    fn apply_viewport(&self, session: &str, size: Size) -> Result<(), String> {
+    pub(super) fn apply_viewport(&self, session: &str, size: Size) -> Result<(), String> {
         let _ = self.call(Some(session), "Page.stopScreencast", json!({}));
         self.call(
             Some(session),
@@ -200,7 +223,7 @@ impl Core {
 
     /// The page session the next input event is made for, with its
     /// activation.
-    pub fn activation(&self) -> Result<(String, u64), String> {
+    pub(super) fn activation(&self) -> Result<(String, u64), String> {
         lock(&self.inner)
             .active
             .as_ref()
@@ -210,7 +233,7 @@ impl Core {
 
     /// Send a queued gesture to the page session it was made for. One of an
     /// earlier activation is dropped, not sent to the page shown now.
-    pub fn send_input(&self, item: InputItem) -> Result<(), String> {
+    pub(super) fn send_input(&self, item: InputItem) -> Result<(), String> {
         let current = lock(&self.inner)
             .active
             .as_ref()
@@ -218,82 +241,29 @@ impl Core {
         if !current {
             return Ok(());
         }
+        if item.release {
+            self.note_panel_release(); // before the page can react to it
+        }
         self.call(Some(&item.session), item.method, item.params)
             .map(drop)
     }
 
-    /// Attach to `target_id` and give back the page session.
-    fn attach(&self, target_id: &str) -> Result<String, String> {
-        self.call(
-            None,
-            "Target.attachToTarget",
-            json!({ "targetId": target_id, "flatten": true }),
-        )
-        .and_then(|attached| {
-            attached["sessionId"]
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| "attachToTarget returned no session".to_owned())
-        })
+    /// The panel released a mouse button on the page.
+    pub(in crate::browser) fn note_panel_release(&self) {
+        *lock(&self.released) = Some(Instant::now());
     }
 
-    /// Show `target_id`: attach to it first, so a page that cannot be
-    /// attached leaves the shown one as it is (the panel is told in the
-    /// state's `error`); then stop the old page's screencast, detach it and
-    /// start the new one. The `tabs` event marking it active precedes its
-    /// frames.
-    pub fn switch_to(&self, target_id: &str) -> Result<(), String> {
-        let _switching = lock(&self.switch);
-        let size = {
-            let inner = lock(&self.inner);
-            if inner
-                .active
-                .as_ref()
-                .is_some_and(|a| a.target_id == target_id)
-            {
-                return Ok(());
-            }
-            inner.size
-        };
-        let session = self.attach(target_id).inspect_err(|e| {
-            self.update_state(|s| s.error = Some(format!("cannot show the page: {e}")));
-        })?;
-        let mut inner = lock(&self.inner);
-        let old = inner.active.as_ref().map(|a| a.session.clone()); // owned: used after the swap
-        inner.set_active(target_id, &session);
-        self.publish_tabs(&mut inner);
-        drop(inner);
-        if let Some(old) = old {
-            self.release_overlay(&old); // the old page must not stay in annotate mode
-            let _ = self.call(Some(&old), "Page.stopScreencast", json!({}));
-            let _ = self.call(None, "Target.detachFromTarget", json!({ "sessionId": old }));
-        }
-        let _ = self.call(
-            None,
-            "Target.activateTarget",
-            json!({ "targetId": target_id }),
-        );
-        self.call(Some(&session), "Page.enable", json!({}))?;
-        // Best effort: turning annotate on installs it again and says why not.
-        let _ = self.install_overlay(&session);
-        self.apply_viewport(&session, size)?;
-        self.update_state(|s| {
-            s.loading = false;
-            s.error = None;
-            s.url.clear();
-        });
-        self.refresh_history()
-    }
-
-    pub fn stamp_user_activation(&self) {
-        lock(&self.inner).user_activated = Some(Instant::now());
+    /// Whether the panel released a mouse button on the page in the last
+    /// `within`. Cheap: the reader thread asks.
+    pub(in crate::browser) fn panel_released_within(&self, within: Duration) -> bool {
+        lock(&self.released).is_some_and(|at| at.elapsed() <= within)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::emit::{Frame, TabInfo};
     use super::*;
-    use crate::browser::emit::{Pick, TabInfo};
 
     /// Records the base64 of every frame emitted.
     #[derive(Default)]
@@ -318,11 +288,32 @@ mod tests {
     fn a_frame_of_an_earlier_activation_is_not_emitted() {
         let (core, seen) = core();
         let first = lock(&core.inner).set_active("a", "sa");
-        core.emit_frame(first, &Frame::new("on-a".into(), 1, 1));
+        assert!(core.emit_frame(first, &Frame::new("on-a".into(), 1, 1)));
         let second = lock(&core.inner).set_active("b", "sb");
-        core.emit_frame(first, &Frame::new("late-a".into(), 1, 1));
-        core.emit_frame(second, &Frame::new("on-b".into(), 1, 1));
+        assert!(!core.emit_frame(first, &Frame::new("late-a".into(), 1, 1)));
+        assert!(core.emit_frame(second, &Frame::new("on-b".into(), 1, 1)));
         assert_eq!(*lock(&seen.0), ["on-a", "on-b"]);
+    }
+
+    #[test]
+    fn emitting_a_frame_does_not_hold_the_model() {
+        /// Takes the model lock from another thread while emitting.
+        struct Probe(OnceLock<std::sync::Weak<Core>>);
+        impl BrowserEmit for Probe {
+            fn frame(&self, _: &str, _: &Frame) {
+                let core = self.0.get().and_then(std::sync::Weak::upgrade).unwrap();
+                let free = std::thread::spawn(move || core.activation().is_ok());
+                assert!(free.join().unwrap(), "input can be queued meanwhile");
+            }
+            fn tabs(&self, _: &str, _: &[TabInfo]) {}
+            fn state(&self, _: &str, _: &ViewState) {}
+            fn pick(&self, _: &str, _: &Pick) {}
+        }
+        let probe = Arc::new(Probe(OnceLock::new()));
+        let core = Arc::new(Core::new("s1", Arc::clone(&probe) as Arc<dyn BrowserEmit>));
+        probe.0.set(Arc::downgrade(&core)).unwrap();
+        let generation = lock(&core.inner).set_active("a", "sa");
+        assert!(core.emit_frame(generation, &Frame::new("f".into(), 1, 1)));
     }
 
     #[test]
@@ -336,7 +327,7 @@ mod tests {
         let toggled = Arc::clone(&core);
         let worker = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
-            done_tx.send(toggled.set_annotate(false)).unwrap();
+            done_tx.send(toggled.set_annotate(true)).unwrap();
         });
         started_rx.recv().unwrap();
         let early = done_rx.recv_timeout(std::time::Duration::from_millis(100));
@@ -354,22 +345,49 @@ mod tests {
         );
     }
 
-    #[test]
-    fn input_of_an_earlier_activation_is_dropped_not_sent() {
-        let (core, _seen) = core();
-        let item = |session: &str, generation| InputItem {
+    fn item(session: &str, generation: u64, release: bool) -> InputItem {
+        InputItem {
             session: session.to_owned(),
             generation,
             method: "Input.insertText",
             params: json!({ "text": "x" }),
-        };
+            release,
+        }
+    }
+
+    #[test]
+    fn input_of_an_earlier_activation_is_dropped_not_sent() {
+        let (core, _seen) = core();
         let first = lock(&core.inner).set_active("a", "sa");
         let second = lock(&core.inner).set_active("b", "sb");
-        assert_eq!(core.send_input(item("sa", first)), Ok(()), "dropped");
+        assert_eq!(core.send_input(item("sa", first, false)), Ok(()), "dropped");
         assert_eq!(
-            core.send_input(item("sb", second)),
+            core.send_input(item("sb", second, false)),
             Err("cdp not connected".to_owned()),
             "the current page's input is sent (there is no connection here)"
         );
+    }
+
+    #[test]
+    fn a_mouse_release_sent_to_the_page_is_stamped() {
+        let (core, _seen) = core();
+        let within = Duration::from_secs(60);
+        assert!(!core.panel_released_within(within), "never released");
+        let first = lock(&core.inner).set_active("a", "sa");
+        let second = lock(&core.inner).set_active("b", "sb");
+        let _ = core.send_input(item("sa", first, true));
+        assert!(!core.panel_released_within(within), "a dropped release");
+        let _ = core.send_input(item("sb", second, false));
+        assert!(!core.panel_released_within(within), "not a release");
+        let _ = core.send_input(item("sb", second, true));
+        assert!(core.panel_released_within(within));
+    }
+
+    #[test]
+    fn only_listed_pages_can_be_shown_by_the_user() {
+        let (core, _seen) = core();
+        lock(&core.inner).upsert_page(&json!({ "targetId": "a", "url": "u" }));
+        assert_eq!(core.require_tab("a"), Ok(()));
+        assert_eq!(core.require_tab("worker-1"), Err("no such tab".to_owned()));
     }
 }
