@@ -7,7 +7,7 @@
    target). Page coordinates here are CSS px of the shown page (`ui.page`),
    placed as percentages of the view. */
 
-const { BrowserToolbar: _BP_Toolbar } = window;
+const { BrowserToolbar: _BP_Toolbar, OMP_BROWSER: _BP } = window;
 
 const _BP_STATUS = {
   starting: "starting browser…",
@@ -20,17 +20,39 @@ const _bpPct = (v, whole) => `${(v / whole) * 100}%`;
 // The popover's width (layout/browser.css `.browser-popover`); its left
 // edge is clamped so the whole box stays inside the view's 8px margins.
 const _BP_POP_W = "min(260px, 100% - 16px)";
+const _BP_POP_MARGIN = 8; // px, the view margin the popover keeps
 
 function BrowserPopover({ pick, page, failed, onSave, onCancel }) {
   const [text, setText] = React.useState("");
+  // The popover's and the view's heights in px, measured before paint and
+  // again when either resizes: the vertical placement needs both.
+  const ref = React.useRef(null);
+  const [size, setSize] = React.useState(null);
+  React.useLayoutEffect(() => {
+    const el = ref.current;
+    const view = el?.parentElement;
+    if (!el || !view) return undefined;
+    const measure = () => setSize((s) => {
+      const pop = el.offsetHeight, viewH = view.clientHeight;
+      return s && s.pop === pop && s.view === viewH ? s : { pop, view: viewH };
+    });
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    ro.observe(view);
+    return () => ro.disconnect();
+  }, []);
   const { rect } = pick;
-  // Below the picked rect, above it when that is near the bottom edge.
-  const below = (rect.y + rect.h) / page.cssH < 0.7;
-  const style = { left: `max(8px, min(${_bpPct(rect.x, page.cssW)}, 100% - ${_BP_POP_W} - 8px))` };
-  if (below) style.top = _bpPct(rect.y + rect.h, page.cssH);
-  else style.bottom = _bpPct(page.cssH - rect.y, page.cssH);
+  const style = { left: `max(8px, min(${_bpPct(rect.x, page.cssW)}, 100% - ${_BP_POP_W} - 8px))`, top: `${_BP_POP_MARGIN}px` };
+  // Below the pick, else above it, else pinned inside the view
+  // (OMP_BROWSER.popoverTop); the first, unmeasured render is replaced
+  // before it paints.
+  if (size && size.view > 0) {
+    style.top = `${_BP.popoverTop(rect, page.cssH, size.pop / size.view, _BP_POP_MARGIN / size.view) * 100}%`;
+  }
   const onKeyDown = (e) => {
-    if (e.key === "Escape") {
+    // Escape that ends an IME composition belongs to the IME.
+    if (e.key === "Escape" && !e.nativeEvent.isComposing) {
       e.preventDefault();
       onCancel();
     } else if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -39,7 +61,7 @@ function BrowserPopover({ pick, page, failed, onSave, onCancel }) {
     }
   };
   return (
-    <div className="browser-popover" style={style}>
+    <div className="browser-popover" style={style} ref={ref}>
       <div className="browser-popover-what mono">
         {pick.kind === "area" ? "area" : pick.selector || pick.tag || "element"}
       </div>
@@ -62,7 +84,11 @@ function BrowserPopover({ pick, page, failed, onSave, onCancel }) {
 
 function BrowserPanel({ ui }) {
   const { state, page, pending, chips } = ui;
-  const message = state.status === "error" && state.error ? state.error : _BP_STATUS[state.status];
+  // Rust's error text wins whatever the status: a stopped browser says why
+  // ("browser connection lost"), a running one reports a failed tab switch
+  // or load. While running it is a strip that leaves the page usable.
+  const message = state.error || _BP_STATUS[state.status];
+  const strip = state.status === "running";
   const retry = state.status === "stopped" || state.status === "error";
   const marked = page ? chips.filter((c) => c.pick.url === state.url) : [];
   return (
@@ -87,7 +113,8 @@ function BrowserPanel({ ui }) {
             <BrowserPopover key={pending.pick.rect.x + ":" + pending.pick.rect.y} pick={pending.pick} page={page} failed={pending.image == null} onSave={ui.savePending} onCancel={ui.cancelPending} />
           )}
           {message && (
-            <div className={`browser-status ${state.status}`}>
+            <div className={`browser-status ${state.status}${state.error ? " failed" : ""}${strip ? " strip" : ""}`}
+              role={state.error ? "alert" : "status"}>
               <span>{message}</span>
               {retry && <button className="btn" onClick={ui.restart}>reload</button>}
             </div>

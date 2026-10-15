@@ -25,10 +25,10 @@ const {
   TWEAK_DEFAULTS, NULL_MODEL, EMPTY_PROJECT, DEFAULT_PROFILE_ID,
   INTENT_FRAMING, APPROVAL_PROMPT,
   useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, useTerminal, TerminalPanels, TerminalTweaks, timeNow,
-  useKeymap, useKeymapDispatch, ShortcutsModal, useBrowser, BrowserDock, BrowserTweaks, MarkdownLinkContext,
+  useKeymap, useKeymapDispatch, ShortcutsModal, useBrowser, BrowserDock, BrowserTweaks, MarkdownLinkContext: _AL_MdLinkCtx,
 } = window;
 const { routeSubmit: _routeSubmit } = window.OMP_SLASH;
-const { mergeIntoMessage: _mergeBrowserChips, normalizeUrl: _normalizeUrl } = window.OMP_BROWSER;
+const { mergeIntoMessage: _mergeBrowserChips, browserCommand: _browserCommand } = window.OMP_BROWSER;
 const { recentRows, groupKey, moveGroup, moveMember, shiftGroup } = window.OMP_PROJECT_NAV;
 const {
   entryOf, updateEntry, pruneEntries,
@@ -284,19 +284,13 @@ function App() {
     if (!browser.open || !chip?.pick?.docRect || chip.pick.url !== browser.state.url) return;
     bridge?.browserScrollTo(planKey, chip.pick.docRect);
   };
-  // `/browser [url]`: open the panel, and load the page when one is given.
+  // `/browser [url]`: open the panel, load a page, or answer omp's
+  // `headless|visible` with a note (OMP_BROWSER.browserCommand).
   const handleBrowserCommand = (args) => {
-    const raw = args.trim();
-    if (!raw) {
-      setBrowserOpen(true);
-      return;
-    }
-    const url = _normalizeUrl(raw);
-    if (!url) {
-      bridge?.addAssistantMessage(`**/browser:** \`${raw.replace(/`/g, "'")}\` is not a web address.`);
-      return;
-    }
-    browser.openUrl(url);
+    const r = _browserCommand(args);
+    if (r.open) setBrowserOpen(true);
+    else if (r.url) browser.openUrl(r.url);
+    else bridge?.addAssistantMessage(r.note);
   };
 
   // `activeProject.id`, not `activeSessionId`: the latter keeps a closed
@@ -467,9 +461,11 @@ function App() {
   const goalUi = useGoalMode({
     bridge, tabId: planKey, sessionIds, goal, planMode: plan.mode, profileId: activeProfileId,
     runState: activeProject.runState,
-    onRestoreDraft: ({ text, images, chips }) => {
-      setPromptInsert({ text, images, nonce: Date.now() });
-      browser.restoreChips(chips ?? []);
+    // The chips go back to the tab they were taken from whatever tab is
+    // shown; the text only into the composer of that tab still shown.
+    onRestoreDraft: ({ text, images, chips }, { tabId, shown }) => {
+      if (shown) setPromptInsert({ text, images, nonce: Date.now() });
+      browser.restoreChips(chips ?? [], tabId);
     },
   });
 
@@ -702,7 +698,7 @@ function App() {
 
   // Chat links go through the browser panel's routing (localhost links).
   return (
-    <MarkdownLinkContext.Provider value={browser.onChatClick}>
+    <_AL_MdLinkCtx.Provider value={browser.onChatClick}>
       <div className="app-backdrop" />
       <div className="app">
         <div className={`window scanlines ${showSplit ? "is-split" : ""}`}>
@@ -1078,7 +1074,7 @@ function App() {
             onChange={v => setTweak("updateCheck", v)} />
         </TweakSection>
       </TweaksPanel>
-    </MarkdownLinkContext.Provider>
+    </_AL_MdLinkCtx.Provider>
   );
 }
 

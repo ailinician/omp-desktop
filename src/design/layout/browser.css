@@ -105,7 +105,17 @@
   background: color-mix(in oklab, var(--bg-app) 70%, transparent);
   color: var(--fg-3); font-size: var(--d-text-sm);
 }
-.browser-status.error { color: var(--rose); }
+.browser-status.error, .browser-status.failed { color: var(--rose); }
+/* An error while the page runs (browser-panel.jsx): a strip along the
+   bottom that the pointer passes through, so the page stays usable. */
+.browser-status.strip {
+  inset: auto 0 0 0;
+  padding: 6px 10px;
+  background: color-mix(in oklab, var(--bg-window) 90%, transparent);
+  border-top: 1px solid var(--line);
+  font-size: var(--d-text-xs);
+  pointer-events: none;
+}
 
 /* ── Annotations ───────────────────────────────────────────────────── */
 /* On the accent, text takes the window colour (the `.twk-btn` precedent):
@@ -126,6 +136,8 @@
   z-index: 3;
   gap: 6px;
   width: min(260px, calc(100% - 16px)); padding: 8px;
+  /* Never taller than the view: browser-panel.jsx pins it at the top margin. */
+  max-height: calc(100% - 16px); overflow: auto;
 }
 .browser-popover-what {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

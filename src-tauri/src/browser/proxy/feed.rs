@@ -5,7 +5,8 @@
 //! [`Feed::push`] on every chunk *before* forwarding it. `push` only runs the
 //! framing ([`Messages`]; for the server, after checking the upgrade
 //! response) and queues each text message that completes and fits the size
-//! cap; a bigger payload streams past without being copied. Both directions
+//! cap; a bigger payload streams past without being copied (the cap is
+//! larger for one event, see [`ATTACHED`]). Both directions
 //! share one queue, so a command is queued before its last byte can reach
 //! Chromium and cause a reply, and the observer meets commands, replies and
 //! the commands depending on them in causal order.
@@ -15,7 +16,6 @@
 //! negotiated extension switches the tap off for the connection (both sides
 //! and the observer), never the splice.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, OnceLock};
@@ -29,14 +29,21 @@ const MAX_COMMAND: usize = 1 << 20;
 /// Largest reply or event the tap reads. Everything it needs is small; a
 /// screenshot's reply is not, and is skipped without being buffered.
 const MAX_REPLY: usize = 64 << 10;
+/// How Chromium starts a `Target.attachedToTarget` event (it writes
+/// `method` first). The event carries the page's URL and title in full, and
+/// it is the only place an auto-attached session is named, so it is read up
+/// to [`MAX_COMMAND`]: a page whose URL fits a command the tap reads (the
+/// `Page.navigate` that opened it) is also followed. Of any other server
+/// message over [`MAX_REPLY`] only this many leading bytes are copied.
+const ATTACHED: &[u8] = br#"{"method":"Target.attachedToTarget""#;
 /// Longest response head of the upgrade.
 const MAX_UPGRADE_HEAD: usize = 16 << 10;
 /// Messages queued for the observer of one connection, at most.
 const QUEUE_MESSAGES: usize = 1024;
 /// Bytes queued for the observer of one connection, at most: room for four
-/// of the largest commands the tap reads, or sixty-four of the largest
-/// replies. Skipped payloads never count, so a burst of screenshots costs
-/// nothing here; only an observer stuck for good fills it.
+/// of the largest commands (or attach events) the tap reads, or sixty-four
+/// of the largest replies. Skipped payloads never count, so a burst of
+/// screenshots costs nothing here; only an observer stuck for good fills it.
 const QUEUE_BYTES: usize = 4 * MAX_COMMAND;
 
 /// Which way a message went.
@@ -171,7 +178,7 @@ impl Feed {
                 head.split_off(end + 4)
             }
         };
-        let mut messages = Messages::new(false, MAX_REPLY);
+        let mut messages = Messages::new(false, MAX_REPLY).reading_up_to(ATTACHED, MAX_COMMAND);
         let fed = messages.feed(&frames, out).map_err(|Lost| lost);
         self.decoder = Decoder::Frames(messages);
         fed
@@ -203,19 +210,15 @@ impl Feed {
     }
 }
 
-/// The observer thread: hands the messages to the tap in queue order. A
-/// panic in it (or in the callback) switches the tap off without affecting
-/// forwarding.
+/// The observer thread: hands the messages to the tap in queue order.
 fn observe(mut tap: Tap, messages: &Receiver<Queued>, state: &State) {
     for (direction, message) in messages {
         state.queued.fetch_sub(message.len(), Ordering::AcqRel);
         if state.is_off() {
             return;
         }
-        match catch_unwind(AssertUnwindSafe(|| tap.on_message(direction, &message))) {
-            Ok(Ok(())) => {}
-            Ok(Err(why)) => return state.off(why),
-            Err(_) => return state.off("internal error"),
+        if let Err(why) = tap.on_message(direction, &message) {
+            return state.off(why);
         }
     }
 }
@@ -251,7 +254,7 @@ mod tests {
     use super::super::{tap::Tap, AgentTarget};
     use super::{channel, spawn, Direction, Feed, Queued, MAX_REPLY, QUEUE_MESSAGES};
     use crate::browser::lock;
-    use crate::browser::tests::eventually;
+    use crate::test_support::eventually;
 
     const BROWSER: &[u8] = b"GET /devtools/browser/x HTTP/1.1\r\nHost: h\r\n\r\n";
     const UPGRADED: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n";
@@ -501,23 +504,50 @@ mod tests {
     }
 
     #[test]
-    fn a_panicking_callback_switches_the_tap_off_instead_of_the_splice() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counted = Arc::clone(&calls);
-        let callback: AgentTarget = Arc::new(move |_| {
-            counted.fetch_add(1, Ordering::SeqCst);
-            panic!("a callback that fails");
-        });
-        let (mut up, mut down) = spawn(Tap::new(BROWSER, callback));
+    fn queued_bytes_behind_a_stuck_observer_are_bounded() {
+        let gate = Arc::new(Mutex::new(()));
+        let reported = Reported::default();
+        let (tap, calls) = gated_tap(&gate, &reported);
+        let held = lock(&gate);
+        let (mut up, mut down) = spawn(tap);
         down.push(UPGRADED);
-        up.push(&activate("T")); // panics on the observer thread, is contained
-        assert!(
-            eventually(Duration::from_secs(3), || up.off_reason()).is_some(),
-            "the observer publishes the switch-off"
+        up.push(&activate("T")); // the observer blocks in this callback
+        assert!(eventually(Duration::from_secs(3), || {
+            (calls.load(Ordering::SeqCst) == 1).then_some(())
+        })
+        .is_some());
+        // Commands under the size cap, far fewer than QUEUE_MESSAGES.
+        let command = masked_text(&"y".repeat(1_000_000));
+        for _ in 0..4 {
+            up.push(&command);
+        }
+        assert_eq!(up.off_reason(), None, "4 MB still fit");
+        up.push(&command);
+        assert_eq!(up.off_reason(), Some("observer queue full"));
+        drop(held);
+    }
+
+    #[test]
+    fn a_page_whose_attach_event_is_over_the_reply_cap_is_followed() {
+        let reported = Reported::default();
+        let (mut up, mut down) = spawn(Tap::new(BROWSER, reported.callback()));
+        down.push(UPGRADED);
+        // Chromium's layout: `method` first, the URL in full.
+        let attached = format!(
+            r#"{{"method":"Target.attachedToTarget","params":{{"sessionId":"S1","targetInfo":{{"targetId":"T1","type":"page","title":"","url":"data:text/plain,{}"}},"waitingForDebugger":false}}}}"#,
+            "x".repeat(4 * MAX_REPLY)
         );
-        assert_eq!(up.off_reason(), Some("internal error"));
-        up.push(&activate("T")); // the tap is off
-        std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        push_in_chunks(&mut down, &text(&attached), 16 << 10);
+        up.push(&masked_text(
+            r#"{"id":2,"method":"Page.navigate","params":{"url":"about:blank"},"sessionId":"S1"}"#,
+        ));
+        assert!(
+            eventually(Duration::from_secs(3), || (!reported.all().is_empty())
+                .then_some(()))
+            .is_some(),
+            "the session's page is known"
+        );
+        assert_eq!(reported.all(), ["T1"]);
+        assert_eq!(up.off_reason(), None);
     }
 }

@@ -53,29 +53,26 @@ impl Core {
     /// attached leaves the shown one as it is; then stop the old page's
     /// screencast, detach it and start the new one. The `tabs` event
     /// marking it active precedes its frames. A failure is also told in the
-    /// state's `error`.
+    /// state's `error`, which the next switch that works clears; until a
+    /// switch to a page finished, picking it again retries the switch.
     fn switch_locked(&self, target_id: &str) -> Result<(), String> {
         let size = {
             let inner = lock(&self.inner);
-            if inner
-                .active
-                .as_ref()
-                .is_some_and(|a| a.target_id == target_id)
-            {
+            if inner.is_shown(target_id) {
                 return Ok(());
             }
             inner.size
         };
         let shown = self.attach(target_id).and_then(|session| {
-            let old = {
+            let (old, generation) = {
                 let order = lock(&self.emit_order);
                 let mut inner = lock(&self.inner);
                 let old = inner.active.as_ref().map(|a| a.session.clone()); // owned: used after the swap
-                inner.set_active(target_id, &session);
+                let generation = inner.set_active(target_id, &session);
                 self.publish_tabs(&mut inner);
                 drop(inner);
                 drop(order);
-                old
+                (old, generation)
             };
             if let Some(old) = old {
                 self.release_overlay(&old); // the old page must not stay in annotate mode
@@ -90,7 +87,9 @@ impl Core {
             self.call(Some(&session), "Page.enable", json!({}))?;
             // Best effort: turning annotate on installs it again and says why not.
             let _ = self.install_overlay(&session);
-            self.apply_viewport(&session, size)
+            self.apply_viewport(&session, size)?;
+            lock(&self.inner).mark_shown(generation);
+            Ok(())
         });
         if let Err(e) = &shown {
             self.update_state(|s| s.error = Some(format!("cannot show the page: {e}")));
@@ -107,5 +106,45 @@ impl Core {
 
     pub(super) fn stamp_user_activation(&self) {
         lock(&self.inner).user_activated = Some(Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{fake_core, sent_count};
+    use crate::browser::tests::cdp_error;
+
+    #[test]
+    fn a_switch_that_failed_is_retried_when_the_page_is_picked_again() {
+        let mut failed = false;
+        let (core, states, sent) = fake_core(move |request| {
+            if request["method"] == "Page.enable" && !failed {
+                failed = true;
+                return Some(cdp_error(request, "boom"));
+            }
+            None
+        });
+        assert_eq!(core.switch_to("a"), Err("boom".to_owned()));
+        assert_eq!(
+            states.last_error().as_deref(),
+            Some("cannot show the page: boom")
+        );
+        assert_eq!(core.switch_to("a"), Ok(()), "picked again");
+        assert_eq!(
+            sent_count(&sent, "Page.enable"),
+            2,
+            "the switch was retried"
+        );
+        assert_eq!(
+            states.last_error(),
+            None,
+            "the switch that worked cleared the error"
+        );
+        assert_eq!(core.switch_to("a"), Ok(()));
+        assert_eq!(
+            sent_count(&sent, "Page.enable"),
+            2,
+            "a page shown is not switched to again"
+        );
     }
 }

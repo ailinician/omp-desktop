@@ -1,7 +1,8 @@
 /* app/use-browser.jsx — the browser panel's state (docs/architecture/browser.md).
    Rust owns Chromium, the screencast and the annotation
-   overlay (src-tauri/src/browser/); this hook mirrors the `browser://`
-   events of the open tab's page, keeps the annotation chips and routes
+   overlay (src-tauri/src/browser/); this hook mirrors what the open tab's
+   panel channel reports (one Tauri Channel per `browserOpenPanel`: state,
+   tabs, picks, frames), keeps the annotation chips and routes
    localhost chat links (`onChatClick`, the markdown containers' delegated
    click). Whether the active tab shows the panel is app-live.jsx's per-tab
    side column (`open` / `setOpen`). Painting and input forwarding are
@@ -54,8 +55,13 @@ function useBrowser({ bridge, activeSessionId, sessionIds, open: shown, setOpen,
 
   // Annotate mode as shown; Rust's `state.annotate` is the truth and
   // overrides it (it also turns off when the agent acts on the page).
+  // Leaving it ends the pick: its popover closes, and a pick made before
+  // must not land (`pickGen`).
   const showAnnotate = React.useCallback((on) => {
-    if (!on) pickGen.current += 1; // a pick made before this must not land
+    if (!on) {
+      pickGen.current += 1;
+      setPending(null);
+    }
     setAnnotateState(on);
   }, []);
   const setAnnotate = React.useCallback((on) => {
@@ -157,7 +163,6 @@ function useBrowser({ bridge, activeSessionId, sessionIds, open: shown, setOpen,
       onMessageRef.current = null;
       bridge.browserClosePanel(sid);
       showAnnotate(false);
-      setPending(null);
     };
   }, [bridge, sid, open, setAnnotate, showAnnotate]);
 

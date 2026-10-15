@@ -9,17 +9,8 @@
 // it.
 (() => {
   'use strict';
-  // One overlay per page: frames inside it are not annotated (their picks
-  // would be in the frame's own coordinates).
-  if (window.top !== window || window.__ompAnnotateSet) return;
+  if (window.__ompAnnotateSet) return;
 
-  const DRAG_PX = 4;
-  const MAX_HTML = 20000;
-  const MAX_TEXT = 500;
-  const MAX_FIELD = 8192;
-  const MAX_ANCESTORS = 6;
-  const MAX_CLASSES = 2;
-  const LAYER = '2147483647';
   // Everything a click or a hover would make the page do. Not `wheel` or keys:
   // the page keeps scrolling, and Esc is the panel's business.
   const SWALLOWED = [
@@ -31,6 +22,40 @@
   ];
 
   let on = false;
+
+  // Keep a user's event from the page; whether it was one. Synthetic events
+  // (`el.click()` from the page's scripts or the agent) are not the user's:
+  // they reach the page untouched.
+  const swallow = (e) => {
+    if (!on || !e.isTrusted) return false;
+    // Cancelling a pointerdown would also suppress the mouse events that
+    // follow it, which this overlay is driven by: only stop those.
+    if (!e.type.startsWith('pointer')) e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    return true;
+  };
+
+  // A frame inside the page (same process: Chromium runs this world in each)
+  // only swallows: its picks would be in the frame's own coordinates, so
+  // there is no overlay and no report there. Rust sends the flag to every
+  // context of this world, so frames follow it like the top document.
+  if (window.top !== window) {
+    for (const type of SWALLOWED) window.addEventListener(type, swallow, true);
+    window.__ompAnnotateSet = (value) => {
+      on = Boolean(value);
+    };
+    return;
+  }
+
+  const DRAG_PX = 4;
+  const MAX_HTML = 20000;
+  const MAX_TEXT = 500;
+  const MAX_FIELD = 8192;
+  const MAX_ANCESTORS = 6;
+  const MAX_CLASSES = 2;
+  const LAYER = '2147483647';
+
   let hidden = 0; // captures in progress, each hiding the overlay
   let host = null;
   let hoverBox = null;
@@ -216,14 +241,7 @@
   };
 
   const onEvent = (e) => {
-    // Synthetic events (`el.click()` from the page's scripts or the agent)
-    // are not the user's: they reach the page untouched.
-    if (!on || !e.isTrusted) return;
-    // Cancelling a pointerdown would also suppress the mouse events that
-    // follow it, which this overlay is driven by: only stop those.
-    if (!e.type.startsWith('pointer')) e.preventDefault();
-    e.stopPropagation();
-    e.stopImmediatePropagation();
+    if (!swallow(e)) return;
     if (e.button > 0 || !e.type.startsWith('mouse')) return;
     const point = { x: e.clientX, y: e.clientY };
     if (e.type === 'mousedown') {

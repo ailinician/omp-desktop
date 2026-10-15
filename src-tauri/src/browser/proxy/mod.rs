@@ -16,7 +16,7 @@ mod ws_frames;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -38,11 +38,15 @@ pub type AgentTarget = Arc<dyn Fn(&str) + Send + Sync>;
 
 const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const WAKE_TIMEOUT: Duration = Duration::from_secs(1);
-/// Connections served at once; one more is refused on the accept thread
-/// without a thread of its own. An agent opens a handful.
+/// Admitted connections served at once; one more gets a 503 once its head
+/// is admitted. An agent opens a handful.
 const MAX_CONNECTIONS: usize = 32;
-/// How long the accept thread may spend refusing one connection.
-const REFUSE_TIMEOUT: Duration = Duration::from_millis(100);
+/// Connections waiting for their request head, at most; one more cuts the
+/// one that has waited longest. Admission comes after the head, so idle
+/// sockets (from anyone, a web page's preconnects too) must not hold the
+/// slots the agent needs: the agent sends its head the moment it connects,
+/// and only connections that have sent nothing for a while are cut.
+const MAX_UNVETTED: usize = 32;
 
 struct Shared {
     ensure: Ensure,
@@ -52,8 +56,10 @@ struct Shared {
     head_timeout: Duration,
     stopped: AtomicBool,
     next_id: AtomicU64,
-    /// Connections in flight (each holds a [`Permit`]).
+    /// Admitted connections in flight (each holds a [`Permit`]).
     connections: AtomicUsize,
+    /// Connections still waiting for their request head, oldest first.
+    unvetted: Mutex<VecDeque<(u64, TcpStream)>>,
     /// `#[cfg(test)]`: how long the client-side feeds of this proxy's
     /// connections sleep in every push; the ordering test sets it on its
     /// own proxy alone.
@@ -87,24 +93,46 @@ impl Shared {
     fn untrack(&self, id: u64) {
         self.live().remove(&id);
     }
-}
 
-/// One of the `MAX_CONNECTIONS` slots, freed when dropped.
-struct Permit(Arc<Shared>);
-
-impl Permit {
-    fn take(shared: &Arc<Shared>) -> Option<Self> {
-        if shared.connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
-            shared.connections.fetch_sub(1, Ordering::AcqRel);
-            return None;
+    /// Registers `stream` as waiting for its head, cutting the connection
+    /// that has waited longest when `MAX_UNVETTED` already wait. `false`
+    /// when the stream cannot be registered (it is then to be dropped).
+    fn await_head(&self, id: u64, stream: &TcpStream) -> bool {
+        let Ok(handle) = stream.try_clone() else {
+            return false;
+        };
+        let mut waiting = super::lock(&self.unvetted);
+        if waiting.len() >= MAX_UNVETTED {
+            if let Some((_, oldest)) = waiting.pop_front() {
+                let _ = oldest.shutdown(Shutdown::Both);
+            }
         }
-        Some(Self(Arc::clone(shared)))
+        waiting.push_back((id, handle));
+        true
+    }
+
+    /// Connection `id` no longer waits for its head (or never will).
+    fn head_done(&self, id: u64) {
+        super::lock(&self.unvetted).retain(|(waiting, _)| *waiting != id);
     }
 }
 
-impl Drop for Permit {
+/// One of the `MAX_CONNECTIONS` slots, freed when dropped.
+struct Permit<'a>(&'a AtomicUsize);
+
+impl<'a> Permit<'a> {
+    fn take(connections: &'a AtomicUsize) -> Option<Self> {
+        if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
+            connections.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(Self(connections))
+    }
+}
+
+impl Drop for Permit<'_> {
     fn drop(&mut self) {
-        self.0.connections.fetch_sub(1, Ordering::AcqRel);
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -133,6 +161,7 @@ impl Proxy {
             stopped: AtomicBool::new(false),
             next_id: AtomicU64::new(0),
             connections: AtomicUsize::new(0),
+            unvetted: Mutex::new(VecDeque::new()),
             #[cfg(test)]
             client_push_delay_ms: AtomicU64::new(0),
             live: Mutex::new(HashMap::new()),
@@ -184,21 +213,19 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
             return;
         }
         match stream {
-            Ok(mut client) => {
-                let Some(permit) = Permit::take(shared) else {
-                    let _ = client.set_write_timeout(Some(REFUSE_TIMEOUT));
-                    let _ = http::respond(
-                        &mut client,
-                        "503 Service Unavailable",
-                        "too many connections",
-                    );
-                    continue;
-                };
-                // A failed spawn drops `client` (closing the connection) and
-                // the permit.
-                let _ = thread::Builder::new()
+            Ok(client) => {
+                let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
+                if !shared.await_head(id, &client) {
+                    continue; // dropping `client` closes it
+                }
+                let conn_shared = Arc::clone(shared);
+                let spawned = thread::Builder::new()
                     .name("browser-proxy-conn".into())
-                    .spawn(move || handle(&permit.0, client));
+                    .spawn(move || handle(&conn_shared, id, client));
+                // A failed spawn drops `client`, closing the connection.
+                if spawned.is_err() {
+                    shared.head_done(id);
+                }
             }
             // Transient accept failure (e.g. fd exhaustion): back off.
             Err(_) => thread::sleep(Duration::from_millis(50)),
@@ -206,17 +233,19 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
     }
 }
 
-fn handle(shared: &Shared, client: TcpStream) {
-    let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
+fn handle(shared: &Shared, id: u64, client: TcpStream) {
     if shared.track(id, &client) {
         let _ = serve(shared, id, client);
     }
+    shared.head_done(id);
     shared.untrack(id);
 }
 
 fn serve(shared: &Shared, id: u64, mut client: TcpStream) -> io::Result<()> {
     let deadline = Instant::now() + shared.head_timeout;
-    let Some((buf, head_len)) = http::read_head(&mut client, deadline)? else {
+    let head = http::read_head(&mut client, deadline);
+    shared.head_done(id);
+    let Some((buf, head_len)) = head? else {
         return Ok(());
     };
     // Vet the head before the lazy launch and before rewriting Host: a web
@@ -225,6 +254,13 @@ fn serve(shared: &Shared, id: u64, mut client: TcpStream) -> io::Result<()> {
     let admitted = match http::admit(&buf[..head_len - 4]) {
         Ok(admitted) => admitted,
         Err(why) => return http::respond(&mut client, "403 Forbidden", why),
+    };
+    let Some(_permit) = Permit::take(&shared.connections) else {
+        return http::respond(
+            &mut client,
+            "503 Service Unavailable",
+            "too many connections",
+        );
     };
     let port = match (shared.ensure)() {
         Ok(port) => port,

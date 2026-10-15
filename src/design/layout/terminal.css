@@ -41,6 +41,6 @@
    from the body's size, so the last row and column are never clipped. */
 .term-body .xterm { padding: 4px 6px; }
 
-/* Tweaks → Terminal shell / Browser chromium (terminal-tweaks.jsx
+/* Tweaks → Terminal shell / Browser chromium (path-setting.jsx
    PathPicker): why Rust refused the path, or why the stored one is invalid. */
 .twk-path-error { color: var(--rose); font-size: var(--d-text-xs); overflow-wrap: anywhere; }

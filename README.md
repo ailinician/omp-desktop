@@ -43,7 +43,7 @@ Open the globe button in the status bar, `Ctrl+Shift+B` or `/browser [url]` to s
 
 The panel needs a Chromium-based browser on your computer: Google Chrome, Chromium, Edge, Brave, or the Chrome for Testing omp downloads (snap packages can't be used). The app finds one itself; Tweaks → Browser → `chromium` lists what it found and lets you pick another program. Each tab gets its own headless browser, started the first time the tab needs it, with a fresh throwaway profile: no extensions, nothing from your normal browser profile, and gone when you close the tab or quit. Pages run in that browser, never in the app's own window. The agent drives the page you are looking at: it doesn't open a tab of its own, so its navigation replaces your page. Internals and the local trust boundary: [`docs/architecture/browser.md`](docs/architecture/browser.md).
 
-Your annotation comments are instructions; what comes from the page (URL, selector, text, HTML) is marked as untrusted page content, and command or skill names in it are made harmless, so a page can't give the agent commands.
+Your annotation comments are instructions; what comes from the page (URL, selector, text, HTML) is marked as untrusted page content, and command or skill names and `@file` mentions in it are made harmless, so a page can't give the agent commands or make it read your files.
 
 ### Rail widgets
 

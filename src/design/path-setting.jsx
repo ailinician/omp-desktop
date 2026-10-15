@@ -7,7 +7,7 @@
    a floating pop-up would be cut off at its edge.
    ═════════════════════════════════════════════════════════════════════ */
 
-const { TweakRow: _PS_Row, Icon: _PS_Icon } = window;
+const { TweakRow: _PSet_Row, Icon: _PSet_Icon } = window;
 
 /**
  * The "other…" pick in flight per setting (`api.key`), kept outside the
@@ -17,7 +17,7 @@ const { TweakRow: _PS_Row, Icon: _PS_Icon } = window;
  * so it shows the pick, and a second "other…" does nothing until the
  * dialog is gone.
  */
-const _PS_pickInFlight = new Map();
+const _PSet_pickInFlight = new Map();
 
 /**
  * One Rust-owned path setting: `api` is a module constant `{ key, read,
@@ -33,7 +33,7 @@ function usePathSetting(bridge, api) {
   React.useEffect(() => {
     if (!bridge) return undefined;
     let live = true;
-    Promise.resolve(_PS_pickInFlight.get(api.key))
+    Promise.resolve(_PSet_pickInFlight.get(api.key))
       .then(() => api.read(bridge))
       .then((s) => { if (live && s) setSettings(s); });
     return () => { live = false; };
@@ -49,10 +49,10 @@ function usePathSetting(bridge, api) {
     apply(await api.save(bridge, value));
   }, [bridge, api, apply]);
   const pick = React.useCallback(async () => {
-    if (_PS_pickInFlight.has(api.key)) return;
+    if (_PSet_pickInFlight.has(api.key)) return;
     const pending = api.pick(bridge);
-    _PS_pickInFlight.set(api.key, pending);
-    try { apply(await pending); } finally { _PS_pickInFlight.delete(api.key); }
+    _PSet_pickInFlight.set(api.key, pending);
+    try { apply(await pending); } finally { _PSet_pickInFlight.delete(api.key); }
   }, [bridge, api, apply]);
   return { settings, error, save, pick };
 }
@@ -89,14 +89,14 @@ function PathPicker({ name, label, title, rows, disabled, error, save, pick }) {
 
   return (
     <div className="twk-row" ref={rootRef}>
-      <_PS_Row label={name} inline>
+      <_PSet_Row label={name} inline>
         <button ref={triggerRef} type="button" className="twk-btn secondary twk-pick"
           aria-haspopup="menu" aria-expanded={open} disabled={disabled} title={title}
           onClick={() => (open ? close() : setOpen(true))}>
           {label}
-          <_PS_Icon name="chev" size={10} color="var(--fg-4)" />
+          <_PSet_Icon name="chev" size={10} color="var(--fg-4)" />
         </button>
-      </_PS_Row>
+      </_PSet_Row>
       {open && (
         <div ref={menuRef} className="twk-menu" role="menu" aria-label={name} onKeyDown={onMenuKey}>
           {rows.map(r => (
@@ -104,7 +104,7 @@ function PathPicker({ name, label, title, rows, disabled, error, save, pick }) {
               role="menuitemradio" aria-checked={r.checked} title={r.path || undefined}
               onClick={() => { close(); save(r.value); }}>
               <span className="twk-menu-mark">
-                {r.checked && <_PS_Icon name="check" size={10} color="var(--accent)" />}
+                {r.checked && <_PSet_Icon name="check" size={10} color="var(--accent)" />}
               </span>
               <span className="twk-menu-name">{r.name}</span>
               {r.hint && <span className="twk-menu-hint">{r.hint}</span>}

@@ -90,11 +90,15 @@ impl Core {
                     json!({ "expression": expression, "contextId": context, "returnByValue": true }),
                 )
             };
-            // A gone context fails here, before anything is hidden.
-            let hidden =
-                evaluate(HIDE).map_err(|_| "the page changed since the pick".to_owned())?;
-            let shot = Viewport::parse(&hidden["result"]["value"])
-                .ok_or_else(|| "could not read the page's viewport".to_owned())
+            // A gone context fails here. A hide that timed out may still
+            // run later: the show below follows it on the session either way
+            // (the overlay clamps its counter), so it never stays hidden.
+            let shot = evaluate(HIDE)
+                .map_err(|_| "the page changed since the pick".to_owned())
+                .and_then(|hidden| {
+                    Viewport::parse(&hidden["result"]["value"])
+                        .ok_or_else(|| "could not read the page's viewport".to_owned())
+                })
                 .and_then(|viewport| clip(doc_rect, &viewport))
                 .and_then(|clip| {
                     self.call(
@@ -110,10 +114,12 @@ impl Core {
         };
         // After the switch lock is released: the restart takes it.
         self.refresh_frame();
-        let shot = shot?;
-        let data = shot["data"].as_str().ok_or("capture returned no image")?;
+        let mut shot = shot?;
+        let Some(Value::String(data)) = shot.get_mut("data").map(Value::take) else {
+            return Err("capture returned no image".into());
+        };
         Ok(CapturedImage {
-            data: data.to_owned(),
+            data,
             mime_type: "image/png".to_owned(),
         })
     }

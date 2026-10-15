@@ -131,11 +131,17 @@ impl Core {
             return;
         }
         // Activation emits its tabs event under `inner`, like frames.
-        // Recheck after parsing and hold that lock through the pick.
+        // Recheck after parsing and hold that lock through the pick; and
+        // `annotate` too, so a pick still queued when annotate went off is
+        // dropped rather than emitted after the off.
         let inner = lock(&self.inner);
         if inner.active.as_ref().is_some_and(|a| a.session == session) {
-            lock(&self.annotate).picked = Some((session.to_owned(), context));
-            self.emit_pick(&pick);
+            let mut annotate = lock(&self.annotate);
+            if annotate.on {
+                annotate.picked = Some((session.to_owned(), context));
+                self.emit_pick(&pick);
+            }
+            drop(annotate);
         }
         drop(inner);
     }

@@ -97,7 +97,7 @@ impl Tap {
     }
 
     fn on_command(&mut self, command: &Envelope) {
-        let Some(method) = command.method.as_deref() else {
+        let Some(method) = command.method.as_ref().map(Str::as_str) else {
             return;
         };
         match (method, command.id) {
@@ -134,22 +134,22 @@ impl Tap {
     /// The page a command is for: its session's, or the page-level
     /// connection's own.
     fn target_of(&self, command: &Envelope) -> Option<&str> {
-        command.session_id.as_deref().map_or_else(
+        command.session_id.as_ref().map(Str::as_str).map_or_else(
             || self.page.as_deref(),
             |session| self.sessions.get(session).and_then(Option::as_deref),
         )
     }
 
     fn on_reply_or_event(&mut self, message: &Envelope) -> Result<(), &'static str> {
-        match message.method.as_deref() {
+        match message.method.as_ref().map(Str::as_str) {
             Some("Target.attachedToTarget") => {
                 if let Some(attached) = parse::<Attached>(message.params) {
                     // A session on something else (a frame, a worker) maps to `None`.
                     let page = attached
                         .target_info
-                        .filter(|info| info.kind.as_deref() == Some("page"))
+                        .filter(|info| info.kind.as_ref().map(Str::as_str) == Some("page"))
                         .and_then(|info| info.target_id)
-                        .map(Cow::into_owned);
+                        .map(|id| id.0.into_owned());
                     self.sessions.insert(attached.session_id.into_owned(), page);
                 }
             }
@@ -195,19 +195,31 @@ impl Tap {
     }
 }
 
-/// The fields of a CDP message the tap reads first. Strings are `Cow`: JSON
-/// may escape them, though CDP's names and ids never need it.
+/// The fields of a CDP message the tap reads first. Strings are `Cow`
+/// borrowed from the message; JSON may escape them (CDP's names and ids
+/// never need it), and only then are they copied.
 #[derive(Deserialize)]
 struct Envelope<'a> {
     id: Option<u64>,
     #[serde(borrow)]
-    method: Option<Cow<'a, str>>,
+    method: Option<Str<'a>>,
     #[serde(borrow, rename = "sessionId")]
-    session_id: Option<Cow<'a, str>>,
+    session_id: Option<Str<'a>>,
     #[serde(borrow)]
     params: Option<&'a RawValue>,
     #[serde(borrow)]
     result: Option<&'a RawValue>,
+}
+
+/// A string field inside an `Option`: serde borrows a field only when its
+/// type is exactly `Cow<str>`, so `Option<Cow<str>>` would always copy.
+#[derive(Deserialize)]
+struct Str<'a>(#[serde(borrow)] Cow<'a, str>);
+
+impl Str<'_> {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Deserialize)]
@@ -236,9 +248,9 @@ struct Attached<'a> {
 #[derive(Deserialize)]
 struct TargetInfo<'a> {
     #[serde(borrow, rename = "targetId")]
-    target_id: Option<Cow<'a, str>>,
+    target_id: Option<Str<'a>>,
     #[serde(borrow, rename = "type")]
-    kind: Option<Cow<'a, str>>,
+    kind: Option<Str<'a>>,
 }
 
 /// `raw` (a `params` or `result`) as `T`, when present and of that shape.
@@ -254,11 +266,13 @@ fn request_path(head: &[u8]) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use serde_json::{json, Value};
 
     use super::super::feed::Direction;
     use super::super::tests::Reported;
-    use super::Tap;
+    use super::{Envelope, Str, Tap, TargetInfo};
 
     const BROWSER: &[u8] = b"GET /devtools/browser/x HTTP/1.1\r\nHost: h\r\n\r\n";
 
@@ -289,6 +303,30 @@ mod tests {
 
     fn in_session(id: u64, method: &str, session: &str) -> Value {
         json!({ "id": id, "method": method, "params": {}, "sessionId": session })
+    }
+
+    #[test]
+    fn envelope_strings_borrow_from_the_message_unless_escaped() {
+        let message = br#"{"id":1,"method":"Page.navigate","sessionId":"S1","params":{}}"#;
+        let envelope: Envelope = serde_json::from_slice(message).unwrap();
+        assert!(matches!(
+            envelope.method,
+            Some(Str(Cow::Borrowed("Page.navigate")))
+        ));
+        assert!(matches!(
+            envelope.session_id,
+            Some(Str(Cow::Borrowed("S1")))
+        ));
+        let info: TargetInfo = serde_json::from_str(r#"{"targetId":"T1","type":"page"}"#).unwrap();
+        assert!(matches!(info.target_id, Some(Str(Cow::Borrowed("T1")))));
+        assert!(matches!(info.kind, Some(Str(Cow::Borrowed("page")))));
+        // An escaped string cannot borrow, and still reads right.
+        let escaped: Envelope =
+            serde_json::from_slice(br#"{"method":"Page.\u006eavigate"}"#).unwrap();
+        assert_eq!(
+            escaped.method.as_ref().map(Str::as_str),
+            Some("Page.navigate")
+        );
     }
 
     #[test]

@@ -2,30 +2,77 @@
 //! per-session [`View`]) and the Tauri commands over it. All commands but
 //! `browser_input` do their CDP round trips off the IPC thread.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager, State};
 
 use super::annotate::CapturedImage;
-use super::view::{BrowserEmit, InputEvent, Rect, Size, Status, TauriBrowserEmit, View, ViewState};
-use super::{lock, BrowserManager, Entry};
-
-/// Panel commands for a session that was never allocated a browser.
-const NO_BROWSER: &str = "no browser for session";
+use super::view::{
+    BrowserEmit, Frame, InputEvent, Pick, Rect, Size, Status, TabInfo, TauriBrowserEmit, View,
+    ViewState,
+};
+use super::{lock, BrowserManager, Entry, NO_BROWSER};
 
 /// What an open that lost to a close says.
 const PANEL_CLOSED: &str = "panel closed";
 
+/// What an open that a newer open of the same session superseded says.
+const REOPENED: &str = "panel reopened";
+
+/// One open's sink: its messages reach the panel until a newer open of the
+/// same session supersedes it. A restart reopens on the same webview
+/// handler, so a superseded open's `running`, frames or closing `idle`
+/// would otherwise land in the live panel.
+struct OpenEmit {
+    emit: Arc<dyn BrowserEmit>,
+    superseded: AtomicBool,
+}
+
+impl OpenEmit {
+    fn live(&self) -> bool {
+        !self.superseded.load(Ordering::SeqCst)
+    }
+}
+
+impl BrowserEmit for OpenEmit {
+    fn frame(&self, sid: &str, f: &Frame) {
+        if self.live() {
+            self.emit.frame(sid, f);
+        }
+    }
+
+    fn tabs(&self, sid: &str, tabs: &[TabInfo]) {
+        if self.live() {
+            self.emit.tabs(sid, tabs);
+        }
+    }
+
+    fn state(&self, sid: &str, s: &ViewState) {
+        if self.live() {
+            self.emit.state(sid, s);
+        }
+    }
+
+    fn pick(&self, sid: &str, p: &Pick) {
+        if self.live() {
+            self.emit.pick(sid, p);
+        }
+    }
+}
+
 /// The session's panel: its view while open, a generation that
-/// [`close`](Self::close) advances, and the page the agent last worked in. An
-/// open captures the generation when it starts and installs its view only if
-/// it is still the same when it is done, so a close that came in between wins.
+/// [`close`](Self::close) and every open advance, and the page the agent last
+/// worked in. An open captures the generation when it starts and installs
+/// its view only if it is still the same when it is done, so a close or a
+/// newer open that came in between wins.
 #[derive(Default)]
 pub(super) struct PanelSlot {
     view: Option<Arc<View>>,
     generation: u64,
+    /// The sink of the newest open still in flight; a newer open silences it.
+    opening: Option<Arc<OpenEmit>>,
     /// What the proxy last reported (`tap.rs`); a panel opened later starts
     /// there.
     last_agent_target: Option<String>,
@@ -60,7 +107,8 @@ impl BrowserManager {
     }
 
     /// Open the session's panel: make sure its Chromium runs, connect to it
-    /// and start the screencast. Replaces an earlier view of the session.
+    /// and start the screencast. Replaces an earlier view of the session and
+    /// supersedes an earlier open still in flight (the newest open wins).
     pub fn open_panel(
         &self,
         session_id: &str,
@@ -86,8 +134,17 @@ impl BrowserManager {
         // A bad size fails before Chromium is launched for it.
         let size = Size::new(width, height, dpr)?;
         let entry = self.entry(session_id)?;
+        let sink = Arc::new(OpenEmit {
+            emit,
+            superseded: AtomicBool::new(false),
+        });
         let (generation, old, last_agent) = {
             let mut panel = lock(&entry.view);
+            panel.generation += 1;
+            // The slot and this open both hold the sink.
+            if let Some(earlier) = panel.opening.replace(Arc::clone(&sink)) {
+                earlier.superseded.store(true, Ordering::SeqCst);
+            }
             // Owned: the lock must not span the open.
             (
                 panel.generation,
@@ -98,6 +155,7 @@ impl BrowserManager {
         if let Some(old) = old {
             old.close();
         }
+        let emit = Arc::clone(&sink) as Arc<dyn BrowserEmit>;
         emit.state(session_id, &ViewState::new(Status::Starting));
         let started = self.chromium_port(session_id).and_then(|port| {
             let view = Arc::new(View::connect(session_id, port, Arc::clone(&emit))?);
@@ -116,7 +174,7 @@ impl BrowserManager {
             let refused = if entry.slot.closed.load(Ordering::SeqCst) {
                 Some("browser closed")
             } else if panel.generation != generation {
-                Some(PANEL_CLOSED)
+                Some(if sink.live() { PANEL_CLOSED } else { REOPENED })
             } else {
                 None
             };
@@ -125,18 +183,27 @@ impl BrowserManager {
                 view.close();
                 return Err(refused.to_owned());
             }
-            let replaced = panel.view.replace(Arc::clone(&view)); // the slot and this scope both hold it
+            // Our generation since our start: no other view was installed.
+            panel.view = Some(Arc::clone(&view)); // the slot and this scope both hold it
             if let Some(target) = &panel.last_agent_target {
                 view.follow_agent(target); // a report that came in while the view opened
             }
             drop(panel);
-            if let Some(replaced) = replaced {
-                replaced.close(); // a concurrent open of the same session
-            }
             Ok(())
         });
+        {
+            let mut panel = lock(&entry.view);
+            if panel
+                .opening
+                .as_ref()
+                .is_some_and(|o| Arc::ptr_eq(o, &sink))
+            {
+                panel.opening = None;
+            }
+        }
         match &installed {
             // The panel was closed meanwhile: the closed view said `idle`.
+            // A superseded open's sink is silent anyway.
             Err(e) if e != PANEL_CLOSED => {
                 let mut state = ViewState::new(Status::Error);
                 state.error = Some(e.clone()); // the state event and the caller each own it

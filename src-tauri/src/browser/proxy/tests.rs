@@ -11,9 +11,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::http::{rewrite_json, MAX_HEAD};
-use super::{AgentTarget, Ensure, Proxy, MAX_CONNECTIONS};
+use super::{AgentTarget, Ensure, Proxy, MAX_CONNECTIONS, MAX_UNVETTED};
 use crate::browser::lock;
-use crate::browser::tests::{eventually, http_get};
+use crate::browser::tests::http_get;
+use crate::test_support::eventually;
 
 const MASK: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
 
@@ -159,6 +160,21 @@ fn read_until_ends_with(stream: &mut TcpStream, tail: &[u8]) -> Vec<u8> {
     got
 }
 
+/// Whether the proxy closed `stream` (an EOF or a reset) before its read
+/// timeout ran out; a timeout means the socket is still open. Bytes that
+/// arrive instead are the error.
+fn closed_unanswered(stream: &mut TcpStream) -> Result<bool, String> {
+    let mut buf = [0u8; 256];
+    match stream.read(&mut buf) {
+        Ok(0) => Ok(true),
+        Ok(n) => Err(String::from_utf8_lossy(&buf[..n]).into_owned()),
+        Err(e) => Ok(!matches!(
+            e.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        )),
+    }
+}
+
 #[test]
 fn json_bodies_point_at_the_proxy() {
     assert_eq!(
@@ -186,21 +202,18 @@ fn version_is_rewritten_and_raw_traffic_is_spliced() {
     assert!(echoed.ends_with(b"PING"), "{echoed:?}");
 }
 
+/// The proxy asks `ensure` on every admitted connection, concurrently: a
+/// slow launch holds no other connection back (launching once is
+/// `Slot::ensure`'s job).
 #[test]
-fn concurrent_first_connections_launch_once() {
+fn concurrent_discoveries_through_one_slow_ensure_all_succeed() {
     let up = fake_upstream();
     let calls = Arc::new(AtomicUsize::new(0));
-    let launched = Arc::new(Mutex::new(None::<u16>));
     let c = Arc::clone(&calls);
-    let l = Arc::clone(&launched);
     let ensure: Ensure = Arc::new(move || {
-        let mut g = lock(&l);
-        if g.is_none() {
-            c.fetch_add(1, Ordering::SeqCst);
-            thread::sleep(Duration::from_millis(200));
-            *g = Some(up);
-        }
-        Ok(g.unwrap())
+        c.fetch_add(1, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(200));
+        Ok(up)
     });
     let proxy = Proxy::bind(ensure, nobody()).unwrap();
     let handles: Vec<_> = (0..5)
@@ -210,9 +223,10 @@ fn concurrent_first_connections_launch_once() {
         })
         .collect();
     for h in handles {
-        assert!(h.join().unwrap().is_ok());
+        let body = h.join().unwrap().unwrap();
+        assert!(body.contains("webSocketDebuggerUrl"), "{body}");
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
 }
 
 /// Refused requests get a 403 and never launch Chromium.
@@ -378,41 +392,77 @@ fn ensure_error_is_a_503() {
 #[test]
 fn oversized_head_is_closed_unanswered() {
     let (ensure, calls) = refusing_ensure();
-    let proxy = Proxy::bind(ensure, nobody()).unwrap();
+    // A head timeout far beyond the test: only the size cap can close it.
+    let proxy = Proxy::bind_with(ensure, nobody(), Duration::from_secs(60)).unwrap();
     let mut request = b"GET /json HTTP/1.1\r\nHost: localhost\r\nX: ".to_vec();
     request.resize(MAX_HEAD + 100, b'a');
-    assert_eq!(raw_roundtrip(proxy.port(), &request), Vec::<u8>::new());
+    let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.write_all(&request).unwrap();
+    assert_eq!(closed_unanswered(&mut s), Ok(true));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
-fn connections_over_the_cap_are_refused_until_one_closes() {
+fn admitted_connections_over_the_cap_are_refused_until_one_closes() {
     let up = fake_upstream();
     let proxy = Proxy::bind(Arc::new(move || Ok(up)), nobody()).unwrap();
-    // Idle clients: each holds a slot while the proxy waits for its head.
-    let mut idle: Vec<TcpStream> = (0..MAX_CONNECTIONS)
-        .map(|_| TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap())
+    // Live splices: each holds a slot until it closes.
+    let mut spliced: Vec<TcpStream> = (0..MAX_CONNECTIONS)
+        .map(|_| {
+            let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
+            s.write_all(upgrade("/devtools/x").as_bytes()).unwrap();
+            s
+        })
         .collect();
-    // Refused on the accept thread at once, before any request is read.
-    let mut extra = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
-    extra
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    let mut refused = Vec::new();
-    let _ = extra.read_to_end(&mut refused);
+    let full = eventually(Duration::from_secs(3), || {
+        (proxy.shared.connections.load(Ordering::SeqCst) == MAX_CONNECTIONS).then_some(())
+    });
+    assert!(full.is_some(), "every splice holds a slot");
+    let refused = raw_roundtrip(
+        proxy.port(),
+        b"GET /json/version HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
     assert!(
         refused.starts_with(b"HTTP/1.1 503 Service Unavailable\r\n"),
         "{}",
         String::from_utf8_lossy(&refused)
     );
-    drop(idle.pop());
+    drop(spliced.pop());
     let served = eventually(Duration::from_secs(3), || {
         http_get(proxy.port(), "/json/version")
             .ok()
             .filter(|body| body.contains("webSocketDebuggerUrl"))
     });
     assert!(served.is_some(), "a freed slot serves again");
-    drop(idle);
+    drop(spliced);
+}
+
+#[test]
+fn idle_sockets_never_starve_the_agent() {
+    let up = fake_upstream();
+    let proxy = Proxy::bind(Arc::new(move || Ok(up)), nobody()).unwrap();
+    // Twice as many sockets that never send a head as may wait for one,
+    // more than the connection cap too.
+    let mut idle: Vec<TcpStream> = (0..2 * MAX_UNVETTED.max(MAX_CONNECTIONS))
+        .map(|_| TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap())
+        .collect();
+    let body = http_get(proxy.port(), "/json/version").unwrap();
+    assert!(
+        body.contains("webSocketDebuggerUrl"),
+        "served at once: {body}"
+    );
+    // The longest waiting were cut to make room; the newest still wait.
+    let cut = idle.len() - MAX_UNVETTED + 1; // the agent's took one more
+    for (i, s) in idle[..cut].iter_mut().enumerate() {
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert_eq!(closed_unanswered(s), Ok(true), "idle socket {i}");
+    }
+    let newest = idle.last_mut().unwrap();
+    newest
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    assert_eq!(closed_unanswered(newest), Ok(false));
 }
 
 #[test]
@@ -425,8 +475,9 @@ fn finished_connections_are_untracked() {
     let _ = raw_roundtrip(proxy.port(), upgrade("/x").as_bytes());
     let _ = raw_roundtrip(proxy.port(), b"GET /x HTTP/1.1\r\n\r\n");
     let drained = eventually(Duration::from_secs(3), || {
-        let idle =
-            proxy.shared.live().is_empty() && proxy.shared.connections.load(Ordering::SeqCst) == 0;
+        let idle = proxy.shared.live().is_empty()
+            && lock(&proxy.shared.unvetted).is_empty()
+            && proxy.shared.connections.load(Ordering::SeqCst) == 0;
         idle.then_some(())
     });
     assert!(
@@ -490,16 +541,9 @@ fn trickled_head_is_cut_at_the_absolute_deadline() {
     });
     s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     let start = Instant::now();
-    let mut buf = [0u8; 16];
-    let closed = match s.read(&mut buf) {
-        Ok(n) => n == 0,
-        Err(e) => !matches!(
-            e.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-        ),
-    };
+    let closed = closed_unanswered(&mut s);
     assert!(
-        closed,
+        closed == Ok(true),
         "proxy must close the connection, not time out the client"
     );
     assert!(
@@ -522,8 +566,9 @@ fn shutdown_cuts_live_splices() {
     assert!(spliced.is_some(), "client and upstream are tracked");
     proxy.shutdown();
     s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    // A timeout here would mean the splice outlived the shutdown.
+    assert_eq!(closed_unanswered(&mut s), Ok(true), "socket cut");
     let mut buf = [0u8; 64];
-    assert!(matches!(s.read(&mut buf), Ok(0) | Err(_)), "socket closed");
     // The accept loop is gone: a new connection is refused or closed at once.
     match TcpStream::connect(("127.0.0.1", proxy.port())) {
         Err(_) => {}

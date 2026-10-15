@@ -43,7 +43,7 @@ use std::sync::atomic::Ordering;
 use std::os::windows::io::AsRawHandle;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ACCESS_DENIED, HANDLE, STILL_ACTIVE,
+    CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, HANDLE, STILL_ACTIVE,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::JobObjects::{
@@ -62,9 +62,10 @@ use windows_sys::Win32::System::JobObjects::{
 ///   gone; unreaped ones still count as alive.
 /// - **Windows:** `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` then
 ///   `GetExitCodeProcess`: alive while the exit code is `STILL_ACTIVE`. A
-///   process that cannot be opened is alive when access was denied (it
-///   exists, e.g. elevated) and gone otherwise (no such pid). A process that
-///   really exited with code 259 reads as alive, which errs on the safe side.
+///   process that cannot be opened is gone only on `ERROR_INVALID_PARAMETER`
+///   (no such pid); access denied (it exists, e.g. elevated) and any other
+///   failure count as alive. A process that really exited with code 259
+///   reads as alive, which errs on the safe side.
 #[cfg(unix)]
 pub fn pid_is_alive(pid: u32) -> bool {
     // SAFETY: signal 0 sends no actual signal; it only validates that the
@@ -86,7 +87,8 @@ pub fn pid_is_alive(pid: u32) -> bool {
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
         // SAFETY: reads this thread's last-error value, no arguments.
-        return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
+        // Only "no such pid" means gone; anything else is inconclusive.
+        return unsafe { GetLastError() } != ERROR_INVALID_PARAMETER;
     }
     let mut code = 0u32;
     // SAFETY: `process` is the valid handle opened above; `code` is a live
@@ -98,30 +100,32 @@ pub fn pid_is_alive(pid: u32) -> bool {
 }
 
 /// SIGKILL the whole process group `pid` leads, if `pid` is a positive pid
-/// that leads its own group (`getpgid(pid) == pid`): the shape of a child
-/// started through [`ProcessSupervisor::prepare`]. `true` once the signal
-/// was sent; `false` when `pid` is not such a leader (or already gone), so
-/// nothing was signalled — never the caller's own group or a stranger's
-/// member process.
+/// that leads its own group (`getpgid(pid) == pid`) and that group is not
+/// ours (`getpgrp()`): the shape of a child started through
+/// [`ProcessSupervisor::prepare`]. `true` once the signal was sent; `false`
+/// when `pid` is not such a leader (or already gone), so nothing was
+/// signalled — never the caller's own group or a stranger's member process.
 #[cfg(unix)]
 pub fn kill_group_if_leader(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
     };
-    // SAFETY: getpgid takes a plain pid and does not modify any process.
-    if !is_group_leader(pid, unsafe { libc::getpgid(pid) }) {
+    // SAFETY: getpgid takes a plain pid and getpgrp no arguments; neither
+    // modifies any process.
+    let (group, own) = unsafe { (libc::getpgid(pid), libc::getpgrp()) };
+    if !is_foreign_group_leader(pid, group, own) {
         return false;
     }
     // SAFETY: plain-integer FFI call; `-pid` with `pid > 0` is the group
-    // `pid` leads, checked above, never our own or "every process".
+    // `pid` leads and not our own, checked above, never "every process".
     unsafe { libc::kill(-pid, libc::SIGKILL) == 0 }
 }
 
 /// Whether `pid` (positive) is the leader of `group` (what `getpgid`
-/// returned for it; `-1` on error).
+/// returned for it; `-1` on error) and that group is not `own` (ours).
 #[cfg(unix)]
-const fn is_group_leader(pid: libc::pid_t, group: libc::pid_t) -> bool {
-    pid > 0 && pid == group
+const fn is_foreign_group_leader(pid: libc::pid_t, group: libc::pid_t, own: libc::pid_t) -> bool {
+    pid > 0 && pid == group && group != own
 }
 
 /// Guarantees the process tree rooted at a spawned child is killed as a
@@ -316,7 +320,8 @@ impl Drop for ProcessSupervisor {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_group_leader, kill_group_if_leader, pid_is_alive as process_alive, ProcessSupervisor,
+        is_foreign_group_leader, kill_group_if_leader, pid_is_alive as process_alive,
+        ProcessSupervisor,
     };
     use crate::test_support::wait_until;
     use std::process::Command;
@@ -441,20 +446,32 @@ mod tests {
     }
 
     #[test]
-    fn only_positive_pids_leading_their_own_group_are_eligible() {
-        for (pid, group, expected) in [
-            (42, 42, true),
-            (42, 41, false),
-            (42, -1, false),
-            (0, 0, false),
-            (-1, -1, false),
+    fn only_positive_pids_leading_a_foreign_group_are_eligible() {
+        for (pid, group, own, expected) in [
+            (42, 42, 7, true),
+            (42, 42, 42, false),
+            (42, 41, 7, false),
+            (42, -1, 7, false),
+            (0, 0, 7, false),
+            (-1, -1, 7, false),
         ] {
             assert_eq!(
-                is_group_leader(pid, group),
+                is_foreign_group_leader(pid, group, own),
                 expected,
-                "pid={pid}, group={group}"
+                "pid={pid}, group={group}, own={own}"
             );
         }
+    }
+
+    /// Our own process group is never signalled, even when this process
+    /// leads it (a test binary started straight from a shell does).
+    #[test]
+    fn kill_group_if_leader_refuses_our_own_group() {
+        // SAFETY: getpgrp takes no arguments and modifies nothing.
+        let own = unsafe { libc::getpgrp() };
+        let own = u32::try_from(own).expect("process group id is positive");
+        assert!(!kill_group_if_leader(own));
+        assert!(!kill_group_if_leader(std::process::id()));
     }
 
     /// A prepared child leads its group, so the group goes down with it; an
@@ -462,6 +479,7 @@ mod tests {
     #[test]
     fn kill_group_if_leader_kills_only_group_leaders() {
         let (mut led, grandchildren) = spawn_with_grandchildren(true);
+        assert_eq!(grandchildren.len(), 2, "expected two sleep grandchildren");
         assert!(kill_group_if_leader(led.id()));
         assert!(wait_until(Duration::from_secs(2), || {
             grandchildren.iter().all(|&pid| !process_alive(pid))
@@ -476,5 +494,33 @@ mod tests {
         assert!(process_alive(member.id()));
         member.kill().expect("kill sleep");
         let _ = member.wait();
+    }
+}
+
+#[cfg(windows)]
+#[cfg(test)]
+mod windows_tests {
+    use super::pid_is_alive;
+    use std::process::Command;
+
+    /// Our own pid opens and reports `STILL_ACTIVE`; a child that exited and
+    /// was reaped (handle closed) is gone — `OpenProcess` reports no such pid.
+    #[test]
+    fn own_pid_is_alive_and_a_reaped_child_is_gone() {
+        assert!(pid_is_alive(std::process::id()));
+
+        let mut child = Command::new("cmd")
+            .args(["/C", "exit"])
+            .spawn()
+            .expect("spawn cmd");
+        let pid = child.id();
+        child.wait().expect("wait for cmd");
+        // Dropping the `Child` closes our handle, so the process object can
+        // go away entirely.
+        drop(child);
+        assert!(
+            !pid_is_alive(pid),
+            "exited child {pid} still reads as alive"
+        );
     }
 }

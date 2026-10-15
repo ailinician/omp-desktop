@@ -44,7 +44,11 @@ function BrowserToolbar({ ui }) {
     e.currentTarget.elements.address.blur();
   };
   const onKeyDown = (e) => {
-    if (e.key !== "Escape") return;
+    // Escape that ends an IME composition belongs to the IME.
+    if (e.key !== "Escape" || e.nativeEvent.isComposing) return;
+    // Stopped here: the window keymap would abort a running turn on Escape.
+    e.preventDefault();
+    e.stopPropagation();
     setDraft(null);
     e.currentTarget.blur();
   };

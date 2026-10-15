@@ -724,8 +724,8 @@ mod tests {
     /// now-dead pid — a pid guaranteed not to belong to any live process
     /// (barring extremely unlikely pid reuse in the instant between wait
     /// and use, which every test in this module tolerates the same way any
-    /// real caller would). Unix-only, like its one caller: liveness of a
-    /// lock owner's pid is only probed there.
+    /// real caller would). Unix-only because it spawns `true`, like its one
+    /// caller.
     #[cfg(unix)]
     fn spawn_and_reap_dead_pid() -> u32 {
         let mut child = std::process::Command::new("true")

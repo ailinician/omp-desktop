@@ -2,8 +2,10 @@
 //! bytes in, complete text messages out. Run by the proxy's pipe threads
 //! (see [`feed`](super::feed)) on every chunk before it is forwarded.
 //!
-//! Frames are decoded as they stream by, so a message over the size cap is
-//! discarded without being buffered, and decoding stays in sync behind it.
+//! Frames are decoded as they stream by. A message over the size cap is
+//! skipped from the length in its frame header: none of it is copied (only
+//! the first few bytes of one that may be read to a larger cap, see
+//! [`Messages::reading_up_to`]), and decoding stays in sync behind it.
 //! Control frames (which may interleave with the fragments of a message) and
 //! binary messages are dropped. A stream the decoder cannot follow - broken
 //! framing, or an RSV bit that announces a negotiated extension - is
@@ -48,6 +50,8 @@ pub(super) struct Messages {
     open: bool,
     /// The open message is not wanted (binary, or over the cap).
     skipping: bool,
+    /// Messages starting with these bytes are read up to this larger cap.
+    larger: Option<(&'static [u8], usize)>,
 }
 
 impl Messages {
@@ -62,7 +66,16 @@ impl Messages {
             message: Vec::new(),
             open: false,
             skipping: false,
+            larger: None,
         }
+    }
+
+    /// Also reads the messages that start with `prefix` up to `max` bytes.
+    /// Of any other message over the cap, at most `prefix.len()` bytes are
+    /// copied to tell it apart.
+    pub const fn reading_up_to(mut self, prefix: &'static [u8], max: usize) -> Self {
+        self.larger = Some((prefix, max));
+        self
     }
 
     /// Decode `bytes`, appending each text message that completes to `out`.
@@ -101,7 +114,9 @@ impl Messages {
         }
     }
 
-    /// A frame header is complete: check it fits the message in progress.
+    /// A frame header is complete: check it fits the message in progress,
+    /// and skip the message right away when its length already says it
+    /// cannot.
     fn start(&mut self, frame: &Frame) -> Result<(), Lost> {
         match frame.opcode {
             OP_CONT if !self.open => Err(Lost),
@@ -110,31 +125,80 @@ impl Messages {
                 self.open = true;
                 self.skipping = frame.opcode == OP_BINARY;
                 self.message.clear();
+                self.skip_if_over(frame.remaining);
+                Ok(())
+            }
+            OP_CONT => {
+                self.skip_if_over(frame.remaining);
                 Ok(())
             }
             _ => Ok(()),
         }
     }
 
+    /// Skips the open message if `more` bytes would take it over its cap.
+    fn skip_if_over(&mut self, more: u64) {
+        let len = u64::try_from(self.message.len()).unwrap_or(u64::MAX);
+        let limit = u64::try_from(self.limit()).unwrap_or(u64::MAX);
+        if !self.skipping && len.saturating_add(more) > limit {
+            self.skip();
+        }
+    }
+
+    fn skip(&mut self) {
+        self.skipping = true;
+        self.message = Vec::new(); // give the memory back
+    }
+
+    /// The cap of the open message: the larger one while what came of it so
+    /// far is, or may still become, the prefix read to it.
+    fn limit(&self) -> usize {
+        match self.larger {
+            Some((prefix, max))
+                if self.message.starts_with(prefix) || prefix.starts_with(&self.message) =>
+            {
+                max.max(self.max)
+            }
+            _ => self.max,
+        }
+    }
+
+    /// Bytes of the open message still to come before its cap is known.
+    fn undecided(&self) -> usize {
+        match self.larger {
+            Some((prefix, _)) if prefix.starts_with(&self.message) => {
+                prefix.len() - self.message.len()
+            }
+            _ => 0,
+        }
+    }
+
     /// Unmask `chunk` of the data frame into the message, unless it is
-    /// skipped or grows over the cap.
+    /// skipped. A frame header announcing too much has skipped it already;
+    /// a message whose first bytes turn out not to be the prefix read to
+    /// the larger cap is skipped as soon as they are in.
     fn payload(&mut self, frame: &mut Frame, chunk: &[u8]) {
         if frame.opcode >= OP_CONTROL || self.skipping {
             return;
         }
-        if self.message.len() + chunk.len() > self.max {
-            self.skipping = true;
-            self.message = Vec::new(); // give the memory back
-            return;
+        let (probe, rest) = chunk.split_at(self.undecided().min(chunk.len()));
+        self.append(frame, probe);
+        // `remaining` still counts all of `chunk`.
+        self.skip_if_over(frame.remaining - probe.len() as u64);
+        if !self.skipping {
+            self.append(frame, rest);
         }
+    }
+
+    fn append(&mut self, frame: &mut Frame, bytes: &[u8]) {
         let from = self.message.len();
-        self.message.extend_from_slice(chunk);
+        self.message.extend_from_slice(bytes);
         if let Some(key) = frame.mask {
             for (i, byte) in self.message[from..].iter_mut().enumerate() {
                 *byte ^= key[(frame.phase + i) % 4];
             }
         }
-        frame.phase = (frame.phase + chunk.len()) % 4;
+        frame.phase = (frame.phase + bytes.len()) % 4;
     }
 }
 
@@ -283,6 +347,67 @@ mod tests {
             feed_all(&mut server(100), &[&wire]),
             Ok(vec!["next".to_owned(), "last".to_owned()])
         );
+    }
+
+    #[test]
+    fn a_message_over_the_cap_is_skipped_from_its_header_without_copying() {
+        // One frame announcing more than the cap; only its header and fewer
+        // payload bytes than the cap have arrived.
+        let wire = text(&"z".repeat(5000));
+        let mut decoder = server(100);
+        let mut out = Vec::new();
+        decoder.feed(&wire[..4 + 50], &mut out).unwrap();
+        assert_eq!(decoder.message.capacity(), 0, "nothing of it copied");
+        decoder.feed(&wire[4 + 50..], &mut out).unwrap();
+        decoder.feed(&text("next"), &mut out).unwrap();
+        assert_eq!(out, [b"next".to_vec()]);
+
+        // A fragment announcing more than is left of the cap lets go of the
+        // fragments before it.
+        let mut wire = frame(0x1, false, false, &[b'a'; 40]);
+        wire.extend(frame(0x0, true, false, &[b'b'; 100]));
+        let mut decoder = server(100);
+        decoder.feed(&wire[..42 + 2 + 10], &mut out).unwrap();
+        assert_eq!(decoder.message.capacity(), 0, "nothing kept past the cap");
+
+        // A client's masked frame: nothing copied or unmasked either.
+        let wire = masked_text(&"z".repeat(5000));
+        let mut decoder = Messages::new(true, 100);
+        decoder.feed(&wire[..4 + 4 + 50], &mut out).unwrap();
+        assert_eq!(decoder.message.capacity(), 0);
+    }
+
+    #[test]
+    fn a_message_with_the_prefix_is_read_to_the_larger_cap() {
+        let long = format!("PRE{}", "x".repeat(500));
+        let other = "y".repeat(500);
+        let mut wire = text(&long);
+        wire.extend(text(&other));
+        wire.extend(text(&format!("PRE{}", "x".repeat(1000)))); // over the larger cap
+        wire.extend(text("PR")); // short, so under the cap either way
+        wire.extend(frame(0x1, false, false, b"PRE"));
+        wire.extend(frame(0x0, true, false, &[b'f'; 300]));
+        wire.extend(text("small"));
+        let expected = vec![
+            long,
+            "PR".to_owned(),
+            format!("PRE{}", "f".repeat(300)),
+            "small".to_owned(),
+        ];
+        for step in [1, 2, 7, wire.len()] {
+            let mut decoder = server(100).reading_up_to(b"PRE", 1000);
+            let chunks: Vec<&[u8]> = wire.chunks(step).collect();
+            assert_eq!(
+                feed_all(&mut decoder, &chunks),
+                Ok(expected.clone()),
+                "{step}"
+            );
+        }
+        // Another message over the cap: let go once its first bytes differ.
+        let wire = text(&other);
+        let mut decoder = server(100).reading_up_to(b"PRE", 1000);
+        decoder.feed(&wire[..4 + 50], &mut Vec::new()).unwrap();
+        assert_eq!(decoder.message.capacity(), 0, "only the probe was copied");
     }
 
     #[test]

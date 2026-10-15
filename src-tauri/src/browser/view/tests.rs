@@ -1,5 +1,6 @@
-//! The panel against a real Chromium (skipped when none is installed), and
-//! the URL policy.
+//! The panel against a real Chromium (skipped when none is installed), the
+//! URL policy, and a view core against a fake CDP endpoint for the other
+//! view tests.
 
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -8,11 +9,14 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::super::cdp::{browser_ws_url, CdpClient};
-use super::super::tests::{eventually, manager, manager_with_chromium, mouse, CHROMIUM};
+use super::super::tests::{cdp_result, fake_cdp, manager, manager_with_chromium, mouse, CHROMIUM};
 use super::super::{lock, BrowserManager};
-use super::{checked_url, BrowserEmit, Frame, InputEvent, Pick, Status, TabInfo, View, ViewState};
+use super::{
+    checked_url, BrowserEmit, Core, Frame, InputEvent, Pick, Status, TabInfo, View, ViewState,
+};
+use crate::test_support::eventually;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum Seen {
     Frame(Frame),
     Tabs(Vec<TabInfo>),
@@ -20,7 +24,8 @@ enum Seen {
 }
 
 /// Records everything the view emits, in order, and acks every frame as
-/// the webview does once it painted it.
+/// the webview does once it painted it. Read under its lock: frames carry
+/// whole JPEGs, so only what a test asks for is copied out.
 #[derive(Default)]
 struct Collect {
     log: Mutex<Vec<Seen>>,
@@ -28,15 +33,31 @@ struct Collect {
 }
 
 impl Collect {
-    fn log(&self) -> Vec<Seen> {
-        lock(&self.log).clone() // a snapshot for the test to inspect
+    /// The first frame, oldest first, for which `pick` gives `Some`.
+    fn find_frame<T>(&self, mut pick: impl FnMut(&Frame) -> Option<T>) -> Option<T> {
+        lock(&self.log).iter().find_map(|s| match s {
+            Seen::Frame(f) => pick(f),
+            _ => None,
+        })
     }
 
-    fn frames(&self) -> Vec<Frame> {
-        self.log()
-            .into_iter()
-            .filter_map(|s| match s {
+    /// `read` of the newest frame.
+    fn last_frame<T>(&self, read: impl FnOnce(&Frame) -> T) -> Option<T> {
+        lock(&self.log)
+            .iter()
+            .rev()
+            .find_map(|s| match s {
                 Seen::Frame(f) => Some(f),
+                _ => None,
+            })
+            .map(read)
+    }
+
+    fn frame_seqs(&self) -> Vec<u64> {
+        lock(&self.log)
+            .iter()
+            .filter_map(|s| match s {
+                Seen::Frame(f) => Some(f.seq),
                 _ => None,
             })
             .collect()
@@ -50,19 +71,19 @@ impl Collect {
     }
 
     fn last_tabs(&self) -> Vec<TabInfo> {
-        self.log()
-            .into_iter()
+        lock(&self.log)
+            .iter()
             .rev()
             .find_map(|s| match s {
-                Seen::Tabs(t) => Some(t),
+                Seen::Tabs(t) => Some(t.clone()), // the test reads it after the lock
                 _ => None,
             })
             .unwrap_or_default()
     }
 
     fn last_state(&self) -> Option<ViewState> {
-        self.log().into_iter().rev().find_map(|s| match s {
-            Seen::State(s) => Some(s),
+        lock(&self.log).iter().rev().find_map(|s| match s {
+            Seen::State(s) => Some(s.clone()), // the test reads it after the lock
             _ => None,
         })
     }
@@ -94,6 +115,65 @@ fn panel(name: &str) -> Option<(BrowserManager, Arc<View>, Arc<Collect>)> {
     Some((m, view, seen))
 }
 
+/// Every state a view core emitted.
+#[derive(Default)]
+pub(super) struct States(Mutex<Vec<ViewState>>);
+
+impl States {
+    /// The error of the last state emitted.
+    pub(super) fn last_error(&self) -> Option<String> {
+        lock(&self.0).last().and_then(|s| s.error.clone()) // the test reads it after the lock
+    }
+}
+
+impl BrowserEmit for States {
+    fn frame(&self, _: &str, _: &Frame) {}
+    fn tabs(&self, _: &str, _: &[TabInfo]) {}
+    fn state(&self, _: &str, s: &ViewState) {
+        lock(&self.0).push(s.clone()); // the log owns what it records
+    }
+    fn pick(&self, _: &str, _: &Pick) {}
+}
+
+/// A view core connected to a fake CDP endpoint with page `a` listed, what
+/// it emitted, and the methods it sent. `reply` may answer a request
+/// (`None`: a new session per attach, a one-entry history, else an empty
+/// result).
+pub(super) fn fake_core(
+    mut reply: impl FnMut(&Value) -> Option<Value> + Send + 'static,
+) -> (Core, Arc<States>, Arc<Mutex<Vec<String>>>) {
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&sent);
+    let mut sessions = 0;
+    let url = fake_cdp(move |request| {
+        let method = request["method"].as_str().unwrap_or_default();
+        lock(&log).push(method.to_owned());
+        let answer = reply(request).unwrap_or_else(|| match method {
+            "Target.attachToTarget" => {
+                sessions += 1;
+                cdp_result(request, json!({ "sessionId": format!("s{sessions}") }))
+            }
+            "Page.getNavigationHistory" => cdp_result(
+                request,
+                json!({ "currentIndex": 0, "entries": [{ "id": 1, "url": "about:blank" }] }),
+            ),
+            _ => cdp_result(request, json!({})),
+        });
+        Some(vec![answer])
+    });
+    let states = Arc::new(States::default());
+    let core = Core::new("s1", Arc::clone(&states) as Arc<dyn BrowserEmit>);
+    let client = CdpClient::connect(&url, Box::new(|_, _, _| {})).unwrap();
+    assert!(core.client.set(client).is_ok());
+    lock(&core.inner).upsert_page(&json!({ "targetId": "a", "url": "about:blank" }));
+    (core, states, sent)
+}
+
+/// How many `method` requests were sent.
+pub(super) fn sent_count(sent: &Mutex<Vec<String>>, method: &str) -> usize {
+    lock(sent).iter().filter(|m| *m == method).count()
+}
+
 const SECS_3: Duration = Duration::from_secs(3);
 
 /// Wait until the shown page has loaded a document where `condition` (JS)
@@ -107,10 +187,16 @@ fn loaded(view: &View, condition: &str) {
 }
 
 fn active_tab(seen: &Collect) -> Option<String> {
-    seen.last_tabs()
-        .into_iter()
+    lock(&seen.log)
+        .iter()
+        .rev()
+        .find_map(|s| match s {
+            Seen::Tabs(tabs) => Some(tabs),
+            _ => None,
+        })?
+        .iter()
         .find(|t| t.active)
-        .map(|t| t.target_id)
+        .map(|t| t.target_id.clone()) // the test reads it after the lock
 }
 
 /// Wait until no frame has come for a while (a still page), and give back
@@ -163,25 +249,22 @@ fn screencast_emits_numbered_frames_of_the_panel_size() {
     };
     view.navigate("data:text/html,<h1>hi</h1>").unwrap();
     let frame = eventually(SECS_3, || {
-        seen.frames().into_iter().find(|f| f.css_w == 400)
+        seen.find_frame(|f| {
+            (f.css_w == 400).then(|| (f.css_h, f.w, f.h, f.css_w, f.b64.starts_with("/9j/")))
+        })
     });
-    let frame = frame.expect("a frame of the 400 px wide page");
-    assert_eq!(frame.css_h, 300);
-    assert_eq!(
-        frame.w * frame.css_h,
-        frame.h * frame.css_w,
-        "the image has the page's proportions"
-    );
-    assert!(frame.b64.starts_with("/9j/"), "a base64 JPEG");
+    let (css_h, w, h, css_w, jpeg) = frame.expect("a frame of the 400 px wide page");
+    assert_eq!(css_h, 300);
+    assert_eq!(w * css_h, h * css_w, "the image has the page's proportions");
+    assert!(jpeg, "a base64 JPEG");
     // Chromium may capture its whole window surface for a moment after a
     // navigation; the view restarts the screencast, so the latest frame is
     // the page's size again.
     let size = eventually(Duration::from_secs(5), || {
-        let last = seen.frames().pop()?;
-        ((last.css_w, last.css_h) == (400, 300)).then_some(())
+        (seen.last_frame(|f| (f.css_w, f.css_h))? == (400, 300)).then_some(())
     });
     assert!(size.is_some(), "settled on the panel size");
-    let seqs: Vec<u64> = seen.frames().iter().map(|f| f.seq).collect();
+    let seqs = seen.frame_seqs();
     assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
     assert_eq!(seen.last_state().unwrap().status, Status::Running);
     m.release("s1");
@@ -216,12 +299,10 @@ fn refresh_frame_brings_a_newer_frame_of_a_still_page() {
     view.navigate("data:text/html,<h1>still</h1>").unwrap();
     loaded(&view, "document.querySelector('h1')");
     let before = settled(&seen);
-    let newest = seen.frames().last().map_or(0, |f| f.seq);
+    let newest = seen.last_frame(|f| f.seq).unwrap_or(0);
     view.core.refresh_frame();
     let fresh = eventually(SECS_3, || {
-        seen.frames()
-            .into_iter()
-            .find(|f| f.seq > newest && f.css_w == 400)
+        seen.find_frame(|f| (f.seq > newest && f.css_w == 400).then_some(()))
     });
     assert!(
         fresh.is_some(),
@@ -337,7 +418,7 @@ fn tabs_and_history() {
         (state.can_forward && state.url.ends_with(",a")).then_some(())
     });
     assert!(back.is_some(), "{:?}", seen.last_state());
-    let second = seen.last_tabs()[1].target_id.clone(); // the id outlives the log snapshot
+    let second = seen.last_tabs().swap_remove(1).target_id;
     view.tab_close(&second).unwrap();
     let one = eventually(SECS_3, || {
         let tabs = seen.last_tabs();
@@ -472,9 +553,27 @@ impl TwoTabs {
     }
 }
 
-/// Whether the view shows `target` and has framed it since `frames_before`.
-fn shows(seen: &Collect, target: &str, frames_before: usize) -> bool {
-    active_tab(seen).as_deref() == Some(target) && seen.frame_count() > frames_before
+/// Whether the view shows `target`: a frame was logged after a `tabs` event
+/// marking it active, with no event marking another page active since
+/// (frames after an activation's `tabs` event are of its page, see
+/// `Core::emit_order`).
+fn shows(seen: &Collect, target: &str) -> bool {
+    let mut framed = false;
+    for s in lock(&seen.log).iter().rev() {
+        match s {
+            Seen::Frame(_) => framed = true,
+            Seen::Tabs(tabs) => {
+                if !tabs.iter().any(|t| t.active && t.target_id == target) {
+                    return false;
+                }
+                if framed {
+                    return true;
+                }
+            }
+            Seen::State(_) => {}
+        }
+    }
+    false
 }
 
 #[test]
@@ -492,9 +591,8 @@ fn follows_an_agent_that_navigates_an_existing_page() {
         Some(t.a.as_str()),
         "attached is not worked in: puppeteer stays attached to every page"
     );
-    let frames_before = t.seen.frame_count();
     navigate(&agent, &session, "data:text/html,agent-b");
-    let followed = eventually(SECS_3, || shows(&t.seen, &t.b, frames_before).then_some(()));
+    let followed = eventually(SECS_3, || shows(&t.seen, &t.b).then_some(()));
     assert!(
         followed.is_some(),
         "the view follows the agent to B and shows it"
@@ -513,10 +611,7 @@ fn the_agents_work_during_a_hold_is_shown_when_the_hold_ends() {
     let agent = agent(&t.m, None);
     let session = attach(&agent, &t.b);
     navigate(&agent, &session, "data:text/html,agent-b");
-    let frames_before = t.seen.frame_count();
-    let followed = eventually(hold + SECS_3, || {
-        shows(&t.seen, &t.b, frames_before).then(Instant::now)
-    });
+    let followed = eventually(hold + SECS_3, || shows(&t.seen, &t.b).then(Instant::now));
     let followed = followed.expect("the agent's last step is shown once the hold is over");
     assert!(
         followed.duration_since(t.held_from) >= hold,
@@ -534,12 +629,9 @@ fn follows_a_page_the_agent_creates() {
         return;
     };
     t.hold_over();
-    let frames_before = t.seen.frame_count();
     let agent = agent(&t.m, None);
     let created = create_page(&agent, "data:text/html,agent-new");
-    let followed = eventually(SECS_3, || {
-        shows(&t.seen, &created, frames_before).then_some(())
-    });
+    let followed = eventually(SECS_3, || shows(&t.seen, &created).then_some(()));
     assert!(
         followed.is_some(),
         "the view follows the agent to its new page"
@@ -555,10 +647,9 @@ fn follows_an_agent_on_a_page_level_connection() {
         return;
     };
     t.hold_over();
-    let frames_before = t.seen.frame_count();
     let agent = agent(&t.m, Some(&t.b));
     agent.call(None, "Page.bringToFront", json!({})).unwrap();
-    let followed = eventually(SECS_3, || shows(&t.seen, &t.b, frames_before).then_some(()));
+    let followed = eventually(SECS_3, || shows(&t.seen, &t.b).then_some(()));
     assert!(
         followed.is_some(),
         "bringToFront on B's own connection is work in B"
@@ -575,14 +666,13 @@ fn a_flood_of_follow_reports_costs_one_switch_to_the_last_page() {
     };
     t.hold_over();
     let shown_before = lock(&t.view.core.inner).activations();
-    let frames_before = t.seen.frame_count();
     {
         let _paused = lock(&t.view.core.follow_gate);
         for i in 0..10_000 {
             t.view.follow_agent(if i % 2 == 0 { &t.a } else { &t.b }); // ends on B, the view shows A
         }
     }
-    let followed = eventually(SECS_3, || shows(&t.seen, &t.b, frames_before).then_some(()));
+    let followed = eventually(SECS_3, || shows(&t.seen, &t.b).then_some(()));
     assert!(
         followed.is_some(),
         "the view ends on the last page reported"
@@ -636,8 +726,8 @@ fn a_panel_opened_after_the_agent_browsed_starts_on_its_page() {
         "C is listed too"
     );
     // The first page the panel ever showed, not just where it ended up.
-    let first_shown = seen.log().into_iter().find_map(|s| match s {
-        Seen::Tabs(tabs) => tabs.into_iter().find(|t| t.active).map(|t| t.target_id),
+    let first_shown = lock(&seen.log).iter().find_map(|s| match s {
+        Seen::Tabs(tabs) => tabs.iter().find(|t| t.active).map(|t| t.target_id.clone()), // compared after the lock
         _ => None,
     });
     assert_eq!(first_shown, Some(b), "the panel starts on the agent's page");
@@ -654,6 +744,11 @@ fn release_closes_the_view_before_chromium_goes() {
     m.release("s1");
     assert!(view.navigate("data:text/html,x").is_err());
     assert_eq!(seen.last_state().unwrap().status, Status::Idle);
+    // Chromium gone first would have the worker report a lost connection.
+    let lost = lock(&seen.log).iter().any(|s| {
+        matches!(s, Seen::State(state) if state.status == Status::Stopped || state.error.is_some())
+    });
+    assert!(!lost, "the view was closed before its connection dropped");
     assert!(m.panel("s1").is_err());
 }
 
@@ -696,22 +791,26 @@ fn reopening_a_panel_replaces_the_view() {
     let Some((m, first, seen)) = panel("view-reopen") else {
         return;
     };
-    let emit: Arc<dyn BrowserEmit> = Arc::clone(&seen) as Arc<dyn BrowserEmit>;
+    let seen2 = Arc::new(Collect::default());
+    let emit: Arc<dyn BrowserEmit> = Arc::clone(&seen2) as Arc<dyn BrowserEmit>;
     m.open_panel("s1", 300, 200, 1.0, emit).unwrap();
     assert!(
         first.navigate("data:text/html,x").is_err(),
         "the old view is closed"
     );
     let second = m.panel("s1").unwrap();
+    seen2.view.set(Arc::downgrade(&second)).unwrap(); // its frames are acked to it
     second.navigate("data:text/html,y").unwrap();
     assert!(
-        eventually(SECS_3, || seen
-            .frames()
-            .iter()
-            .any(|f| f.css_w == 300)
-            .then_some(()))
+        eventually(SECS_3, || seen2
+            .find_frame(|f| (f.css_w == 300).then_some(())))
         .is_some(),
         "frames of the new size"
+    );
+    assert!(
+        seen.find_frame(|f| (f.css_w == 300).then_some(()))
+            .is_none(),
+        "the old panel's sink gets nothing of the new view"
     );
     m.close_panel("s1").unwrap();
     assert!(m.panel("s1").is_err());
@@ -795,9 +894,11 @@ fn queued_input_is_not_sent_to_the_page_shown_later() {
     view.input(&InputEvent::Text { text: "abc".into() })
         .unwrap(); // made for A
     view.tab_activate(&b).unwrap();
+    // B's input has focus before the queue drains: "abc" sent to B by
+    // mistake would land in it, not vanish.
+    focus_input(&view);
     drop(paused);
 
-    focus_input(&view);
     // Input is sent in order: once "xyz" has arrived, "abc" has been dealt with.
     view.input(&InputEvent::Text { text: "xyz".into() })
         .unwrap();

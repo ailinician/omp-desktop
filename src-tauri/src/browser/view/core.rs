@@ -195,15 +195,29 @@ impl Core {
         Ok(())
     }
 
-    /// Make the panel `size`, in effect for new frames of `session`.
-    pub(super) fn resize_to(&self, session: &str, size: Size) -> Result<(), String> {
+    /// The shown page's session and the panel size, read together.
+    pub(super) fn shown_page(&self) -> Option<(String, Size)> {
+        let inner = lock(&self.inner);
+        let active = inner.active.as_ref()?;
+        Some((active.session.clone(), inner.size)) // owned: the lock must not span CDP calls
+    }
+
+    /// Give the shown page the panel's size, in effect for its new frames.
+    /// Both are read under `switch`, so a switch under way is waited for
+    /// and the size goes to the page it shows, not to the one it left.
+    pub(super) fn resize_shown_page(&self) -> Result<(), String> {
         let _switching = lock(&self.switch);
-        self.apply_viewport(session, size)
+        self.shown_page().map_or(Ok(()), |(session, size)| {
+            self.apply_viewport(&session, size)
+        })
     }
 
     /// Size `session`'s viewport to `size` and (re)start its screencast.
+    /// The size goes first: while a navigation commits, Chromium refuses
+    /// page commands for a moment ("Not attached to an active page"), and a
+    /// refused size must leave the running screencast as it was, not
+    /// stopped.
     pub(super) fn apply_viewport(&self, session: &str, size: Size) -> Result<(), String> {
-        self.notify(Some(session), "Page.stopScreencast", json!({}));
         self.call(
             Some(session),
             "Emulation.setDeviceMetricsOverride",
@@ -216,7 +230,7 @@ impl Core {
             "Emulation.setFocusEmulationEnabled",
             json!({ "enabled": true }),
         );
-        self.start_screencast(session, size)
+        self.restart_screencast(session, size)
     }
 
     /// Restart `session`'s screencast without touching its viewport: the
@@ -420,5 +434,21 @@ mod tests {
         lock(&core.inner).upsert_page(&json!({ "targetId": "a", "url": "u" }));
         assert_eq!(core.require_tab("a"), Ok(()));
         assert_eq!(core.require_tab("worker-1"), Err("no such tab".to_owned()));
+    }
+
+    #[test]
+    fn a_refused_size_leaves_the_screencast_running() {
+        let (core, _states, sent) = super::super::tests::fake_core(|request| {
+            (request["method"] == "Emulation.setDeviceMetricsOverride").then(|| {
+                crate::browser::tests::cdp_error(request, "Not attached to an active page")
+            })
+        });
+        lock(&core.inner).set_active("a", "sa");
+        assert_eq!(
+            core.resize_shown_page(),
+            Err("Not attached to an active page".to_owned())
+        );
+        let sent = super::super::tests::sent_count(&sent, "Page.stopScreencast");
+        assert_eq!(sent, 0, "not stopped for a size that did not apply");
     }
 }

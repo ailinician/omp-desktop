@@ -6,9 +6,12 @@
    profile; and the goal strip the composer renders (design/goal-strip.jsx).
 
    `goal` is the active tab's `{known, goal}` from the bridge snapshot;
-   `runState` its run state (app/turn-status.js). `onRestoreDraft(draft)`
-   puts an objective omp refused (`{ text, images, chips }`, as `start` got
-   it) back into the composer of the tab it was typed in. */
+   `runState` its run state (app/turn-status.js). `onRestoreDraft(draft,
+   { tabId, shown })` hands back an objective omp refused (`{ text, images,
+   chips }`, as `start` got it) to the tab it was typed in: `shown` says
+   whether that tab is still the one on screen, so its text can go back into
+   the composer; the chips (taken from that tab's browser) go back to it
+   either way. */
 
 const { GoalStrip: _UG_GoalStrip } = window;
 const { entryOf: _UG_entryOf, updateEntry: _UG_updateEntry, pruneEntries: _UG_pruneEntries } = window.OMP_SESSION_UI;
@@ -60,7 +63,7 @@ function _UG_useContinuation(bridge, profileId, active) {
 function useGoalMode({ bridge, tabId, sessionIds, goal, planMode, profileId, runState, onRestoreDraft }) {
   const [drafts, setDrafts] = React.useState({});
   React.useEffect(() => { setDrafts(m => _UG_pruneEntries(m, sessionIds)); }, [sessionIds]);
-  // Read when a start resolves: a tab closed meanwhile gets no entry back,
+  // Read when a start resolves: a tab closed meanwhile gets nothing back,
   // and only the tab still shown gets its objective back in the composer.
   const idsRef = React.useRef(sessionIds);
   idsRef.current = sessionIds;
@@ -102,7 +105,7 @@ function useGoalMode({ bridge, tabId, sessionIds, goal, planMode, profileId, run
       return;
     }
     update(id, d => ({ ...d, mode: true, error: res?.error ?? "Could not start the goal." }));
-    if (tabRef.current === id) onRestoreDraft?.(typed);
+    if (idsRef.current?.includes(id)) onRestoreDraft?.(typed, { tabId: id, shown: tabRef.current === id });
   };
 
   const strip = tabId && shown ? (

@@ -33,14 +33,16 @@ use super::cdp::{browser_ws_url, CdpClient};
 use super::lock;
 
 pub(in crate::browser) use self::core::Core;
-pub(in crate::browser) use emit::{BrowserEmit, Pick, Rect, Status, TauriBrowserEmit, ViewState};
-#[cfg(test)]
-pub(in crate::browser) use emit::{Frame, TabInfo};
+pub(in crate::browser) use emit::{
+    BrowserEmit, Frame, Pick, Rect, Status, TabInfo, TauriBrowserEmit, ViewState,
+};
 pub use input::InputEvent;
 pub(in crate::browser) use model::Size;
 
 const MAX_URL_LEN: usize = 8192;
-/// Input events waiting for the page; a hung page drops the rest.
+/// Input events not yet written to the CDP socket (sending does not wait
+/// for the page); beyond this the panel's input is refused ("browser is
+/// busy").
 const INPUT_QUEUE: usize = 512;
 
 /// What the panel may load: the web, inline documents and a blank page
@@ -183,9 +185,11 @@ impl View {
         if !core.mark_closed() {
             return;
         }
+        // An error of the view's pages no longer applies to a closed view.
         core.update_state(|s| {
             s.status = Status::Idle;
             s.annotate = false;
+            s.error = None;
         });
         if let (Some(client), Ok(session)) = (core.client.get(), core.active_session()) {
             core.release_overlay(&session); // the page keeps running: no overlay left in it
@@ -206,13 +210,8 @@ impl View {
     }
 
     pub fn resize(&self, width: u32, height: u32, dpr: f64) -> Result<(), String> {
-        let size = Size::new(width, height, dpr)?;
-        let session = {
-            let mut inner = lock(&self.core.inner);
-            inner.size = size;
-            inner.active.as_ref().map(|a| a.session.clone()) // owned: used after the lock
-        };
-        session.map_or(Ok(()), |session| self.core.resize_to(&session, size))
+        lock(&self.core.inner).size = Size::new(width, height, dpr)?;
+        self.core.resize_shown_page()
     }
 
     /// Load `url` in the shown page. Returns once sent: `Page.navigate`

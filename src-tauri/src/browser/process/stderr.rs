@@ -35,13 +35,7 @@ impl StderrTail {
             .spawn(move || {
                 let mut chunk = [0u8; 4096];
                 while let Ok(n @ 1..) = stderr.read(&mut chunk) {
-                    let mut kept = lock(&sink);
-                    kept.extend_from_slice(&chunk[..n]);
-                    // Trim in batches: amortised, and never above twice the cap.
-                    if kept.len() > 2 * TAIL_BYTES {
-                        let excess = kept.len() - TAIL_BYTES;
-                        kept.drain(..excess);
-                    }
+                    keep(&mut lock(&sink), &chunk[..n]);
                 }
             });
         Self {
@@ -61,18 +55,31 @@ impl StderrTail {
     }
 }
 
+/// Append `chunk` to the tail. Trimmed in batches: amortised, and never
+/// above twice the cap. One byte before the window stays, so [`tail_text`]
+/// can tell whether its first line was cut.
+fn keep(kept: &mut Vec<u8>, chunk: &[u8]) {
+    kept.extend_from_slice(chunk);
+    if kept.len() > 2 * TAIL_BYTES {
+        let excess = kept.len() - (TAIL_BYTES + 1);
+        kept.drain(..excess);
+    }
+}
+
 /// The last [`TAIL_BYTES`] of `bytes` as one line: lines trimmed, blank
-/// ones dropped, joined with ` | `; a line cut at the front is dropped.
-/// `None` when nothing is left.
+/// ones dropped, joined with ` | `; a line cut at the front is dropped,
+/// unless it is all there is (one line longer than the window), which is
+/// then kept clipped. `None` when nothing is left.
 fn tail_text(bytes: &[u8]) -> Option<String> {
     let cut = bytes.len().saturating_sub(TAIL_BYTES);
     let text = String::from_utf8_lossy(&bytes[cut..]);
-    let text = if cut > 0 {
+    let line_cut = cut > 0 && bytes[cut - 1] != b'\n';
+    let whole = if line_cut {
         text.split_once('\n').map_or("", |(_, rest)| rest)
     } else {
         &text
     };
-    join_nonblank(text.lines(), " | ")
+    join_nonblank(whole.lines(), " | ").or_else(|| join_nonblank(text.lines(), " | "))
 }
 
 #[cfg(test)]
@@ -94,5 +101,34 @@ mod tests {
             Some("the reason".into()),
             "cut line dropped"
         );
+    }
+
+    /// A trim that cuts a line and is followed by no more output: the cut
+    /// fragment must not lead the reason.
+    #[test]
+    fn a_line_cut_by_the_reader_trim_is_dropped() {
+        let mut kept = Vec::new();
+        let mut chunk = "p".repeat(3 * TAIL_BYTES).into_bytes();
+        chunk.extend_from_slice(b"\nthe reason\n");
+        keep(&mut kept, &chunk);
+        assert!(kept.len() <= 2 * TAIL_BYTES, "trimmed");
+        assert_eq!(tail_text(&kept), Some("the reason".into()));
+    }
+
+    /// A window starting right after a newline holds a whole first line.
+    #[test]
+    fn a_whole_first_line_is_kept() {
+        let mut bytes = b"earlier\n".to_vec();
+        bytes.extend_from_slice("y".repeat(TAIL_BYTES - 1).as_bytes());
+        bytes.push(b'\n');
+        assert_eq!(tail_text(&bytes), Some("y".repeat(TAIL_BYTES - 1)));
+    }
+
+    /// A last line longer than the window is shown clipped, not lost.
+    #[test]
+    fn an_oversized_last_line_is_kept_clipped() {
+        let mut bytes = b"earlier\n".to_vec();
+        bytes.extend_from_slice("z".repeat(3 * TAIL_BYTES).as_bytes());
+        assert_eq!(tail_text(&bytes), Some("z".repeat(TAIL_BYTES)));
     }
 }

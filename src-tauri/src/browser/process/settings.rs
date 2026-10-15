@@ -41,14 +41,15 @@ pub struct BrowserSettings {
 /// `browser.json` plus its in-memory copy.
 pub struct SettingsStore {
     path: ProgramSetting,
-    /// The user's home, where omp's Chrome for Testing builds live.
-    home: PathBuf,
+    /// The user's home, where omp's Chrome for Testing builds live; `None`
+    /// when it cannot be resolved (discovery then skips home candidates).
+    home: Option<PathBuf>,
 }
 
 impl SettingsStore {
     /// Read `file` once (a missing or unreadable file reads as automatic;
     /// `None` keeps the setting in memory only).
-    pub fn load(file: Option<PathBuf>, home: PathBuf) -> Self {
+    pub fn load(file: Option<PathBuf>, home: Option<PathBuf>) -> Self {
         Self {
             path: ProgramSetting::load(file, "path"),
             home,
@@ -64,7 +65,7 @@ impl SettingsStore {
     /// browsers it finds. Checks files: call off the IPC thread.
     pub fn settings(&self) -> BrowserSettings {
         let path = self.path();
-        let found = locate::discover(Platform::current(), &Places::current(&self.home));
+        let found = locate::discover(Platform::current(), &Places::current(self.home.as_deref()));
         let installed: Vec<String> = found
             .binaries
             .iter()
@@ -105,7 +106,7 @@ impl SettingsStore {
         if !path.is_empty() {
             return configured(&path).map(|binary| vec![binary]);
         }
-        let found = locate::discover(Platform::current(), &Places::current(&self.home));
+        let found = locate::discover(Platform::current(), &Places::current(self.home.as_deref()));
         if !found.binaries.is_empty() {
             return Ok(found.binaries);
         }
@@ -161,7 +162,7 @@ mod tests {
 
     /// The store over `file`, discovering browsers under `home`.
     fn store(file: Option<PathBuf>, home: &Path) -> SettingsStore {
-        SettingsStore::load(file, home.to_path_buf())
+        SettingsStore::load(file, Some(home.to_path_buf()))
     }
 
     #[test]

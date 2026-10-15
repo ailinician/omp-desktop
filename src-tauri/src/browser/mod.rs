@@ -36,6 +36,10 @@ const WINDOW: (u32, u32) = (1280, 800);
 /// Longest session id accepted; ids become file names.
 const MAX_ID_LEN: usize = 64;
 
+/// What a call for a session that was never allocated a browser (or no
+/// longer has one) says. The caller knows the session it named.
+const NO_BROWSER: &str = "no browser for session";
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -297,7 +301,7 @@ impl BrowserManager {
             .entries
             .get(session_id)
             .map(|entry| Arc::clone(&entry.slot))
-            .ok_or_else(|| format!("no browser for session {session_id}"))?;
+            .ok_or_else(|| NO_BROWSER.to_owned())?;
         slot.ensure() // outside the map lock: a launch must not block other tabs
     }
 

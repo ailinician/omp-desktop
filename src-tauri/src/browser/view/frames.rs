@@ -242,14 +242,9 @@ impl Core {
     /// it holding no view lock.
     pub(in crate::browser) fn refresh_frame(&self) {
         let _switching = lock(&self.switch);
-        let (session, size) = {
-            let inner = lock(&self.inner);
-            let Some(active) = inner.active.as_ref() else {
-                return;
-            };
-            (active.session.clone(), inner.size) // owned: the lock must not span the restart
-        };
-        let _ = self.restart_screencast(&session, size);
+        if let Some((session, size)) = self.shown_page() {
+            let _ = self.restart_screencast(&session, size);
+        }
     }
 }
 

@@ -96,8 +96,14 @@ impl ProgramSetting {
                 }
                 changed
             },
-            // Under the file lock, so the cache follows the file's order.
-            |stored| current(&stored, key).map(|now| now.clone_into(&mut self.cached())),
+            // Under the file lock, so the cache follows the file's order. A
+            // non-string value makes the file unreadable as a setting, so
+            // the refusal names the file like `update_strict`'s own.
+            |stored| {
+                current(&stored, key)
+                    .map(|now| now.clone_into(&mut self.cached()))
+                    .map_err(|e| format!("{} is unreadable: {e}", path.display()))
+            },
         )?
     }
 }
@@ -213,7 +219,11 @@ mod tests {
             std::fs::write(&file, content).unwrap();
             let setting = ProgramSetting::load(Some(file.clone()), "program");
             assert_eq!(setting.get(), "", "{name}");
-            assert!(setting.set("/bin/x").is_err(), "{name}");
+            let err = setting.set("/bin/x").expect_err(name);
+            assert!(
+                err.contains(&file.display().to_string()),
+                "{name}: the error names the file: {err}"
+            );
             assert_eq!(setting.get(), "", "{name}: cache unchanged");
             assert_eq!(std::fs::read(&file).unwrap(), content, "{name}");
         }

@@ -559,13 +559,7 @@ mod tests {
     fn every_command_live_js_sends_is_allowed() {
         // Argument prefixes of the call sites that carry no literal type:
         // the helper definitions and the forwarders inside them.
-        const NON_LITERAL: &[&str] = &[
-            "cmd){",
-            "cmd,timeout",
-            "{...cmd,id})",
-            "cmd).then(",
-            "queuedFrame(",
-        ];
+        const NON_LITERAL: &[&str] = &["cmd){", "cmd,timeout", "queuedFrame("];
         let flat = |source: &str| -> String { source.split_whitespace().collect() };
         let allowed = |ty: &str| {
             assert!(
@@ -575,7 +569,7 @@ mod tests {
         };
         let live = flat(include_str!("../../../src/live.js"));
         let mut checked = 0;
-        for callee in ["_send(", "_sendWithResponse(", "_sendPromptAck("] {
+        for callee in ["_send(", "_sendWithResponse("] {
             for (idx, _) in live.match_indices(callee) {
                 let args = &live[idx + callee.len()..];
                 if let Some(rest) = args.strip_prefix("{type:\"") {

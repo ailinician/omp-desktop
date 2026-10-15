@@ -3780,6 +3780,14 @@
     },
 
     // ── Browser panel (src-tauri/src/browser/commands.rs) ──────────────────
+    // IPC glue only: Rust owns Chromium, the views, the screencast's flow
+    // control and the annotation overlay (docs/architecture/browser.md).
+    // No fake `__TAURI__` harness exists to unit-test this against (see the
+    // note at `login`); the backend's own tests cover the commands and the
+    // channel messages (src-tauri/src/browser/view/tests.rs,
+    // annotate/tests.rs), and tests/test-browser-runtime.mjs runs the
+    // consumers (app/use-browser.jsx, app/browser-screen.js) against a stub
+    // of these methods.
     // Sizes are CSS pixels (integers); `dpr` scales the screencast.
     /** `onMessage` gets everything the view reports during this open, in
      *  order, over one channel (docs/architecture/browser.md): a frame as an

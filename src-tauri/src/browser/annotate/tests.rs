@@ -1,6 +1,7 @@
 //! Annotate state and capture against a fake CDP endpoint, and the overlay
 //! against a real Chromium (skipped when none is installed).
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,8 +11,10 @@ use std::time::Duration;
 use base64::Engine;
 use serde_json::{json, Value};
 
+use crate::test_support::eventually;
+
 use super::super::cdp::CdpClient;
-use super::super::tests::{cdp_error, cdp_result, eventually, fake_cdp, mouse, panel, CHROMIUM};
+use super::super::tests::{cdp_error, cdp_result, fake_cdp, mouse, panel, CHROMIUM};
 use super::super::view::{BrowserEmit, Core, Frame, Pick, Rect, TabInfo, View, ViewState};
 use super::super::{lock, BrowserManager};
 use super::{CapturedImage, BINDING, WORLD};
@@ -194,8 +197,14 @@ fn picks_are_emitted_under_the_activation_lock_for_the_shown_page_only() {
 fn bindings_from_unowned_contexts_or_by_another_name_are_ignored() {
     let (core, probe) = core(None);
     picked(&core);
+    // The page's main world, announced on the installed session.
+    core.on_overlay_event(
+        Some("sa"),
+        "Runtime.executionContextCreated",
+        &json!({ "context": { "id": 8, "name": "" } }),
+    );
     core.note_panel_release();
-    core.on_binding("sa", &binding(BINDING, 8)); // the main world, say
+    core.on_binding("sa", &binding(BINDING, 8)); // a page script, say
     core.on_binding("sb", &binding(BINDING, 7)); // another session's context 7
     core.on_binding("sa", &binding("__other", 7));
     assert!(lock(&probe.picks).is_empty());
@@ -209,6 +218,16 @@ fn a_click_the_panel_did_not_send_is_no_pick() {
     assert!(lock(&probe.picks).is_empty());
 }
 
+#[test]
+fn a_pick_still_queued_when_annotate_went_off_is_dropped() {
+    let (core, probe) = core(None);
+    picked(&core);
+    core.note_panel_release();
+    assert_eq!(core.set_annotate(false), Ok(()));
+    core.on_binding("sa", &binding(BINDING, 7));
+    assert!(lock(&probe.picks).is_empty());
+}
+
 /// The overlay's viewport reply: 400×300 at scroll (0, 0).
 fn viewport(request: &Value) -> Value {
     let value = json!({ "x": 0, "y": 0, "w": 400, "h": 300, "dpr": 1 });
@@ -218,19 +237,20 @@ fn viewport(request: &Value) -> Value {
     )
 }
 
-/// A fake CDP endpoint answering with `reply`, and the requests it saw.
+/// A fake CDP endpoint answering with `reply`, the requests it saw, and the
+/// view's probe.
 fn fake(
     mut reply: impl FnMut(&Value) -> Value + Send + 'static,
-) -> (Arc<Core>, Arc<Mutex<Vec<Value>>>) {
+) -> (Arc<Core>, Arc<Mutex<Vec<Value>>>, Arc<Probe>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&seen);
     let url = fake_cdp(move |request| {
         lock(&log).push(request.clone()); // the test inspects what was sent
         Some(vec![reply(request)])
     });
-    let (core, _) = core(Some(&url));
+    let (core, probe) = core(Some(&url));
     picked(&core);
-    (core, seen)
+    (core, seen, probe)
 }
 
 /// The expressions evaluated during a capture, with their contexts.
@@ -250,7 +270,7 @@ fn evaluations(seen: &Mutex<Vec<Value>>) -> Vec<(String, i64)> {
 
 #[test]
 fn a_screenshot_error_still_shows_the_overlay_again_and_annotate_stays_on() {
-    let (core, seen) = fake(|request| match request["method"].as_str() {
+    let (core, seen, _) = fake(|request| match request["method"].as_str() {
         Some("Page.captureScreenshot") => cdp_error(request, "boom"),
         Some("Runtime.evaluate") => viewport(request),
         _ => cdp_result(request, json!({})),
@@ -269,7 +289,7 @@ fn a_screenshot_error_still_shows_the_overlay_again_and_annotate_stays_on() {
 
 #[test]
 fn a_failed_show_does_not_discard_the_shot() {
-    let (core, seen) = fake(|request| {
+    let (core, seen, _) = fake(|request| {
         if request["method"] == "Page.captureScreenshot" {
             let clip = &request["params"]["clip"];
             assert_eq!(
@@ -297,9 +317,31 @@ fn a_failed_show_does_not_discard_the_shot() {
 }
 
 #[test]
+fn a_failed_hide_still_shows_the_overlay_again() {
+    // A timed-out hide may still run in the page: the show must follow it.
+    let (core, seen, _) = fake(|request| {
+        if request["params"]["expression"] == super::capture::HIDE {
+            cdp_error(request, "cdp Runtime.evaluate: timed out")
+        } else {
+            cdp_result(request, json!({}))
+        }
+    });
+    assert_eq!(
+        core.capture(&rect(0.0, 0.0, 5.0, 5.0)),
+        Err("the page changed since the pick".to_owned())
+    );
+    assert_eq!(
+        evaluations(&seen),
+        [
+            (super::capture::HIDE.to_owned(), 7),
+            (super::capture::SHOW.to_owned(), 7)
+        ]
+    );
+}
+
+#[test]
 fn a_capture_after_the_pick_s_document_is_gone_fails_without_hiding() {
-    let (core, _) = core(None);
-    picked(&core);
+    let (core, seen, _) = fake(|request| cdp_result(request, json!({})));
     core.on_overlay_event(
         Some("sa"),
         "Runtime.executionContextDestroyed",
@@ -315,6 +357,64 @@ fn a_capture_after_the_pick_s_document_is_gone_fails_without_hiding() {
         core.capture(&rect(0.0, 0.0, 5.0, 5.0)),
         Err("the page changed since the pick".to_owned()),
         "another page shown"
+    );
+    assert!(
+        evaluations(&seen).is_empty(),
+        "nothing evaluated: not hidden"
+    );
+}
+
+/// The last annotate flag each overlay context was sent.
+fn last_flags(seen: &Mutex<Vec<Value>>) -> HashMap<i64, String> {
+    evaluations(seen)
+        .into_iter()
+        .filter(|(expression, _)| expression.starts_with("window.__ompAnnotateSet"))
+        .map(|(expression, context)| (context, expression))
+        .collect()
+}
+
+#[test]
+fn a_close_while_turning_on_leaves_the_page_and_the_panel_off() {
+    let shown: Arc<OnceLock<Weak<Core>>> = Arc::default();
+    let closer = Arc::clone(&shown);
+    let enabled_once = AtomicBool::new(false);
+    let (core, seen, probe) = fake(move |request| {
+        // `View::close` on another thread, as soon as the first enable
+        // reaches the page.
+        let enable = request["params"]["expression"]
+            .as_str()
+            .is_some_and(|e| e.starts_with("window.__ompAnnotateSet") && e.ends_with("(true)"));
+        if enable && !enabled_once.swap(true, Ordering::SeqCst) {
+            if let Some(core) = closer.get().and_then(Weak::upgrade) {
+                assert!(core.mark_closed());
+                core.update_state(|s| s.annotate = false);
+                core.release_overlay("sa");
+            }
+        }
+        cdp_result(request, json!({}))
+    });
+    assert!(shown.set(Arc::downgrade(&core)).is_ok());
+    lock(&core.annotate).on = false;
+    lock(&core.annotate).add_context("sa", 8);
+    let _ = core.set_annotate(true);
+    // Answered after everything sent before it, the release included.
+    let _ = core.call(
+        Some("sa"),
+        "Runtime.evaluate",
+        json!({ "expression": "'end'" }),
+    );
+    let off = super::set_params(false, 0)["expression"]
+        .as_str()
+        .map(str::to_owned);
+    let flags = last_flags(&seen);
+    assert_eq!(flags.len(), 2, "both contexts were told: {flags:?}");
+    assert!(
+        flags.values().all(|e| Some(e) == off.as_ref()),
+        "no enable after the release: {flags:?}"
+    );
+    assert!(
+        !lock(&probe.annotate).contains(&true),
+        "the panel is never told annotate is on after the close"
     );
 }
 
@@ -342,7 +442,9 @@ impl Picks {
 impl BrowserEmit for Picks {
     fn frame(&self, _: &str, _: &Frame) {}
     fn tabs(&self, _: &str, tabs: &[TabInfo]) {
-        *lock(&self.1) = tabs.to_vec();
+        let mut kept = lock(&self.1);
+        kept.clear();
+        kept.extend_from_slice(tabs); // the probe keeps the latest tabs for the test
     }
     fn state(&self, _: &str, _: &ViewState) {}
     fn pick(&self, _: &str, p: &Pick) {
@@ -508,6 +610,54 @@ fn the_page_cannot_see_the_overlay_world_and_its_synthetic_clicks_pass() {
     let all = picks.wait(1);
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].selector.as_deref(), Some("button.save"));
+    m.release("s1");
+}
+
+/// A same-process frame over the top-left corner whose button titles the
+/// page.
+const FRAME_PAGE: &str = "data:text/html,<iframe style='position:absolute;left:0;top:0;\
+                          width:300px;height:200px;border:0' srcdoc=\"<button \
+                          style='width:200px;height:100px' \
+                          onclick='top.document.title=&quot;framed&quot;'>Go</button>\">\
+                          </iframe>";
+
+#[test]
+fn clicks_inside_a_frame_are_swallowed_too_and_make_no_pick() {
+    let _chromium = lock(&CHROMIUM);
+    let Some((m, view, picks)) = open("annotate-frame") else {
+        return;
+    };
+    goto(&view, FRAME_PAGE, "iframe");
+    let framed = "!!document.querySelector('iframe').contentDocument.querySelector('button')";
+    let loaded = eventually(WAIT, || (eval(&view, framed) == json!(true)).then_some(()));
+    assert!(loaded.is_some(), "the frame's button is there");
+    view.annotate(true).unwrap();
+    ready(&view, true);
+    click(&view, (100.0, 50.0));
+    // A pick outside the frame after it: the frame's click was handled
+    // first (CDP keeps the order).
+    click(&view, (350.0, 250.0));
+    assert_eq!(
+        picks.wait(1).len(),
+        1,
+        "only the click outside the frame picks"
+    );
+    assert_eq!(
+        eval(&view, "document.title"),
+        json!(""),
+        "the frame's own click handler did not fire"
+    );
+    view.annotate(false).unwrap();
+    ready(&view, false);
+    click(&view, (100.0, 50.0));
+    let clicked = eventually(WAIT, || {
+        (eval(&view, "document.title") == json!("framed")).then_some(())
+    });
+    assert!(
+        clicked.is_some(),
+        "without annotate the frame gets its click"
+    );
+    assert_eq!(picks.all().len(), 1, "and reports nothing");
     m.release("s1");
 }
 
@@ -875,7 +1025,7 @@ fn capture_returns_a_png_of_the_pick_and_refuses_an_empty_area() {
         "base64 of the PNG magic \\x89PNG\\r\\n\\x1a\\n: {}",
         &image.data[..image.data.len().min(20)]
     );
-    // Refused before anything is hidden: the overlay stays.
+    // Refused, and the overlay is shown again.
     assert!(view.capture(&rect(0.0, 0.0, 0.0, 20.0)).is_err());
     ready(&view, true);
     m.release("s1");

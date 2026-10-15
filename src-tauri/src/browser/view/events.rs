@@ -121,14 +121,16 @@ fn on_frame(core: &Core, session: Option<&str>, mut params: Value) -> bool {
         core.ack_chromium(ack); // not queued: acknowledge now, or Chromium stops sending
         return false;
     };
-    let mut inner = lock(&core.inner);
-    let Some(generation) = inner
-        .active
-        .as_ref()
-        .filter(|a| a.session == session)
-        .map(|a| a.generation)
-    else {
-        drop(inner);
+    let (generation, size) = {
+        let inner = lock(&core.inner);
+        let generation = inner
+            .active
+            .as_ref()
+            .filter(|a| a.session == session)
+            .map(|a| a.generation);
+        (generation, inner.size)
+    };
+    let Some(generation) = generation else {
         core.ack_chromium(ack);
         return false; // a page we no longer show
     };
@@ -141,13 +143,13 @@ fn on_frame(core: &Core, session: Option<&str>, mut params: Value) -> bool {
             .map_or(fallback, |v| v.round() as u32); // a screen size in DIP
         css
     };
-    let css_w = css("deviceWidth", inner.size.w);
-    let css_h = css("deviceHeight", inner.size.h);
-    // The base64 moves on as Chromium sent it.
+    let css_w = css("deviceWidth", size.w);
+    let css_h = css("deviceHeight", size.h);
+    // The base64 moves on as Chromium sent it; its JPEG header is read
+    // without the model locked.
     let frame = Frame::new(data, css_w, css_h);
     let proportioned = frame.has_css_proportions();
-    let restart = inner.frame_needs_restart(css_w, css_h, proportioned);
-    drop(inner);
+    let restart = lock(&core.inner).frame_needs_restart(css_w, css_h, proportioned);
     // An image that is not what its metadata says would map clicks wrong.
     if proportioned {
         core.frames.put(generation, frame, ack);

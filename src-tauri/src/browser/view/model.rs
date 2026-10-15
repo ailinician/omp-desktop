@@ -59,6 +59,9 @@ pub(in crate::browser) struct Active {
     /// Which activation this is; a new page session or a switch makes a
     /// new one.
     pub generation: u64,
+    /// Whether the switch to it finished (page events on, screencast
+    /// started); until then picking the same page again retries it.
+    pub shown: bool,
 }
 
 pub(in crate::browser) struct Inner {
@@ -200,15 +203,36 @@ impl Inner {
     }
 
     /// Show `target_id` through `session`; the returned generation tells
-    /// frames and input queued for this activation from later ones.
+    /// frames and input queued for this activation from later ones. Not
+    /// [`shown`](Active::shown) until [`mark_shown`](Self::mark_shown).
     pub fn set_active(&mut self, target_id: &str, session: &str) -> u64 {
         self.activations += 1;
         self.active = Some(Active {
             target_id: target_id.to_owned(),
             session: session.to_owned(),
             generation: self.activations,
+            shown: false,
         });
         self.activations
+    }
+
+    /// The switch that made activation `generation` finished.
+    pub fn mark_shown(&mut self, generation: u64) {
+        if let Some(active) = self.active.as_mut().filter(|a| a.generation == generation) {
+            active.shown = true;
+        }
+    }
+
+    /// Whether `target_id` is the page shown, its switch finished.
+    pub fn is_shown(&self, target_id: &str) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|a| a.shown && a.target_id == target_id)
+    }
+
+    /// Whether `session` is the shown page's session.
+    pub fn is_active_session(&self, session: &str) -> bool {
+        self.active.as_ref().is_some_and(|a| a.session == session)
     }
 
     /// How many pages were shown so far.

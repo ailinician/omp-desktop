@@ -195,6 +195,39 @@ test("screen input: typed keys, text through the sink, paste, side buttons", asy
   h.screen.destroy();
 });
 
+test("screen input: Shift+Insert is a native paste, like Ctrl+V", async () => {
+  const h = screenHarness();
+  h.screen.frame(wire(800, 600, 1));
+  await flush();
+  const before = h.sent.length;
+  const ins = h.sink.fire("keydown", { target: h.sink, key: "Insert", code: "Insert", shiftKey: true });
+  assert.equal(ins.defaultPrevented, false, "left to the sink's native paste");
+  assert.equal(h.sent.length, before, "not sent to the page as a key");
+  // Plain Insert is still the page's key.
+  const plain = h.sink.fire("keydown", { target: h.sink, key: "Insert", code: "Insert" });
+  assert.equal(plain.defaultPrevented, true);
+  assert.equal(h.sent.at(-1).key, "Insert");
+  h.screen.destroy();
+});
+
+test("screen input: releasing a second button does not swallow the first one's release", async () => {
+  const h = screenHarness();
+  h.screen.frame(wire(800, 600, 1));
+  await flush();
+  const canvas = h.canvas;
+  const at = { clientX: 100, clientY: 100, detail: 1 };
+  h.view.fire("mousedown", { target: canvas, button: 0, buttons: 1, ...at });
+  h.view.fire("mousedown", { target: canvas, button: 2, buttons: 3, ...at });
+  h.window.fire("mouseup", { target: canvas, button: 2, buttons: 1, ...at });
+  h.window.fire("mouseup", { target: canvas, button: 0, buttons: 0, ...at });
+  // A release with no press on the canvas (or a second one) sends nothing.
+  h.window.fire("mouseup", { target: canvas, button: 0, buttons: 0, ...at });
+  assert.deepEqual(h.sent.map((e) => [e.type, e.button]), [
+    ["mousePressed", "left"], ["mousePressed", "right"], ["mouseReleased", "right"], ["mouseReleased", "left"],
+  ]);
+  h.screen.destroy();
+});
+
 test("screen input: moves and wheel ticks coalesce per frame; a press sends what waits first", async () => {
   const h = screenHarness();
   h.screen.frame(wire(800, 600, 1));
@@ -239,6 +272,14 @@ test("screen Esc while annotating is the panel's: not the page's, not the keymap
   assert.deepEqual(h.escapes, ["cancelPick"]);
   h.screen.destroy();
   assert.equal(h.panel.listeners("keydown"), 0);
+});
+
+test("screen Esc that dismisses an IME candidate window keeps the pick", () => {
+  const h = screenHarness({ escape: () => "cancelPick" });
+  const esc = h.panel.fire("keydown", { target: h.sink, key: "Escape", code: "Escape", isComposing: true });
+  assert.equal(esc.defaultPrevented, false, "the IME's key");
+  assert.deepEqual(h.escapes, [], "pick not cancelled");
+  h.screen.destroy();
 });
 
 // ---- use-browser.jsx --------------------------------------------------------
@@ -388,6 +429,30 @@ test("hook: a stale open completion cannot release the newer tab's queued resize
   ui = show("new");
   assert.equal(ui.annotate, false);
   assert.equal(screens[1].escape(), null);
+
+  // Leaving annotate mode ends an open pick: turned off by hand, or by Rust
+  // (the agent acted on the page). Turning it back on brings no old popover.
+  const openPick = async () => {
+    states.get("new")({ status: "running", annotate: true });
+    ui = show("new");
+    const p = picks.get("new")({ rect: { x: 0, y: 0, w: 10, h: 10 }, docRect: { x: 0, y: 0, w: 10, h: 10 } });
+    capture({ ok: true, value: { data: "AA==", mimeType: "image/png" } });
+    await p;
+    ui = show("new");
+    assert.ok(ui.pending, "the pick opened the popover");
+  };
+  await openPick();
+  ui.setAnnotate(false);
+  ui = show("new");
+  assert.equal(ui.pending, null, "annotate off by hand closes the popover");
+  states.get("new")({ status: "running", annotate: false }); // Rust confirms
+  states.get("new")({ status: "running", annotate: true });
+  ui = show("new");
+  assert.equal(ui.pending, null, "turning annotate on again brings no old popover");
+  await openPick();
+  states.get("new")({ status: "running", annotate: false });
+  ui = show("new");
+  assert.equal(ui.pending, null, "annotate off by Rust closes the popover");
   unmount();
   assert.deepEqual(closed, ["old", "new"]);
 });

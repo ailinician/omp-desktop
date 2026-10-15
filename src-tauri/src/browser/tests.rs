@@ -1,8 +1,9 @@
 //! The manager's lifecycle, and the test support every browser suite shares
 //! (real-Chromium skipping, managers, panels, a fake CDP server).
 
-use super::view::{BrowserEmit, InputEvent, View};
+use super::view::{BrowserEmit, Frame, InputEvent, Pick, Status, TabInfo, View, ViewState};
 use super::*;
+use crate::test_support::eventually;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -21,11 +22,11 @@ pub(super) fn tempdir(name: &str) -> PathBuf {
     dir
 }
 
-pub(super) fn home_dir() -> PathBuf {
+/// The user's home, as the app would resolve it; `None` when unset.
+pub(super) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .unwrap()
 }
 
 /// Minimal HTTP/1.1 GET against `127.0.0.1:port`; returns the body, read by
@@ -59,8 +60,6 @@ pub(super) fn http_get(port: u16, path: &str) -> io::Result<String> {
     reader.read_exact(&mut body)?;
     String::from_utf8(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
-
-pub(super) use crate::test_support::eventually;
 
 /// The Chromium a real-browser test runs, as the app would find it. `None`
 /// (the test passes with a note) when there is none, unless the
@@ -191,8 +190,10 @@ pub(super) fn cdp_error(request: &Value, message: &str) -> Value {
 
 #[test]
 fn a_missing_chromium_skips_unless_required() {
-    let bin = PathBuf::from("/opt/google/chrome/chrome");
-    assert_eq!(require_chromium("t", Ok(bin.clone()), true), Some(bin));
+    assert_eq!(
+        require_chromium("t", Ok(PathBuf::from("/opt/google/chrome/chrome")), true).as_deref(),
+        Some(Path::new("/opt/google/chrome/chrome"))
+    );
     assert_eq!(require_chromium("t", Err("none".into()), false), None);
     let required = std::panic::catch_unwind(|| require_chromium("t", Err("none".into()), true));
     assert!(
@@ -207,7 +208,10 @@ fn allocate_is_idempotent_and_writes_overlay() {
     let p1 = m.allocate("s1").unwrap();
     let p2 = m.allocate("s1").unwrap();
     assert_eq!(p1, p2);
-    assert_eq!(m.allocate_if_available("s1"), Ok(Some(p1.clone())));
+    assert_eq!(
+        m.allocate_if_available("s1").unwrap().as_deref(),
+        Some(p1.as_path())
+    );
     let port = m.port("s1").unwrap();
     assert_eq!(
         std::fs::read_to_string(&p1).unwrap(),
@@ -810,4 +814,73 @@ fn release_closes_connections_kills_chromium_removes_profile() {
             "no chromium left for that profile"
         );
     }
+}
+
+/// The statuses an open's sink delivered to its panel.
+#[derive(Default, Debug)]
+struct Statuses(Mutex<Vec<Status>>);
+
+impl Statuses {
+    fn heard(&self, status: Status) -> bool {
+        lock(&self.0).contains(&status)
+    }
+
+    fn last(&self) -> Option<Status> {
+        lock(&self.0).last().copied()
+    }
+}
+
+impl BrowserEmit for Statuses {
+    fn frame(&self, _: &str, _: &Frame) {}
+    fn tabs(&self, _: &str, _: &[TabInfo]) {}
+    fn state(&self, _: &str, s: &ViewState) {
+        lock(&self.0).push(s.status);
+    }
+    fn pick(&self, _: &str, _: &Pick) {}
+}
+
+/// A restart reopens on the panel's own handler while an earlier open is
+/// still in flight: the newest open wins, and the superseded one neither
+/// replaces it nor says `idle` (or anything) to the panel afterwards.
+#[test]
+fn a_newer_open_supersedes_one_in_flight() {
+    let _chromium = lock(&CHROMIUM);
+    let Some(m) = manager_with_chromium("mgr-open-superseded") else {
+        return;
+    };
+    m.allocate("s1").unwrap();
+    let older = Arc::new(Statuses::default());
+    let newer = Arc::new(Statuses::default());
+    let (reached, wait_reached) = std::sync::mpsc::channel();
+    let (release, wait_release) = std::sync::mpsc::channel::<()>();
+    let first = std::thread::scope(|scope| {
+        let opening = scope.spawn(|| {
+            let emit = Arc::clone(&older) as Arc<dyn BrowserEmit>;
+            m.open_panel_with("s1", 400, 300, 1.0, emit, move |_| {
+                reached.send(()).unwrap();
+                let _ = wait_release.recv_timeout(Duration::from_secs(30));
+            })
+        });
+        wait_reached
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the first open got as far as installing");
+        let emit = Arc::clone(&newer) as Arc<dyn BrowserEmit>;
+        m.open_panel("s1", 300, 200, 1.0, emit).unwrap();
+        release.send(()).unwrap();
+        opening.join().unwrap()
+    });
+    assert_eq!(first, Err("panel reopened".to_owned()));
+    assert!(
+        !older.heard(Status::Idle),
+        "the superseded open's close stays silent: {older:?}"
+    );
+    let running = eventually(Duration::from_secs(3), || {
+        (newer.last() == Some(Status::Running)).then_some(())
+    });
+    assert!(running.is_some(), "the live panel: {newer:?}");
+    m.panel("s1")
+        .unwrap()
+        .navigate("data:text/html,live")
+        .expect("the newer open's view is installed and connected");
+    m.release("s1");
 }

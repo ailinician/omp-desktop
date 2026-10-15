@@ -1,11 +1,9 @@
 //! Platform-neutral helpers for the terminal tests (`tests.rs` on unix,
-//! `tests_windows.rs` on Windows, and the module tests).
+//! `tests_windows.rs` on Windows).
 
 use super::{Emit, TerminalManager};
 use std::ffi::OsStr;
 use std::sync::Arc;
-
-pub use crate::test_support::wait_until;
 
 /// `id` registered on `manager` with the temp dir as its folder, its shell
 /// opened and observed by a fresh `C`.

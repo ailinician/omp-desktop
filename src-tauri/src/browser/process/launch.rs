@@ -88,33 +88,7 @@ impl Chromium {
         // A stale port file from an earlier run would be read as this launch's.
         let _ = std::fs::remove_file(profile.join(PORT_FILE));
 
-        let mut user_data_dir = OsString::from("--user-data-dir=");
-        user_data_dir.push(profile);
-        let mut cmd = Command::new(binary);
-        cmd.arg("--headless=new")
-            .arg("--remote-debugging-port=0")
-            .arg(user_data_dir)
-            .arg("--no-first-run")
-            .arg("--no-default-browser-check")
-            .arg("--disable-background-networking")
-            // A throwaway browser: no extension, not even one a launcher's
-            // flag file or a managed policy adds.
-            .arg("--disable-extensions")
-            .arg(format!("--window-size={width},{height}"))
-            // Throwaway profile: never touch the OS keychain / keyring
-            // (macOS would prompt for "Chromium Safe Storage" on every launch).
-            .arg("--use-mock-keychain")
-            .arg("--password-store=basic")
-            .arg("about:blank")
-            // Distro launchers (a last-resort candidate) add the user's own
-            // flags from `$XDG_CONFIG_HOME/*-flags.conf` and these variables;
-            // point the one at an empty private folder, drop the others.
-            .env("XDG_CONFIG_HOME", profile.join("xdg-config"))
-            .env_remove("CHROME_USER_FLAGS")
-            .env_remove("CHROMIUM_FLAGS")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+        let mut cmd = command(binary, profile, width, height);
         apply_child_path(&mut cmd);
         ProcessSupervisor::prepare(&mut cmd);
         let mut child = cmd
@@ -199,6 +173,54 @@ impl Drop for Chromium {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// The command starting `binary` with the panel's flags and environment.
+fn command(binary: &Path, profile: &Path, width: u32, height: u32) -> Command {
+    let mut user_data_dir = OsString::from("--user-data-dir=");
+    user_data_dir.push(profile);
+    let mut cmd = Command::new(binary);
+    cmd.arg("--headless=new")
+        .arg("--remote-debugging-port=0")
+        .arg(user_data_dir)
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-background-networking")
+        // A throwaway browser: no extension, not even one a launcher's
+        // flag file or a managed policy adds.
+        .arg("--disable-extensions")
+        // A page restored from the back/forward cache keeps its isolated
+        // world (the annotate overlay's state) without a new context.
+        // Chromium honours only the last `--disable-features`: one flag.
+        .arg("--disable-features=BackForwardCache")
+        .arg(format!("--window-size={width},{height}"))
+        // Throwaway profile: never touch the OS keychain / keyring
+        // (macOS would prompt for "Chromium Safe Storage" on every launch).
+        .arg("--use-mock-keychain")
+        .arg("--password-store=basic")
+        .arg("about:blank")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    if is_script(binary) {
+        // Distro launchers (scripts, the last-resort candidates) add the
+        // user's own flags from `$XDG_CONFIG_HOME/*-flags.conf` and these
+        // variables; point the one at an empty private folder, drop the
+        // others. A real binary reads neither and keeps the user's config
+        // folder (fontconfig, dconf proxy settings).
+        cmd.env("XDG_CONFIG_HOME", profile.join("xdg-config"))
+            .env_remove("CHROME_USER_FLAGS")
+            .env_remove("CHROMIUM_FLAGS");
+    }
+    cmd
+}
+
+/// Whether `path` is a `#!` script (a distro launcher), not a binary.
+fn is_script(path: &Path) -> bool {
+    let mut head = [0u8; 2];
+    std::fs::File::open(path)
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut head))
+        .is_ok_and(|()| head == *b"#!")
 }
 
 /// The debugging port from `<profile>/DevToolsActivePort`: its first line,
@@ -409,12 +431,69 @@ mod tests {
         );
     }
 
-    /// Launcher flag files must not reach the browser: a private
-    /// `XDG_CONFIG_HOME` inside the profile, no flag variables, and
-    /// extensions off.
+    /// The environment `command` sets for `binary`, as `(name, value)`.
+    fn env_of(binary: &Path, profile: &Path) -> Vec<(String, Option<PathBuf>)> {
+        command(binary, profile, 800, 600)
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(PathBuf::from)))
+            .collect()
+    }
+
+    /// A launcher script gets a private `XDG_CONFIG_HOME` and no flag
+    /// variables; a real binary keeps the user's environment untouched.
+    #[test]
+    fn only_launcher_scripts_get_the_private_config_home() {
+        let dir = tempdir("launch-env-scope");
+        let profile = dir.join("profile-0");
+        let launcher = dir.join("launcher");
+        std::fs::write(
+            &launcher,
+            "#!/bin/sh\nexec /opt/google/chrome/chrome \"$@\"\n",
+        )
+        .unwrap();
+        let binary = dir.join("binary");
+        std::fs::write(&binary, b"\x7fELF\x02\x01\x01").unwrap();
+
+        let env = env_of(&launcher, &profile);
+        assert!(
+            env.contains(&("XDG_CONFIG_HOME".into(), Some(profile.join("xdg-config")))),
+            "{env:?}"
+        );
+        assert!(env.contains(&("CHROME_USER_FLAGS".into(), None)), "{env:?}");
+        assert!(env.contains(&("CHROMIUM_FLAGS".into(), None)), "{env:?}");
+
+        assert_eq!(env_of(&binary, &profile), Vec::new());
+    }
+
+    /// Extensions off, and the back/forward cache off in the one
+    /// `--disable-features` Chromium honours (only the last counts).
+    #[test]
+    fn the_flags_disable_extensions_and_the_back_forward_cache() {
+        let dir = tempdir("launch-flags");
+        let cmd = command(&dir.join("chrome"), &dir.join("profile-0"), 800, 600);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|a| a == "--disable-extensions"), "{args:?}");
+        let features: Vec<&String> = args
+            .iter()
+            .filter(|a| a.starts_with("--disable-features="))
+            .collect();
+        assert_eq!(features.len(), 1, "{args:?}");
+        assert!(
+            features[0]["--disable-features=".len()..]
+                .split(',')
+                .any(|f| f == "BackForwardCache"),
+            "{args:?}"
+        );
+    }
+
+    /// A launched launcher script really runs with the private
+    /// `XDG_CONFIG_HOME` inside its profile.
     #[cfg(unix)]
     #[test]
-    fn the_browser_gets_a_private_config_home_and_no_extensions() {
+    fn a_launched_launcher_gets_the_private_config_home() {
         let dir = tempdir("launch-env");
         let seen = dir.join("seen");
         let bin = script(
@@ -422,7 +501,7 @@ mod tests {
             "records",
             &format!(
                 "for a in \"$@\"; do case \"$a\" in --user-data-dir=*) d=\"${{a#--user-data-dir=}}\";; esac; done\n\
-                 printf '%s\\n%s\\n%s\\n' \"$XDG_CONFIG_HOME\" \"${{CHROMIUM_FLAGS-unset}}\" \"$*\" > '{seen}'\n\
+                 printf '%s\\n' \"$XDG_CONFIG_HOME\" > '{seen}'\n\
                  mkdir -p \"$d\"\n\
                  printf '40001\\n/devtools/browser/x\\n' > \"$d/DevToolsActivePort\"\n\
                  exec sleep 300",
@@ -431,15 +510,9 @@ mod tests {
         );
         let c = Chromium::launch(&[bin], profiles(&dir), 800, 600).expect("start");
         let seen = std::fs::read_to_string(&seen).unwrap();
-        let lines: Vec<&str> = seen.lines().collect();
         assert_eq!(
-            lines[0],
+            seen.trim_end(),
             dir.join("profile-0/xdg-config").display().to_string()
-        );
-        assert_eq!(lines[1], "unset");
-        assert!(
-            lines[2].split(' ').any(|arg| arg == "--disable-extensions"),
-            "{seen}"
         );
         c.stop();
     }

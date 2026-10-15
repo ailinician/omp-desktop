@@ -14,6 +14,9 @@ use super::core::Core;
 use super::emit::Status;
 use super::events::Event;
 
+/// Attempts at one screencast restart, `HEAL_GAP` apart (see `model.rs`).
+const RESTART_TRIES: usize = 4;
+
 pub(super) fn run_worker(core: &Core, events: &Receiver<Event>) {
     loop {
         // A follow kept back by the user's hold is shown when the hold ends.
@@ -39,15 +42,17 @@ pub(super) fn run_worker(core: &Core, events: &Receiver<Event>) {
                 let _ = done.send(());
             }
             Event::Restart => {
-                let wait = lock(&core.inner).restart_wait();
-                thread::sleep(wait);
-                let size = {
-                    let mut inner = lock(&core.inner);
-                    inner.restart_started();
-                    inner.size
-                };
-                if let Ok(session) = core.active_session() {
-                    let _ = core.resize_to(&session, size);
+                // A page in the middle of committing a navigation refuses
+                // the restart for a moment; one that failed is tried again,
+                // or the screencast could stay stopped with no frame left to
+                // ask for another.
+                for _ in 0..RESTART_TRIES {
+                    let wait = lock(&core.inner).restart_wait();
+                    thread::sleep(wait);
+                    lock(&core.inner).restart_started();
+                    if core.is_closed() || core.resize_shown_page().is_ok() {
+                        break;
+                    }
                 }
             }
             Event::Cdp {
@@ -73,7 +78,7 @@ fn handle(core: &Core, session: Option<&str>, method: &str, params: &Value) {
                 });
             }
         }
-        _ if session.is_some_and(|s| core.active_session().is_ok_and(|a| a == s)) => {
+        _ if session.is_some_and(|s| lock(&core.inner).is_active_session(s)) => {
             on_page_event(core, method, params);
         }
         _ => {}
@@ -98,11 +103,17 @@ fn on_page_event(core: &Core, method: &str, params: &Value) {
             }
         }
         // Subframes (ads, embeds) load on their own; only the page's counts.
+        // Asked at `frameNavigated`, Chromium may still be swapping in the
+        // committed document ("Not attached to an active page"); once the
+        // page stopped loading the history is settled, so it is asked again.
         "Page.frameStartedLoading" | "Page.frameStoppedLoading"
             if core.is_main_frame(params["frameId"].as_str()) =>
         {
             let loading = method == "Page.frameStartedLoading";
             core.update_state(|s| s.loading = loading);
+            if !loading {
+                let _ = core.refresh_history();
+            }
         }
         // The history changed at `frameNavigated`; the title may have now.
         "Page.loadEventFired" => {
@@ -125,23 +136,20 @@ fn on_target_event(core: &Core, method: &str, params: &Value) {
     core.publish_tabs(&mut inner);
     drop(inner);
     if let Some(id) = follow {
+        end_annotate(core);
         core.follow_to(&id);
     }
 }
 
 /// The agent worked in the page in the follow slot (see `proxy/`): show it,
-/// or show it when it is listed or the user's hold ends. The agent acting
-/// ends annotate mode: the user's picks would land on a page it changes.
+/// or show it when it is listed or the user's hold ends.
 fn on_follow(core: &Core) {
     #[cfg(test)]
     drop(lock(&core.follow_gate)); // a test holds it to keep the worker from taking the slot
     let Some(target) = core.follow.take() else {
         return;
     };
-    let annotating = lock(&core.annotate).on;
-    if annotating {
-        let _ = core.set_annotate(false);
-    }
+    end_annotate(core);
     core.follow_to(&target);
 }
 
@@ -149,7 +157,17 @@ fn on_follow(core: &Core) {
 fn on_hold_ended(core: &Core) {
     let held = lock(&core.inner).take_held_follow();
     if let Some(target) = held {
+        end_annotate(core);
         core.follow_to(&target);
+    }
+}
+
+/// The agent acting ends annotate mode, whenever its page is shown: the
+/// user's picks would land on a page it changes.
+fn end_annotate(core: &Core) {
+    let annotating = lock(&core.annotate).on;
+    if annotating {
+        let _ = core.set_annotate(false);
     }
 }
 
@@ -179,11 +197,114 @@ fn on_target_destroyed(core: &Core, target_id: Option<&str>) {
         Some(Some(id)) => {
             let _ = core.switch_to(&id);
         }
-        Some(None) => {
-            if let Ok(id) = core.create_page() {
+        Some(None) => match core.create_page() {
+            Ok(id) => {
                 let _ = core.switch_to(&id);
             }
-        }
+            Err(e) => core.update_state(|s| s.error = Some(format!("cannot open a page: {e}"))),
+        },
         None => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::super::events::Event;
+    use super::super::tests::{fake_core, sent_count};
+    use super::*;
+    use crate::browser::tests::{cdp_error, cdp_result};
+
+    #[test]
+    fn a_refused_screencast_restart_is_tried_again() {
+        let mut refused = false;
+        let (core, _states, sent) = fake_core(move |request| {
+            if request["method"] == "Emulation.setDeviceMetricsOverride" && !refused {
+                refused = true;
+                return Some(cdp_error(request, "Not attached to an active page"));
+            }
+            None
+        });
+        lock(&core.inner).set_active("a", "sa");
+        let (events, queue) = std::sync::mpsc::channel();
+        events.send(Event::Restart).unwrap();
+        events.send(Event::Stop).unwrap();
+        run_worker(&core, &queue);
+        assert_eq!(
+            sent_count(&sent, "Page.startScreencast"),
+            1,
+            "started on the second try"
+        );
+    }
+
+    #[test]
+    fn the_history_is_asked_again_once_the_page_stopped_loading() {
+        let mut asked = 0;
+        let (core, _states, _sent) = fake_core(move |request| {
+            if request["method"] != "Page.getNavigationHistory" {
+                return None;
+            }
+            asked += 1;
+            match asked {
+                1 => None, // the switch's: one entry
+                2 => Some(cdp_error(request, "Not attached to an active page")),
+                _ => Some(cdp_result(
+                    request,
+                    json!({ "currentIndex": 1, "entries": [
+                        { "id": 1, "url": "about:blank" },
+                        { "id": 2, "url": "data:text/html,a" },
+                    ] }),
+                )),
+            }
+        });
+        assert_eq!(core.switch_to("a"), Ok(()));
+        let committed = json!({ "frame": { "id": "a", "url": "data:text/html,a" } });
+        on_page_event(&core, "Page.frameNavigated", &committed);
+        assert!(!lock(&core.inner).state.can_back, "asked while committing");
+        on_page_event(
+            &core,
+            "Page.frameStoppedLoading",
+            &json!({ "frameId": "a" }),
+        );
+        assert!(lock(&core.inner).state.can_back);
+    }
+
+    #[test]
+    fn a_held_follow_that_changes_the_page_ends_annotate_mode() {
+        let (core, _states, _sent) = fake_core(|_| None);
+        assert_eq!(core.switch_to("a"), Ok(()));
+        let hold_ends = {
+            let mut inner = lock(&core.inner);
+            inner.upsert_page(&json!({ "targetId": "b", "url": "about:blank" }));
+            inner.following = true;
+            inner.follow_hold = Duration::from_millis(50);
+            inner.user_activated = Some(Instant::now());
+            assert!(
+                !inner.request_follow("b"),
+                "the user's choice holds the view"
+            );
+            inner.follow_deadline().unwrap()
+        };
+        lock(&core.annotate).on = true; // turned on during the hold
+        thread::sleep(hold_ends.saturating_duration_since(Instant::now()));
+        on_hold_ended(&core);
+        assert!(lock(&core.inner).is_shown("b"), "the agent's page is shown");
+        assert!(!lock(&core.annotate).on, "annotate mode ended with it");
+    }
+
+    #[test]
+    fn a_page_that_cannot_replace_the_last_closed_one_is_told() {
+        let (core, states, _sent) = fake_core(|request| {
+            (request["method"] == "Target.createTarget").then(|| cdp_error(request, "nope"))
+        });
+        assert_eq!(core.switch_to("a"), Ok(()));
+        on_target_destroyed(&core, Some("a"));
+        assert_eq!(
+            states.last_error().as_deref(),
+            Some("cannot open a page: nope")
+        );
     }
 }

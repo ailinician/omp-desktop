@@ -13,7 +13,8 @@
 //! change the mode of a running process; the frontend restarts a tab (with
 //! `--resume`) to apply a change.
 //!
-//! Same failure policy as `terminal/settings.rs`: an unreadable or malformed
+//! Same failure policy as `program_setting.rs` (the terminal's and browser's
+//! program settings): an unreadable or malformed
 //! file reads as the defaults, but a change refuses to overwrite it
 //! (`json_store::update_strict`). Without a config folder the choice lives
 //! in memory only.

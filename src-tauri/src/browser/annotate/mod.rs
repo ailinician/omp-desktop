@@ -8,6 +8,10 @@
 //! the event handler itself while annotate is on. The binding is exposed in
 //! that world only, so a page script cannot forge a pick; and only a click
 //! the panel sent makes one, not the agent's.
+//! Each same-process frame has a context of that world too, switched alike:
+//! there the script only swallows the user's clicks, it draws and picks in
+//! the top document only. Cross-site frames run in other processes, whose
+//! targets the view does not attach: clicks there reach the page.
 //!
 //! Lock order: `switch` → `overlay_install` → `annotate`; `inner` → `annotate`.
 
@@ -164,26 +168,43 @@ impl Core {
             } else {
                 self.active_session().ok()
             };
-            let contexts = {
+            // Flag and enables under the lock, like a release and the
+            // reader's enables: a close or toggle taking it next is sent
+            // after them, so the page ends with the final flag. A context
+            // that is gone fails: the page navigated, and its successor is
+            // switched by the reader.
+            let last = {
                 let mut annotate = lock(&self.annotate);
                 if self.is_closed() {
                     return Err("view closed".into());
                 }
                 annotate.on = on;
-                let contexts = session
-                    .as_deref()
-                    .map_or_else(Vec::new, |s| annotate.contexts_of(s));
-                drop(annotate);
-                contexts
-            };
-            // A context that appears from now on sees the flag. One that is
-            // gone fails: the page navigated, and its successor is switched.
-            if let Some(session) = session.as_deref() {
-                for context in contexts {
-                    let _ = self.call(Some(session), "Runtime.evaluate", set_params(on, context));
+                let mut last = None;
+                if let (Some(session), Some(client)) = (session.as_deref(), self.client.get()) {
+                    for &context in annotate.contexts.get(session).into_iter().flatten() {
+                        client.notify(Some(session), "Runtime.evaluate", set_params(on, context));
+                        last = Some(context);
+                    }
                 }
+                drop(annotate);
+                last
+            };
+            // One round trip after them, so the fresh frame below shows the
+            // change.
+            if let (Some(session), Some(context)) = (session.as_deref(), last) {
+                let _ = self.call(
+                    Some(session),
+                    "Runtime.evaluate",
+                    json!({ "expression": "0", "contextId": context }),
+                );
             }
-            self.update_state(|s| s.annotate = on);
+            // A close reports `false` itself; a toggle it overtook must not
+            // report the flag afterwards.
+            self.update_state(|s| {
+                if !self.is_closed() {
+                    s.annotate = on;
+                }
+            });
         }
         // The overlay's change shows now, not with the page's next repaint.
         self.refresh_frame();

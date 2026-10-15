@@ -69,7 +69,10 @@ impl Platform {
 pub struct Places {
     /// Prefix of the fixed install paths (`/` in production on unix).
     pub root: PathBuf,
-    pub home: PathBuf,
+    /// The user's home; `None` when it cannot be resolved, and then nothing
+    /// is looked for under it (never a shared fallback like the temp dir:
+    /// another account could plant the browser this one runs).
+    pub home: Option<PathBuf>,
     /// `$XDG_CACHE_HOME`: omp keeps its puppeteer cache in
     /// `$XDG_CACHE_HOME/omp/puppeteer` once that `omp` dir exists (Linux,
     /// macOS), else in `~/.omp/puppeteer`.
@@ -83,12 +86,12 @@ pub struct Places {
 }
 
 impl Places {
-    /// The running system, with `home` the user's home folder.
-    pub fn current(home: &Path) -> Self {
+    /// The running system, with `home` the user's home folder if known.
+    pub fn current(home: Option<&Path>) -> Self {
         let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
         Self {
             root: PathBuf::from("/"),
-            home: home.to_path_buf(),
+            home: home.map(Path::to_path_buf),
             xdg_cache: var("XDG_CACHE_HOME").map(PathBuf::from),
             path: crate::child_path::child_path_dirs(),
             install_roots: ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
@@ -157,7 +160,12 @@ pub fn candidates(platform: Platform, places: &Places) -> Vec<PathBuf> {
             .into_iter()
             .map(|omp| omp.join("puppeteer/chrome"))
             .collect();
-        roots.push(places.home.join(".omp/puppeteer/chrome"));
+        roots.extend(
+            places
+                .home
+                .iter()
+                .map(|home| home.join(".omp/puppeteer/chrome")),
+        );
         roots
     };
     let cft = || {
@@ -182,10 +190,8 @@ pub fn candidates(platform: Platform, places: &Places) -> Vec<PathBuf> {
         }
         Platform::MacArm | Platform::MacX64 => {
             let mut out = cft();
-            for apps in [
-                places.root.join("Applications"),
-                places.home.join("Applications"),
-            ] {
+            let user_apps = places.home.iter().map(|home| home.join("Applications"));
+            for apps in std::iter::once(places.root.join("Applications")).chain(user_apps) {
                 out.extend(MAC_APPS.iter().map(|rel| apps.join(rel)));
             }
             out
@@ -296,12 +302,12 @@ fn chrome_for_testing(platform: Platform, root: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use crate::browser::tests::tempdir;
-    use crate::test_support::executable as exe;
+    use crate::test_support::executable;
 
     fn places(dir: &Path) -> Places {
         Places {
             root: dir.join("root"),
-            home: dir.join("home"),
+            home: Some(dir.join("home")),
             xdg_cache: Some(dir.join("cache")),
             path: vec![dir.join("bin")],
             install_roots: vec![dir.join("pf"), dir.join("pf86"), dir.join("local")],
@@ -329,9 +335,11 @@ mod tests {
         let p = places(&dir);
         let cft = p
             .home
+            .as_ref()
+            .unwrap()
             .join(".omp/puppeteer/chrome/linux-150.0.1.2")
             .join(Platform::Linux.cft_layout());
-        exe(&cft, "cft");
+        executable(&cft, "cft");
         let c = candidates(Platform::Linux, &p);
         let at = |path: &Path| {
             c.iter()
@@ -362,10 +370,12 @@ mod tests {
         for platform in [Platform::MacArm, Platform::Windows] {
             let cft = p
                 .home
+                .as_ref()
+                .unwrap()
                 .join(".omp/puppeteer/chrome")
                 .join(format!("{}-150.0.0.1", platform.cft_prefixes()[0]))
                 .join(platform.cft_layout());
-            exe(&cft, "cft");
+            executable(&cft, "cft");
             let c = candidates(platform, &p);
             assert_eq!(c[0], cft, "{platform:?}");
         }
@@ -375,7 +385,7 @@ mod tests {
             .position(|x| x == &p.root.join("Applications").join(MAC_APPS[0]));
         let user = mac
             .iter()
-            .position(|x| x == &p.home.join("Applications").join(MAC_APPS[0]));
+            .position(|x| x == &dir.join("home/Applications").join(MAC_APPS[0]));
         assert!(
             system.is_some() && user.is_some() && system < user,
             "{mac:?}"
@@ -401,21 +411,48 @@ mod tests {
             root.join(format!("linux-{version}"))
                 .join(Platform::Linux.cft_layout())
         };
-        let home_root = p.home.join(".omp/puppeteer/chrome");
-        let old = exe(&build(&home_root, "131.0.1.1"), "");
-        let new = exe(&build(&home_root, "150.0.7871.24"), "");
+        let home_root = dir.join("home/.omp/puppeteer/chrome");
+        let old = executable(&build(&home_root, "131.0.1.1"), "");
+        let new = executable(&build(&home_root, "150.0.7871.24"), "");
         let cft_of = |p: &Places| -> Vec<PathBuf> {
             candidates(Platform::Linux, p)
                 .into_iter()
                 .filter(|c| c.ends_with(Platform::Linux.cft_layout()))
                 .collect()
         };
-        assert_eq!(cft_of(&p), vec![new.clone(), old.clone()]);
-        let xdg = exe(
+        assert_eq!(cft_of(&p), [new.as_path(), old.as_path()]);
+        let xdg = executable(
             &build(&dir.join("cache/omp/puppeteer/chrome"), "120.0.0.0"),
             "",
         );
-        assert_eq!(cft_of(&p), vec![xdg, new, old]);
+        assert_eq!(cft_of(&p), [xdg, new, old]);
+    }
+
+    /// An unresolvable home loses only the home candidates: nothing is
+    /// looked for under a stand-in such as the shared temp dir.
+    #[test]
+    fn no_home_means_no_home_candidates() {
+        let dir = tempdir("locate-no-home");
+        let p = Places {
+            home: None,
+            ..places(&dir)
+        };
+        let temp = std::env::temp_dir();
+        for platform in [Platform::Linux, Platform::MacArm, Platform::Windows] {
+            let c = candidates(platform, &p);
+            assert!(!c.is_empty(), "{platform:?}");
+            assert!(
+                c.iter()
+                    .all(|path| path.starts_with(&dir) || !path.starts_with(&temp)),
+                "{platform:?}: {c:?}"
+            );
+            assert!(
+                c.iter().all(|path| !path.starts_with(dir.join("home"))),
+                "{platform:?}: {c:?}"
+            );
+        }
+        let mac = candidates(Platform::MacArm, &p);
+        assert_eq!(mac.len(), MAC_APPS.len(), "only /Applications: {mac:?}");
     }
 
     /// A newer cached build for another platform must not outrank an older
@@ -426,13 +463,13 @@ mod tests {
         let root = dir.join("chrome");
         // The foreign dir carries the native layout so only its name can
         // exclude it.
-        exe(
+        executable(
             &root
                 .join("mac_arm-999.0.0.0")
                 .join(Platform::Linux.cft_layout()),
             "",
         );
-        let native = exe(
+        let native = executable(
             &root
                 .join("linux-100.0.0.0")
                 .join(Platform::Linux.cft_layout()),
@@ -446,7 +483,7 @@ mod tests {
     fn discovery_keeps_executables_once_and_skips_snaps() {
         let dir = tempdir("locate-discover");
         let p = places(&dir);
-        let chromium = exe(&p.root.join("usr/lib/chromium/chromium"), "\x7fELF");
+        let chromium = executable(&p.root.join("usr/lib/chromium/chromium"), "\x7fELF");
         // Not executable: never a candidate.
         std::fs::create_dir_all(p.root.join("opt/google/chrome")).unwrap();
         std::fs::write(p.root.join("opt/google/chrome/chrome"), "x").unwrap();
@@ -454,11 +491,11 @@ mod tests {
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         std::os::unix::fs::symlink(&chromium, dir.join("bin/chromium")).unwrap();
         // Ubuntu's transitional script and a snap shim.
-        exe(
+        executable(
             &dir.join("bin/chromium-browser"),
             "#!/bin/sh\nexec /snap/bin/chromium \"$@\"\n",
         );
-        let snap = exe(&p.root.join("usr/bin/snap"), "\x7fELF");
+        let snap = executable(&p.root.join("usr/bin/snap"), "\x7fELF");
         std::os::unix::fs::symlink(&snap, dir.join("bin/brave-browser")).unwrap();
         let found = discover(Platform::Linux, &p);
         assert_eq!(found.binaries, vec![chromium]);

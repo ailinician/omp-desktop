@@ -36,7 +36,7 @@
     let inputRaf = 0;
     let move = null; // the latest mousemove still to send
     let wheel = null; // { e: the latest wheel event, dx, dy }: deltas still to send, CSS px
-    let pressed = false;
+    let pressed = 0; // bit `1 << MouseEvent.button` per button held since a press on the canvas
     let resizeTimer = 0;
     let dprQuery = null;
 
@@ -179,13 +179,16 @@
       if (e.target !== canvas) return;
       e.preventDefault(); // keeps the page selection ours, so focus is taken by hand
       sink.focus({ preventScroll: true });
-      pressed = true;
+      pressed |= 1 << e.button;
       flushInput();
       mouse("mousePressed", e, B.mouseButton(e.button));
     };
+    // Each button's release goes out on its own: releasing a second button
+    // does not swallow the first one's.
     const onUp = (e) => {
-      if (!pressed) return;
-      pressed = false;
+      const bit = 1 << e.button;
+      if (!(pressed & bit)) return;
+      pressed &= ~bit;
       flushInput();
       mouse("mouseReleased", e, B.mouseButton(e.button));
     };
@@ -206,10 +209,12 @@
 
     // Only keys typed into the sink (not in the popover or toolbar). A key
     // the IME or a dead key is working on stays in the sink: its result
-    // arrives as text. Ctrl/⌘+V pastes natively into the sink (WebKit only
-    // enables paste on an editable target) and reaches the page as text.
+    // arrives as text. Ctrl/⌘+V and Shift+Insert paste natively into the
+    // sink (WebKit only enables paste on an editable target) and reach the
+    // page as text.
     const composing = (e) => e.isComposing || e.key === "Process" || e.key === "Dead";
-    const isPaste = (e) => (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v";
+    const isPaste = (e) => ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v")
+      || (e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && e.key === "Insert");
     const appKey = (e) => (e.key === "Escape" && escape() !== null) || window.OMP_KEYMAP.guestShouldBypass(e);
     const onKey = (type) => (e) => {
       if (e.target !== sink || composing(e) || isPaste(e) || appKey(e)) return;
@@ -234,10 +239,11 @@
 
     // Esc on the panel while annotating is the panel's: never the page's,
     // never the app keymap's interrupt (which ignores a prevented key).
-    // Bound on the panel, so Esc in the composer is not ours.
+    // Bound on the panel, so Esc in the composer is not ours. An Esc that
+    // dismisses an IME candidate window (composing) is the IME's.
     const panel = view.closest?.(".browser-panel") ?? view;
     const onEsc = (e) => {
-      const action = e.key === "Escape" ? escape() : null;
+      const action = e.key === "Escape" && !e.isComposing ? escape() : null;
       if (!action) return;
       e.preventDefault();
       onEscape(action);

@@ -4,8 +4,9 @@
 use super::kill::process_exists as process_alive;
 use super::pty::HANGUP_GRACE;
 use super::pump::{TerminalEmit, MAX_EVENT, MIN_INTERVAL};
-use super::test_support::{open_with, stdout_of, wait_until};
+use super::test_support::{open_with, stdout_of};
 use super::{Emit, Slot, TerminalManager, TerminalState, TerminalStatus};
+use crate::test_support::wait_until;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};

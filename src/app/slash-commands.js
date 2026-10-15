@@ -23,7 +23,10 @@
   // no-op, not something this change touches. `branch` and `tree` both open
   // the conversation-tree pane. A local name shadows the RPC command of the
   // same name/alias (desktop UI wins), so omp's terminal `/branch` and
-  // `/tree` pickers never run from the desktop.
+  // `/tree` pickers never run from the desktop, nor does omp's
+  // `/browser [headless|visible]` (its browser tool's mode switch: the
+  // desktop's `/browser` opens the panel instead, and answers those two
+  // arguments with a note — OMP_BROWSER.browserCommand).
   const LOCAL_COMMANDS = Object.freeze([
     { name: "plan",      hint: "draft a plan before writing code",             icon: "◇", group: "Mode"    },
     { name: "goal",      hint: "start a goal the agent works on until done",   icon: "◎", group: "Mode"    },

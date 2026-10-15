@@ -1236,14 +1236,13 @@ fn setup(app: &tauri::App) {
     // The browser panel's Chromium setting: <app_config_dir>/browser.json.
     // No temp-dir fallback: another account could plant the browser this one
     // runs; without a config dir the setting stays in memory. An
-    // unresolvable home only loses omp's Chrome-for-Testing candidates.
+    // unresolvable home only loses the candidates under it (omp's Chrome for
+    // Testing cache, macOS `~/Applications`).
     let browser_store = Arc::new(browser::SettingsStore::load(
         resolved_config_dir
             .as_deref()
             .map(|dir| dir.join("browser.json")),
-        app.path()
-            .home_dir()
-            .unwrap_or_else(|_| std::env::temp_dir()),
+        app.path().home_dir().ok(),
     ));
     app.manage(Arc::clone(&browser_store));
     // Falls back to the temp dir if the config dir can't be resolved

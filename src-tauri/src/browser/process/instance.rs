@@ -71,7 +71,7 @@ pub fn prepare_instance_dir(root: &Path) -> io::Result<PathBuf> {
                     "a browser of an earlier run with this pid is still running",
                 ));
             }
-            std::fs::remove_dir_all(&instance)?;
+            remove_dir_retrying(&instance)?;
         }
         Ok(_) => return Err(io::Error::other("instance path is not a real directory")),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
