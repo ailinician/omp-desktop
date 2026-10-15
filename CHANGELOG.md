@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-15
+
 ### Added
 
 - A browser panel next to the chat (#58): see and use the same browser the tab's agent works in. Open it with the globe button in the status bar, `Ctrl+Shift+B` (`Shift+⌘B` on macOS; rebindable in the shortcuts screen) or `/browser [url]`. The panel follows the page the agent is on and has page tabs, back/forward/reload and an address field; drag its left edge to resize it or switch to full view. Mouse, scroll, keyboard, paste and input methods reach the page, while the app's own panel and tab shortcuts keep working. **Annotate** lets you click an element or drag over an area and add a comment; it goes out with your next message (or the goal you start) as text plus a screenshot of the area. What comes from the page is marked as page content, so a page can't give the agent commands. Localhost links in chat open in the panel (`⌘`/`Ctrl`+click opens your normal browser; switch it off under Tweaks → Browser). The panel uses Google Chrome, Chromium, Edge, Brave or the Chrome for Testing omp downloads; the app finds one itself, and the `chromium` menu under Tweaks → Browser lets you choose another. Each tab gets its own browser with a fresh profile and no extensions, started only when needed and closed with the tab. The agent works in the page you are looking at, so its navigation replaces yours.
