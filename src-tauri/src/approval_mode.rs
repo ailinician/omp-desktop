@@ -433,13 +433,17 @@ mod tests {
 
     #[test]
     fn view_serializes_to_the_ipc_shape() {
+        // An absolute path on every platform: `/no/such/project` is relative
+        // on Windows (no drive), which `set_project` refuses.
+        let project = std::env::temp_dir().join("no-such-project");
+        let key = project.to_str().expect("utf-8 temp path").to_string();
         let store = ApprovalModeStore::load(None);
         store
-            .set_project(Path::new("/no/such/project"), Some(ApprovalMode::Yolo))
+            .set_project(&project, Some(ApprovalMode::Yolo))
             .expect("set");
         assert_eq!(
             serde_json::to_value(store.view()).expect("serialize"),
-            serde_json::json!({ "default": "write", "projects": { "/no/such/project": "yolo" } })
+            serde_json::json!({ "default": "write", "projects": { key: "yolo" } })
         );
     }
 }
