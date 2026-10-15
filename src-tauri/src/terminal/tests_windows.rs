@@ -4,8 +4,9 @@
 //! leg. Every wait polls with a generous timeout: no timing is asserted.
 
 use super::pump::TerminalEmit;
-use super::test_support::{open_with, stdout_of, wait_until};
+use super::test_support::{open_with, stdout_of};
 use super::{Emit, TerminalManager, TerminalState};
+use crate::test_support::wait_until;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use std::sync::{Arc, Mutex};

@@ -12,7 +12,7 @@
 (function () {
   "use strict";
   const { timeNow } = window;
-  const { LOCAL_COMMANDS, adaptAvailableCommands, mergeSlashCommands, isCommandInvocation } = window.OMP_SLASH;
+  const { LOCAL_COMMANDS, adaptAvailableCommands, mergeSlashCommands, isCommandInvocation, queuedFrame } = window.OMP_SLASH;
   const SUB = window.OMP_SUBAGENTS;
   const STITLE = window.OMP_SESSION_TITLE;
   const QUEUE = window.OMP_QUEUE;
@@ -1149,10 +1149,10 @@
     return stopped;
   }
 
-  /** End a tab for good in Rust (`close_tab`: its omp process, git watcher,
-   *  widget state and terminal shell) and drop its JS-side bindings. Every
-   *  path that removes a tab from `sessionRegistry` goes through here; a
-   *  respawn uses `_killSessionProcess`, which keeps the shell. */
+  /** End a tab for good in Rust (`close_tab`: its omp process, browser, git
+   *  watcher, widget state and terminal shell) and drop its JS-side bindings.
+   *  Every path that removes a tab from `sessionRegistry` goes through here;
+   *  a respawn uses `_killSessionProcess`, which keeps the browser and shell. */
   function _closeTab(id) {
     const closed = _invokeSafe("close_tab", { sessionId: id });
     _dropGitListener(id);
@@ -1160,15 +1160,18 @@
     return closed;
   }
 
-  /** Listen to a Tauri event. Returns `{ stop, ready }`: `stop` is valid at
-   *  once (a call before the async `listen` settled unlistens when it does);
+  /** Listen to a Tauri event (the terminal's streams). Returns
+   *  `{ stop, ready }`: `stop` is valid at once (a call before the async
+   *  `listen` settled unlistens when it does);
    *  `ready` resolves once the listener is registered (or failed), so a
    *  caller can query state knowing no later event is missed. */
-  function _listenTerminal(event, handler) {
+  function _listen(event, handler) {
     if (!window.__TAURI__) return { stop: () => {}, ready: Promise.resolve() };
     let unlisten = null;
     let stopped = false;
-    const ready = window.__TAURI__.event.listen(event, ev => handler(ev.payload)).then(
+    // A stopped handler never runs, even for an event delivered before the
+    // async `listen` settled.
+    const ready = window.__TAURI__.event.listen(event, ev => { if (!stopped) handler(ev.payload); }).then(
       off => { if (stopped) off(); else unlisten = off; },
       err => console.error(`[live] listen ${event} failed:`, err),
     );
@@ -3154,24 +3157,20 @@
     },
     // Both route a real slash command — or a skill invocation, even
     // mid-prompt (#30) — through `prompt` with the matching
-    // `streamingBehavior` instead of their own dedicated RPC command: omp's
-    // `steer`/`follow_up` frames skip command and skill dispatch entirely
-    // (only `prompt` runs it), so a command sent mid-stream through the
-    // dedicated frame would just reach the model as literal text — this is
-    // the transport's problem, not something callers (app-live.jsx) should
-    // each have to know and check for themselves. See `_sendQueued` for
-    // how the message shows until omp delivers it.
+    // `streamingBehavior` (`OMP_SLASH.queuedFrame`): omp's `steer` /
+    // `follow_up` frames skip command and skill dispatch entirely. Browser
+    // annotations merged into `text` never change its classification
+    // (OMP_BROWSER.annotationText neutralises page data and comments).
+    // See `_sendQueued` for how the message shows until omp delivers it.
     followUp(text, images) {
       const imgs = images ?? [];
-      _sendQueued("followUp", text, imgs, isCommandInvocation(state.commands, text)
-        ? () => _sendWithResponse({ type: "prompt", message: text, images: imgs, streamingBehavior: "followUp" })
-        : () => _sendWithResponse({ type: "follow_up", message: text, images: imgs }));
+      const isCmd = isCommandInvocation(state.commands, text);
+      _sendQueued("followUp", text, imgs, () => _sendWithResponse(queuedFrame("followUp", text, imgs, isCmd)));
     },
     steer(text, images) {
       const imgs = images ?? [];
-      _sendQueued("steering", text, imgs, isCommandInvocation(state.commands, text)
-        ? () => _sendWithResponse({ type: "prompt", message: text, images: imgs, streamingBehavior: "steer" })
-        : () => _sendWithResponse({ type: "steer", message: text, images: imgs }));
+      const isCmd = isCommandInvocation(state.commands, text);
+      _sendQueued("steering", text, imgs, () => _sendWithResponse(queuedFrame("steer", text, imgs, isCmd)));
     },
     /** ✕ / ✎ on a queue-strip row (`queue`: "steering" | "followUp"):
      *  `true` once omp removed the message, `false` when it was no longer
@@ -3214,18 +3213,22 @@
      *  (`goal.continuationModes` holds "rpc") omp then starts a goal turn
      *  by itself; otherwise the objective goes out as the first prompt, as
      *  omp's own `/goal` does — as a steer when a turn is running. Images
-     *  ride with the objective; when omp already started on its own they
-     *  are steered in with it rather than dropped. Resolves `{ok}` or
-     *  `{ok: false, error}` (omp refuses in plan mode, with a paused goal…).
+     *  ride with it; when omp already started on its own they are steered
+     *  in rather than dropped. `prompt` is what that delivery carries
+     *  (default: the objective) — the objective with the tab's browser
+     *  annotations merged in; the goal itself stores only the typed
+     *  `objective`. Resolves `{ok}` or `{ok: false, error}` (omp refuses in
+     *  plan mode, with a paused goal…).
      *  A tab switch before the follow-up sends nothing to the other tab:
      *  both requests keep the default timeout, so a reply held back by the
      *  switch is replayed on the way back and the sequence goes on there.
      *  IPC end to end; the decisions are app/goal.js's (`ompStartedTurn`,
      *  test-goal.mjs), the sequence was live-tested against omp 18.6.0. */
-    async goalStart(objective, tokenBudget, images) {
+    async goalStart(objective, tokenBudget, images, prompt) {
       const text = String(objective ?? "").trim();
       const imgs = images ?? [];
       if (!text) return { ok: false, error: "Describe the goal first." };
+      const message = String(prompt ?? "").trim() || text;
       const origin = activeSessionId;
       if (!origin) return { ok: false, error: "Not connected" };
       const wasStreaming = state.isStreaming;
@@ -3243,7 +3246,7 @@
       if (origin !== activeSessionId) return { ok: true };
       const bridge = window.OMP_BRIDGE;
       if (wasStreaming) {
-        bridge.steer(text, imgs);
+        bridge.steer(message, imgs);
         return { ok: true };
       }
       let rpcState = null;
@@ -3260,13 +3263,15 @@
       // prompt path adds the goal-mode context (objective, budget, when to
       // call it complete) to the turn — an idle steer is drained without it.
       // A turn that started meanwhile takes it as a steer. Settled: the
-      // first prompt, with the same `streamingBehavior` fallback.
+      // first prompt, with the same `streamingBehavior` fallback. When omp
+      // started on its own, the objective is already in the goal: only what
+      // it does not carry (images, browser annotations) is steered in.
       if (GOAL.ompStartedTurn(rpcState)) {
-        if (imgs.length > 0) bridge.steer(text, imgs);
+        if (imgs.length > 0 || message !== text) bridge.steer(message, imgs);
       } else if (rpcState?.isSettled === false) {
-        _sendQueued("steering", text, imgs,
-          () => _sendWithResponse({ type: "prompt", message: text, images: imgs, streamingBehavior: "steer" }));
-      } else _sendPrompt(text, imgs, "steer");
+        _sendQueued("steering", message, imgs,
+          () => _sendWithResponse({ type: "prompt", message, images: imgs, streamingBehavior: "steer" }));
+      } else _sendPrompt(message, imgs, "steer");
       return { ok: true };
     },
     /** `pause` / `resume` / `drop` the active tab's goal. */
@@ -3716,14 +3721,14 @@
      *  pty produced them (feed straight to `Terminal.write`, which
      *  reassembles split UTF-8). Returns `{ stop, ready }`. */
     onTerminalData(sessionId, cb) {
-      return _listenTerminal(`terminal://data/${sessionId}`,
+      return _listen(`terminal://data/${sessionId}`,
         p => cb({ instance: p.instance, seq: p.seq, bytes: _b64Bytes(p.b64) }));
     },
 
     /** A shell exited: `cb({ instance, code })`, `code` null when a signal
      *  killed it. Returns `{ stop, ready }`. */
     onTerminalExit(sessionId, cb) {
-      return _listenTerminal(`terminal://exit/${sessionId}`,
+      return _listen(`terminal://exit/${sessionId}`,
         p => cb({ instance: p.instance, code: p.code ?? null }));
     },
 
@@ -3748,6 +3753,106 @@
     async pickTerminalShell() {
       const res = await _invokeResult("terminal_pick_shell", {});
       return res.ok ? { ok: true, settings: res.value ?? null } : res;
+    },
+
+    /** The saved Chromium setting for the browser panel: `{ path,
+     *  automatic, installed, error }` (`path` "" = automatic, `automatic` =
+     *  what auto-detection finds now, `installed` = the browsers the menu
+     *  offers, `error` = why the stored path no longer works); `null`
+     *  without Tauri or when Rust refused. Rust reads it at each launch. */
+    browserSettings() {
+      return _invokeSafe("browser_settings", {}, null);
+    },
+
+    /** Save the Chromium path ("" = automatic). Rust validates and persists
+     *  it: `{ ok: true, settings }` or `{ ok: false, error }`. */
+    async browserSetPath(path) {
+      const res = await _invokeResult("browser_set_path", { path: typeof path === "string" ? path : "" });
+      return res.ok ? { ok: true, settings: res.value } : res;
+    },
+
+    /** "other…": Rust opens the native file dialog and stores the browser
+     *  picked. `{ ok: true, settings }` (`settings` null = cancelled) or
+     *  `{ ok: false, error }`. */
+    async browserPickPath() {
+      const res = await _invokeResult("browser_pick_path", {});
+      return res.ok ? { ok: true, settings: res.value ?? null } : res;
+    },
+
+    // ── Browser panel (src-tauri/src/browser/commands.rs) ──────────────────
+    // IPC glue only: Rust owns Chromium, the views, the screencast's flow
+    // control and the annotation overlay (docs/architecture/browser.md).
+    // No fake `__TAURI__` harness exists to unit-test this against (see the
+    // note at `login`); the backend's own tests cover the commands and the
+    // channel messages (src-tauri/src/browser/view/tests.rs,
+    // annotate/tests.rs), and tests/test-browser-runtime.mjs runs the
+    // consumers (app/use-browser.jsx, app/browser-screen.js) against a stub
+    // of these methods.
+    // Sizes are CSS pixels (integers); `dpr` scales the screencast.
+    /** `onMessage` gets everything the view reports during this open, in
+     *  order, over one channel (docs/architecture/browser.md): a frame as an
+     *  `ArrayBuffer` (OMP_BROWSER.parseFrame), else `{ type, value }` with
+     *  type `state` | `tabs` | `pick`. It is attached before the open is
+     *  sent, so the backend's first `state` (during the open) arrives too;
+     *  a later open (restart) replaces the channel. */
+    browserOpenPanel(sid, width, height, dpr, onMessage) {
+      const events = window.__TAURI__ ? new window.__TAURI__.core.Channel() : null;
+      if (events) events.onmessage = onMessage;
+      return _invokeSafe("browser_open_panel", { sessionId: sid, width, height, dpr, events });
+    },
+    /** Stops the screencast; Chromium stays. Best effort: after the tab's
+     *  release there is no browser left to close, which is not an error. */
+    browserClosePanel(sid) {
+      return _invokeResult("browser_close_panel", { sessionId: sid });
+    },
+    browserResize(sid, width, height, dpr) {
+      return _invokeSafe("browser_resize", { sessionId: sid, width, height, dpr });
+    },
+    /** `{ok}` | `{ok: false, error}` — a refused load (connection refused …)
+     *  is the user's page, not a bridge fault, so nothing is logged. */
+    browserNavigate(sid, url) {
+      return _invokeResult("browser_navigate", { sessionId: sid, url });
+    },
+    browserHistory(sid, delta) {
+      return _invokeSafe("browser_history", { sessionId: sid, delta });
+    },
+    browserTabNew(sid) {
+      return _invokeSafe("browser_tab_new", { sessionId: sid });
+    },
+    browserTabClose(sid, targetId) {
+      return _invokeSafe("browser_tab_close", { sessionId: sid, targetId });
+    },
+    browserTabActivate(sid, targetId) {
+      return _invokeSafe("browser_tab_activate", { sessionId: sid, targetId });
+    },
+    /** Pointer / wheel / key event for the page (`InputEvent`, see
+     *  app/browser.js), sent at event rate: `{ok}` | `{ok: false, error}`.
+     *  The backend refuses while no page is shown; the panel decides what
+     *  to log (app/use-browser.jsx). */
+    browserInput(sid, event) {
+      return _invokeResult("browser_input", { sessionId: sid, event });
+    },
+    /** Frame `seq` of the panel channel was painted or dropped as
+     *  superseded: Rust sends the next one (one frame in flight per view).
+     *  Quiet — the panel closing is not a fault, and Rust's own timeout
+     *  covers a lost ack. */
+    browserFrameAck(sid, seq) {
+      return _invokeResult("browser_frame_ack", { sessionId: sid, seq });
+    },
+    browserAnnotate(sid, on) {
+      return _invokeSafe("browser_annotate", { sessionId: sid, on });
+    },
+    /** Scrolls the current page so the picked document `rect`
+     *  (absolute page CSS px) is visible, regardless of subsequent scrolls.
+     *  Quiet on purpose: the chip click is a convenience, and a refused
+     *  scroll (the panel closed, the page moved) is not a bridge fault. */
+    browserScrollTo(sid, rect) {
+      return _invokeResult("browser_scroll_to", { sessionId: sid, rect });
+    },
+    /** Area screenshot of `rect` (page CSS px): `{ok, value: {data, mimeType}}`
+     *  with base64 `data`, or `{ok: false, error}`. */
+    browserCapture(sid, rect) {
+      return _invokeResult("browser_capture", { sessionId: sid, rect });
     },
 
     /** Usage statistics for the active tab's profile — see usage_stats in

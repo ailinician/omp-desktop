@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use portable_pty::CommandBuilder;
 
 use crate::child_path;
+use crate::program_setting::{is_executable_file, typed_path};
 
 /// Shells that take `-l -i` (login, interactive), by file name (Windows:
 /// file stem of an `.exe`, any case).
@@ -29,7 +30,7 @@ pub fn resolve_shell_with(
     preference: &str,
     default: impl FnOnce() -> PathBuf,
 ) -> Result<(PathBuf, Vec<String>), String> {
-    let preference = preference.trim();
+    let preference = typed_path(preference);
     let shell = if preference.is_empty() {
         default()
     } else {
@@ -90,23 +91,6 @@ pub fn validate_shell(path: &str) -> Result<PathBuf, String> {
 /// lands in the outer one.
 pub fn default_shell() -> PathBuf {
     PathBuf::from(CommandBuilder::new_default_prog().get_shell())
-}
-
-/// An absolute path to an executable file (unix: any execute bit; Windows:
-/// any file). What a shell setting must be.
-pub(super) fn is_executable_file(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        path.is_absolute()
-            && path
-                .metadata()
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    }
-    #[cfg(not(unix))]
-    {
-        path.is_absolute() && path.is_file()
-    }
 }
 
 /// The shell's environment on top of the app's own: terminal type, the
@@ -223,9 +207,15 @@ mod tests {
         }
     }
 
-    /// The default comes from `portable-pty` in-process: an absolute path
-    /// on unix (`$SHELL`, the user database or `/bin/sh`), `%ComSpec%` or
-    /// `cmd.exe` on Windows.
+    /// A quoted, padded preference resolves like the bare path
+    /// (`typed_path`).
+    #[test]
+    fn a_quoted_preference_resolves() {
+        let exe = std::env::current_exe().unwrap();
+        let quoted = format!(" \"{}\" ", exe.display());
+        assert_eq!(resolve_shell_with(&quoted, PathBuf::new).unwrap().0, exe);
+    }
+
     #[test]
     fn the_default_shell_is_resolved_in_process() {
         let shell = default_shell();

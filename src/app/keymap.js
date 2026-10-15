@@ -16,9 +16,10 @@
   // here without adding it there will cause every setKeybinding call for the
   // new id to fail at runtime.
 
-  // `fromTerminal`: the chord reaches the action even while the terminal
-  // has focus, whatever its modifiers (app/terminal.js `keymapShouldBypass`).
-  /** @type {Array<{id: string, label: string, group: string, scope: "global"|"composer", defaultKeys: string[], fromTerminal?: boolean}>} */
+  // `fromGuest`: the chord reaches the action even while an embedded guest —
+  // the terminal's xterm or the browser panel's page — has focus, whatever
+  // its modifiers (`guestShouldBypass`).
+  /** @type {Array<{id: string, label: string, group: string, scope: "global"|"composer", defaultKeys: string[], fromGuest?: boolean}>} */
   const KEYMAP_ACTIONS = [
     // Registry order only breaks ties *within* a resolution pass — it is not
     // itself the conflict-resolution order. `resolve()` is two-pass: every
@@ -39,10 +40,11 @@
     { id: "desktop.history.open",    label: "Session history",         group: "View",    scope: "global",   defaultKeys: ["ctrl+h", "super+h"] },
     { id: "desktop.shortcuts.open",  label: "Keyboard shortcuts",      group: "View",    scope: "global",   defaultKeys: ["ctrl+/", "super+/"] },
     { id: "desktop.sidebar.toggle",  label: "Toggle project sidebar",  group: "View",    scope: "global",   defaultKeys: ["ctrl+b", "super+b"] },
+    { id: "desktop.browser.toggle",  label: "Toggle browser panel",    group: "View",    scope: "global",   defaultKeys: ["ctrl+shift+b", "shift+super+b"], fromGuest: true },
     { id: "desktop.tab.new",         label: "New tab",                 group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+t", "super+t"] },
     { id: "desktop.tab.close",       label: "Close tab",               group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+w", "super+w"] },
-    { id: "desktop.tab.next",        label: "Next tab",                group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+tab"], fromTerminal: true },
-    { id: "desktop.tab.prev",        label: "Previous tab",            group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+shift+tab"], fromTerminal: true },
+    { id: "desktop.tab.next",        label: "Next tab",                group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+tab"], fromGuest: true },
+    { id: "desktop.tab.prev",        label: "Previous tab",            group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+shift+tab"], fromGuest: true },
     { id: "desktop.tab.moveLeft",    label: "Move tab left",           group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+shift+pageup"] },
     { id: "desktop.tab.moveRight",   label: "Move tab right",          group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+shift+pagedown"] },
     { id: "desktop.panel.todo",      label: "Plan kanban",             group: "View",    scope: "global",   defaultKeys: [] },
@@ -55,7 +57,7 @@
     { id: "desktop.update.check",    label: "Check for updates",       group: "View",    scope: "global",   defaultKeys: [] },
     { id: "desktop.chat.collapseAll", label: "Collapse all blocks",    group: "View",    scope: "global",   defaultKeys: [] },
     { id: "desktop.chat.expandAll",  label: "Expand all blocks",       group: "View",    scope: "global",   defaultKeys: [] },
-    { id: "desktop.terminal.toggle", label: "Toggle terminal",       group: "View",    scope: "global",   defaultKeys: ["ctrl+`", "super+`"], fromTerminal: true },
+    { id: "desktop.terminal.toggle", label: "Toggle terminal",       group: "View",    scope: "global",   defaultKeys: ["ctrl+`", "super+`"], fromGuest: true },
   ];
 
   // ── Chord algebra ─────────────────────────────────────────────────────────
@@ -344,6 +346,40 @@
     return false;
   }
 
+  /** The platform's copy / paste chords: always the guest's. */
+  const GUEST_RESERVED_MAC = new Set(["super+c", "super+v"]);
+  const GUEST_RESERVED_OTHER = new Set(["ctrl+shift+c", "ctrl+shift+v"]);
+
+  /**
+   * True when a keydown typed into an embedded guest — the terminal's xterm
+   * or the browser panel's page — belongs to the app's keymap instead.
+   * A chord goes to the app iff it resolves (`lookup`) to a global-scope
+   * action marked `fromGuest` (switching tabs, the panels' own toggles), or
+   * the chord has the `super` modifier, or — off macOS — both `ctrl` and
+   * `shift`. Plain `ctrl+<key>` and `alt+<key>` stay the guest's (ctrl+w
+   * kills a word in a shell and must not close the tab from a web page;
+   * ctrl+k / ctrl+b are a page's palette / bold), as do unbound chords, the
+   * platform's copy / paste chords and AltGr characters (WebView2 reports
+   * AltGr as ctrl+alt). Chords are normalised exactly like the global keymap
+   * (`chordFromEvent`), so shifted variants of the same physical key (e.g.
+   * Cmd+Shift+7 → "/" on German layouts) match too.
+   * @param {Pick<KeyboardEvent, "key"|"code"|"ctrlKey"|"shiftKey"|"altKey"|"metaKey"|"isComposing"> & {getModifierState?: (k: string) => boolean}} e
+   * @param {boolean} [isMac]
+   */
+  function guestShouldBypass(e, isMac = IS_MAC) {
+    if (e.getModifierState?.("AltGraph")) return false;
+    const chord = chordFromEvent(e);
+    if (chord === null || (isMac ? GUEST_RESERVED_MAC : GUEST_RESERVED_OTHER).has(chord)) return false;
+    const id = lookup(chord);
+    if (id === null) return false;
+    const action = KEYMAP_ACTIONS.find((a) => a.id === id);
+    if (!action || action.scope !== "global") return false;
+    if (action.fromGuest) return true;
+    const mods = chord.split("+").slice(0, -1);
+    if (mods.includes("super")) return true;
+    return !isMac && mods.includes("ctrl") && mods.includes("shift");
+  }
+
   // ── Display ───────────────────────────────────────────────────────────────
 
   /**
@@ -457,6 +493,7 @@
     matches,
     isTypingTarget,
     allowedInInput,
+    guestShouldBypass,
     formatChord,
     hintFor,
     hintKeyFor,

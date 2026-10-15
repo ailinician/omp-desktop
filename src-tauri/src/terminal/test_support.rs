@@ -1,24 +1,9 @@
 //! Platform-neutral helpers for the terminal tests (`tests.rs` on unix,
-//! `tests_windows.rs` on Windows, and the module tests).
+//! `tests_windows.rs` on Windows).
 
 use super::{Emit, TerminalManager};
 use std::ffi::OsStr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-/// Poll `condition` until it holds (`true`) or `timeout` passes (`false`).
-pub fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if condition() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
 
 /// `id` registered on `manager` with the temp dir as its folder, its shell
 /// opened and observed by a fresh `C`.

@@ -13,6 +13,7 @@
 //!   staleness recovery, for guarding the read-modify-write cycle around a
 //!   shared file.
 
+use crate::supervisor::pid_is_alive;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
@@ -443,31 +444,6 @@ fn parse_lock_contents(contents: &str) -> Option<(u32, u64)> {
     Some((pid, created_at))
 }
 
-/// Whether the process identified by `pid` is still alive. On Unix this
-/// sends signal 0 via `kill(2)`, which performs no action beyond an
-/// existence/permission check; `ESRCH` means the process is gone, `EPERM`
-/// means it exists but is owned by someone else (still alive), and any
-/// other outcome is treated conservatively as "alive" so a lock is never
-/// stolen based on an inconclusive check. Non-Unix targets have no portable
-/// liveness probe in `std`, so this always reports "alive" there and
-/// staleness detection falls back entirely to the timestamp/`stale_after`
-/// comparison in [`lock_is_stale`].
-#[cfg(unix)]
-fn pid_is_alive(pid: u32) -> bool {
-    // SAFETY: signal 0 sends no actual signal; it only validates that the
-    // pid exists and is signalable by us. No memory is touched beyond what
-    // `libc::kill`'s FFI signature requires.
-    if unsafe { libc::kill(pid.cast_signed(), 0) } == 0 {
-        return true;
-    }
-    io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-}
-
-#[cfg(not(unix))]
-const fn pid_is_alive(_pid: u32) -> bool {
-    true
-}
-
 /// Whether a lock file with the given contents should be considered
 /// abandoned: either its owning pid is no longer alive, or `stale_after`
 /// has elapsed since it recorded its timestamp.
@@ -527,7 +503,7 @@ impl Drop for LockGuard<'_> {
 /// the file already exists) holding this call's lock-ownership marker
 /// (see [`lock_contents`]). If creation
 /// fails because the file exists, its contents are inspected: if the owning
-/// pid is no longer alive (Unix only — see [`pid_is_alive`]) or
+/// pid is no longer alive (see [`pid_is_alive`]) or
 /// `stale_after` has elapsed since its timestamp, the lock is considered
 /// abandoned and is forcibly taken over (best-effort remove, then retry —
 /// up to [`LOCK_TAKEOVER_ATTEMPTS`] times). The lock file is removed after
@@ -748,8 +724,8 @@ mod tests {
     /// now-dead pid — a pid guaranteed not to belong to any live process
     /// (barring extremely unlikely pid reuse in the instant between wait
     /// and use, which every test in this module tolerates the same way any
-    /// real caller would). Unix-only, like its one caller: liveness of a
-    /// lock owner's pid is only probed there.
+    /// real caller would). Unix-only because it spawns `true`, like its one
+    /// caller.
     #[cfg(unix)]
     fn spawn_and_reap_dead_pid() -> u32 {
         let mut child = std::process::Command::new("true")

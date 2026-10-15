@@ -11,6 +11,10 @@
 
 (function () {
   // `foldThinking` / `foldTools`: null until picked (OMP_COLLAPSE.foldModes).
+  // `browserWidth`: px of the browser panel, 0 = half the stage (OMP_BROWSER.clampWidth).
+  // `browserLocalhostInPanel`: a plain click on a localhost chat link opens
+  // the panel instead of the system browser. (The Chromium path is a Rust
+  // setting, browser.json — never a tweak.)
   const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
     "theme": "aurora",
     "density": "compact",
@@ -32,7 +36,9 @@
     "skippedUpdate": null,
     "sidebar": true,
     "terminalAutoOpen": false,
-    "terminalHeight": 240
+    "terminalHeight": 240,
+    "browserWidth": 0,
+    "browserLocalhostInPanel": true
   }/*EDITMODE-END*/;
 
   const NULL_MODEL    = { id: "", name: "–", provider: "", note: "", latency: 0, current: false };
@@ -63,6 +69,14 @@
   const isSubmitEnter = (e) =>
     e.key === "Enter" && !e.nativeEvent?.isComposing && e.keyCode !== 229;
 
+  // `s` cut to `max` UTF-16 units, the last one an ellipsis, never ending on
+  // half a surrogate pair (extension widget text, browser annotation HTML).
+  function truncateText(s, max) {
+    if (s.length <= max) return s;
+    const cut = /[\ud800-\udbff]/.test(s[max - 2]) ? max - 2 : max - 1;
+    return s.slice(0, cut) + "…";
+  }
+
   // omp's thinking levels, lowest first, with its own descriptions
   // (packages/tui/src/thinking.ts, THINKING_LEVEL_METADATA).
   const THINKING_LEVELS = {
@@ -83,6 +97,7 @@
     INTENT_FRAMING,
     APPROVAL_PROMPT,
     isSubmitEnter,
+    truncateText,
     THINKING_LEVELS,
   });
 })();

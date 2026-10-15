@@ -13,15 +13,15 @@
 //!   `read_until_capped`, and credential redaction.
 //! - [`journal`]    — bounded per-session event ring + replay.
 //! - [`ext_ui`]     — latest omp extension status lines / widgets (#52).
-//! - [`supervisor`] — process-tree kill (Job Object / process group) so a
-//!   stopped session can't leak subagent/tool-call descendants.
+//!
+//! A stopped session's descendants (subagents, tool calls) die with it
+//! through `crate::supervisor` (Job Object / process group).
 
 pub mod ext_ui;
 mod inner;
 pub mod journal;
 mod reader;
 pub mod spawn;
-pub mod supervisor;
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -117,6 +117,9 @@ pub struct Launch<'a> {
     pub profile: Option<&'a str>,
     /// `--approval-mode`, from `approval_mode::ApprovalModeStore::resolve`.
     pub mode: crate::approval_mode::ApprovalMode,
+    /// Settings overlay passed as `--config=<path>` (the tab's browser
+    /// `cdpUrl`, see `crate::browser`); `None` = no overlay.
+    pub config: Option<&'a std::path::Path>,
 }
 
 /// Manages one omp process per tab session.
@@ -182,8 +185,9 @@ impl AgentBridge {
             resume,
             profile,
             mode,
+            config,
         } = launch;
-        let (mut child, supervisor) = match spawn_omp(cwd, resume, profile, mode) {
+        let (mut child, supervisor) = match spawn_omp(cwd, resume, profile, mode, config) {
             Ok(c) => c,
             Err(e) => {
                 // Cached *and* returned: the caller gets the reason now, the
@@ -549,24 +553,27 @@ mod tests {
     /// literals) cannot hide a call site, and fails on any `_send(` /
     /// `_sendWithResponse(` it cannot read — a new call site must either
     /// lead with a literal `type` or be added to the known non-literal list.
+    /// Steer / follow-up frames come from `OMP_SLASH.queuedFrame`
+    /// (`src/app/slash-commands.js`), whose literal frames are checked too.
     #[test]
     fn every_command_live_js_sends_is_allowed() {
         // Argument prefixes of the call sites that carry no literal type:
-        // the two helper definitions and `_sendWithResponse`'s forwarder.
-        const NON_LITERAL: &[&str] = &["cmd){", "cmd,timeout", "{...cmd,id})"];
-        let flat: String = include_str!("../../../src/live.js")
-            .split_whitespace()
-            .collect();
+        // the helper definitions and the forwarders inside them.
+        const NON_LITERAL: &[&str] = &["cmd){", "cmd,timeout", "queuedFrame("];
+        let flat = |source: &str| -> String { source.split_whitespace().collect() };
+        let allowed = |ty: &str| {
+            assert!(
+                ALLOWED_COMMAND_TYPES.contains(&ty),
+                "the webview sends '{ty}' but ALLOWED_COMMAND_TYPES rejects it"
+            );
+        };
+        let live = flat(include_str!("../../../src/live.js"));
         let mut checked = 0;
         for callee in ["_send(", "_sendWithResponse("] {
-            for (idx, _) in flat.match_indices(callee) {
-                let args = &flat[idx + callee.len()..];
+            for (idx, _) in live.match_indices(callee) {
+                let args = &live[idx + callee.len()..];
                 if let Some(rest) = args.strip_prefix("{type:\"") {
-                    let ty = &rest[..rest.find('"').expect("closing quote on command type")];
-                    assert!(
-                        ALLOWED_COMMAND_TYPES.contains(&ty),
-                        "live.js sends '{ty}' but ALLOWED_COMMAND_TYPES rejects it"
-                    );
+                    allowed(&rest[..rest.find('"').expect("closing quote on command type")]);
                     checked += 1;
                 } else {
                     let snippet: String = args.chars().take(40).collect();
@@ -578,6 +585,31 @@ mod tests {
             }
         }
         assert!(checked >= 20, "found only {checked} literal call sites");
+        let slash = flat(include_str!("../../../src/app/slash-commands.js"));
+        let start = slash
+            .find("functionqueuedFrame(")
+            .expect("queuedFrame in slash-commands.js");
+        // The function body: up to the next top-level function or export.
+        let rest = &slash[start + 1..];
+        let end = ["function", "window.OMP_SLASH"]
+            .iter()
+            .filter_map(|next| rest.find(next))
+            .min()
+            .map_or(slash.len(), |e| start + 1 + e);
+        let body = &slash[start..end];
+        let frames: Vec<&str> = body
+            .match_indices("{type:\"")
+            .map(|(idx, m)| {
+                let rest = &body[idx + m.len()..];
+                &rest[..rest.find('"').expect("closing quote on frame type")]
+            })
+            .collect();
+        assert_eq!(
+            frames,
+            ["prompt", "steer", "follow_up"],
+            "queuedFrame's frames"
+        );
+        frames.into_iter().for_each(allowed);
     }
 
     #[test]

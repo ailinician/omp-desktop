@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use super::ext_ui::ExtUiState;
 use super::journal::EventJournal;
-use super::supervisor::ProcessSupervisor;
+use crate::supervisor::ProcessSupervisor;
 
 /// Per-session state held inside `AgentBridge.sessions`.
 pub(super) struct BridgeInner {

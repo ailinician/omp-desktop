@@ -1,0 +1,194 @@
+/* Browser panel — tab strip, control bar, streamed page, annotate popover ── */
+
+.browser-panel {
+  display: flex; flex-direction: column;
+  min-width: 0; min-height: 0;
+  background: var(--bg-window);
+  border-left: 1px solid var(--line);
+}
+
+/* ── Tabs ──────────────────────────────────────────────────────────── */
+/* The project tab bar's `.tab` / `.tab-name` / `.tab-close` / `.tab-add`
+   (chrome.css), shorter and smaller for the panel. `+` sits right after
+   the last tab, as in the tab bar. */
+.browser-tabs {
+  display: flex; align-items: stretch; flex: none;
+  height: 28px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.browser-tabs-scroll {
+  display: flex; align-items: stretch;
+  flex: 0 1 auto; min-width: 0;
+  overflow-x: auto; scrollbar-width: none;
+}
+.browser-tabs-scroll::-webkit-scrollbar { display: none; }
+.browser-tabs .tab { flex: none; min-width: 0; max-width: 180px; padding: 0 8px 0 12px; gap: 6px; }
+/* A reset button, so it is reachable by keyboard but not a native button. */
+.browser-tabs .tab-name {
+  appearance: none; border: 0; background: transparent; padding: 0;
+  color: inherit; cursor: inherit; text-align: left;
+  font-size: var(--d-text-xs); max-width: 150px;
+}
+.browser-tabs .tab-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
+.browser-tabs .tab:focus-within > .tab-close { opacity: 1; }
+.browser-tabs .tab-add:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* ── Control bar ───────────────────────────────────────────────────── */
+.browser-bar {
+  display: flex; align-items: center; gap: 2px; flex: none;
+  height: 34px; padding: 0 6px;
+  border-bottom: 1px solid var(--line);
+}
+.browser-bar .btn.icon.active { color: var(--accent); background: var(--accent-soft); }
+/* `.btn` has no disabled look of its own (cf. `.queue-btn:disabled`). */
+.browser-bar .btn:disabled { opacity: 0.4; cursor: default; }
+.browser-bar .btn:disabled:hover { background: transparent; color: var(--fg-3); }
+.browser-address {
+  flex: 1; min-width: 0; margin: 0 4px;
+  height: 24px;
+  background: var(--bg-input);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  transition: border-color 120ms;
+}
+/* The field's border shows focus, as `.composer-row` does: no inner ring. */
+.browser-address:focus-within { border-color: var(--accent); }
+.browser-address input {
+  width: 100%; height: 100%; padding: 0 8px;
+  font-size: var(--d-text-xs);
+}
+.browser-address input:focus-visible { outline: none; }
+.browser-address input::placeholder { color: var(--fg-4); }
+.browser-address.shake { animation: browserShake 280ms var(--ease-out); border-color: var(--rose); }
+@keyframes browserShake {
+  20% { transform: translateX(-4px); }
+  45% { transform: translateX(4px); }
+  70% { transform: translateX(-2px); }
+}
+
+/* ── Page ──────────────────────────────────────────────────────────── */
+.browser-body { position: relative; flex: 1; min-height: 0; display: flex; }
+.browser-loading {
+  position: absolute; top: 0; left: 0; right: 0; height: 2px; z-index: 2;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 40% 100%; background-repeat: no-repeat;
+  animation: browserLoad 1s linear infinite;
+}
+@keyframes browserLoad { from { background-position: -40% 0; } to { background-position: 140% 0; } }
+.browser-view {
+  position: relative; flex: 1; min-width: 0;
+  overflow: hidden;
+  background: var(--bg-app);
+}
+/* The page's keyboard focus sink (browser-panel.jsx): focusable, so never
+   display:none or visibility:hidden, but invisible and inert to the pointer;
+   the view's ring below stands in for its focus. */
+.browser-sink {
+  position: absolute; left: 0; top: 0;
+  width: 1px; height: 1px; padding: 0; border: 0;
+  opacity: 0; resize: none; overflow: hidden;
+  pointer-events: none; caret-color: transparent;
+}
+.browser-sink:focus-visible { outline: none; }
+/* Over the canvas (an inset shadow on the view would sit under it). */
+.browser-view:has(> .browser-sink:focus-visible)::after {
+  content: ""; position: absolute; inset: 0; z-index: 2;
+  box-shadow: inset 0 0 0 1px var(--line-bright);
+  pointer-events: none;
+}
+.browser-view.annotating { cursor: crosshair; }
+.browser-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.browser-status {
+  position: absolute; inset: 0; z-index: 1;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  padding: 16px; text-align: center;
+  background: color-mix(in oklab, var(--bg-app) 70%, transparent);
+  color: var(--fg-3); font-size: var(--d-text-sm);
+}
+.browser-status.error, .browser-status.failed { color: var(--rose); }
+/* An error while the page runs (browser-panel.jsx): a strip along the
+   bottom that the pointer passes through, so the page stays usable. */
+.browser-status.strip {
+  inset: auto 0 0 0;
+  padding: 6px 10px;
+  background: color-mix(in oklab, var(--bg-window) 90%, transparent);
+  border-top: 1px solid var(--line);
+  font-size: var(--d-text-xs);
+  pointer-events: none;
+}
+
+/* ── Annotations ───────────────────────────────────────────────────── */
+/* On the accent, text takes the window colour (the `.twk-btn` precedent):
+   it follows the theme, as `.btn.primary`'s per-theme overrides do. */
+.browser-marker {
+  position: absolute; z-index: 1;
+  display: flex; align-items: center; justify-content: center;
+  width: 1rem; height: 1rem;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: var(--accent); color: var(--bg-window);
+  font-size: var(--d-text-xs); font-weight: 600;
+  pointer-events: none;
+}
+/* Surface (background, border, radius, shadow) from the shared menu rule
+   `.profile-pop, .tab-group-pop, .thinking-pop, .browser-popover` (chrome.css). */
+.browser-popover {
+  z-index: 3;
+  gap: 6px;
+  width: min(260px, calc(100% - 16px)); padding: 8px;
+  /* Never taller than the view: browser-panel.jsx pins it at the top margin. */
+  max-height: calc(100% - 16px); overflow: auto;
+}
+.browser-popover-what {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--d-text-xs); color: var(--fg-3);
+}
+.browser-popover-note {
+  font-size: var(--d-text-xs); color: var(--rose);
+}
+.browser-popover textarea {
+  resize: none; padding: 6px 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  font-size: var(--d-text-sm);
+  transition: border-color 120ms;
+}
+/* The border shows focus, as on the address field: no second ring. */
+.browser-popover textarea:focus-visible { outline: none; }
+.browser-popover textarea:focus { border-color: var(--accent); }
+.browser-popover textarea::placeholder { color: var(--fg-4); }
+
+/* ── Stage slot: panel + resize handle ─────────────────────────────── */
+.stage.with-browser { grid-template-columns: minmax(0, 1fr) auto; }
+.window.is-split .stage.with-browser { grid-template-columns: minmax(0, 1fr) 320px auto; }
+/* Full view: the panel is the only column. */
+.stage.with-browser.browser-full,
+.window.is-split .stage.with-browser.browser-full { grid-template-columns: minmax(0, 1fr); }
+.stage.browser-full > :not(.browser-dock) { display: none; }
+.browser-dock { position: relative; display: flex; min-width: 0; min-height: 0; }
+.browser-dock > .browser-panel { flex: 1; }
+.browser-resize {
+  position: absolute; top: 0; bottom: 0; left: -3px; z-index: 4;
+  width: 6px; cursor: col-resize; touch-action: none;
+}
+.browser-resize:hover, .browser-resize.dragging { background: color-mix(in oklab, var(--accent) 35%, transparent); }
+
+/* ── Composer: annotation chips ────────────────────────────────────── */
+/* `.paste-chip` / `.paste-chip-label` (composer.css) plus these deltas:
+   an accent border, a label that shrinks to an ellipsis, a round ×. */
+.browser-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 2px 8px; }
+.browser-chip {
+  align-items: center; gap: 2px;
+  max-width: 100%; padding: 0 4px 0 0;
+  border-color: color-mix(in oklab, var(--accent) 35%, var(--line-bright));
+  color: var(--fg-2);
+}
+.browser-chip-label { min-width: 0; padding: 3px 4px 3px 7px; text-align: left; }
+.browser-chip-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-chip .browser-chip-remove {
+  display: flex; align-items: center; justify-content: center; flex: none;
+  width: 1rem; height: 1rem; padding: 0; border-radius: 50%; color: var(--fg-3);
+}
+.browser-chip .browser-chip-remove:hover { color: var(--rose); }
+.browser-chips-note { flex-basis: 100%; font-size: var(--d-text-xs); color: var(--amber); }

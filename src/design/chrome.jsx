@@ -181,24 +181,26 @@ function TabBar({
 
 // ── Status bar (footer): connection, tokens, todos, panels ──────────
 // The model and thinking level are not repeated here: the composer's
-// pills below the prompt box show (and change) both.
-function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRules, approvalMode, onStats, onTree, onTerminal, terminalOpen, autosave, onAutosave }) {
+// pills below the prompt box show (and change) both. It spans the window
+// under the workspace; the st-ctx meter, st-cost and st-tps cells (each
+// with its separator) drop out when the window is narrow (layout/rail.css).
+function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRules, approvalMode, onStats, onTree, onTerminal, terminalOpen, onBrowser, browserOpen = false, autosave, onAutosave }) {
   return (
     <div className="status">
       <span className="status-cell"><span className="dot live" /> connected</span>
       <span className="status-sep">·</span>
-      <span className="status-cell mono">
+      <span className="status-cell st-ctx mono">
         <span style={{ color: "var(--fg-3)" }}>{ctx.label}</span>
         <span className="status-bar-tube">
           <span className="status-bar-fill" style={{ width: `${ctx.pct}%` }} />
         </span>
-        <span style={{ color: "var(--fg-4)" }}>{(+ctx.pct).toFixed(1)}%</span>
+        <span className="st-ctx-pct" style={{ color: "var(--fg-4)" }}>{(+ctx.pct).toFixed(1)}%</span>
       </span>
-      <span className="status-sep">·</span>
-      <span className="status-cell mono"><span style={{ color: "var(--fg-3)" }}>cost</span> {ctx.cost}</span>
-      <span className="status-sep">·</span>
-      <span className="status-cell mono"><span style={{ color: "var(--fg-3)" }}>{ctx.tokensPerSec}</span> t/s</span>
-      <div style={{ flex: 1 }} />
+      <span className="status-sep st-cost">·</span>
+      <span className="status-cell st-cost mono"><span style={{ color: "var(--fg-3)" }}>cost</span> {ctx.cost}</span>
+      <span className="status-sep st-tps">·</span>
+      <span className="status-cell st-tps mono"><span style={{ color: "var(--fg-3)" }}>{ctx.tokensPerSec}</span> t/s</span>
+      <div className="status-gap" />
       <button className="status-cell btn ghost" onClick={onTodo} style={{ height: 20, padding: "0 6px" }}>
         <Icon name="plan" size={11} color="var(--accent)" />
         <span style={{ color: "var(--accent)" }}>todo {todoDone}/{todoTotal}</span>
@@ -217,6 +219,12 @@ function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRu
       <span className="status-sep">·</span>
       <button className="status-cell btn ghost" onClick={onTree} title="conversation tree (prompt-cache status)" style={{ height: 20, padding: "0 6px" }}>
         <Icon name="branch" size={11} color="var(--fg-3)" />
+      </button>
+      <span className="status-sep">·</span>
+      <button className="status-cell btn ghost" onClick={onBrowser} aria-pressed={browserOpen}
+        title={`browser panel (${hintFor("desktop.browser.toggle", "Ctrl+Shift+B")})`}
+        style={{ height: 20, padding: "0 6px" }}>
+        <Icon name="web" size={11} color={browserOpen ? "var(--accent)" : "var(--fg-3)"} />
       </button>
       <span className="status-sep">·</span>
       <ApprovalModeCell cell={approvalMode} onClick={onRules} />

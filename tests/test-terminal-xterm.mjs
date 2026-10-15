@@ -4,7 +4,8 @@
 // routing (restart on Enter without leaking "\r", copy / paste chords,
 // chords handed back to the keymap), the ConPTY option and the lines it
 // writes. xterm itself is replaced by a recording fake; the routing
-// decisions are app/terminal.js's (test-terminal.mjs), stubbed here.
+// decisions are app/terminal.js's and app/keymap.js's (test-terminal.mjs,
+// test-keymap.mjs), stubbed here.
 // Run: node tests/test-terminal-xterm.mjs
 
 import assert from "node:assert/strict";
@@ -41,8 +42,8 @@ const win = {
   navigator: { clipboard: { readText: async () => clipboardText } },
   OMP_TERMINAL: {
     clipboardAction: (e) => (e.key === "C" ? "copy" : e.key === "V" ? "paste" : null),
-    keymapShouldBypass: (e) => e.key === "bypass",
   },
+  OMP_KEYMAP: { guestShouldBypass: (e) => e.key === "bypass" },
 };
 // eslint-disable-next-line no-new-func
 new Function("window", readFileSync(join(root, "src/app/terminal-xterm.js"), "utf8"))(win);

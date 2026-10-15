@@ -6,9 +6,12 @@
    profile; and the goal strip the composer renders (design/goal-strip.jsx).
 
    `goal` is the active tab's `{known, goal}` from the bridge snapshot;
-   `runState` its run state (app/turn-status.js). `onRestoreDraft(text,
-   images)` puts an objective omp refused, with its images, back into the
-   composer of the tab it was typed in. */
+   `runState` its run state (app/turn-status.js). `onRestoreDraft(draft,
+   { tabId, shown })` hands back an objective omp refused (`{ text, images,
+   chips }`, as `start` got it) to the tab it was typed in: `shown` says
+   whether that tab is still the one on screen, so its text can go back into
+   the composer; the chips (taken from that tab's browser) go back to it
+   either way. */
 
 const { GoalStrip: _UG_GoalStrip } = window;
 const { entryOf: _UG_entryOf, updateEntry: _UG_updateEntry, pruneEntries: _UG_pruneEntries } = window.OMP_SESSION_UI;
@@ -60,7 +63,7 @@ function _UG_useContinuation(bridge, profileId, active) {
 function useGoalMode({ bridge, tabId, sessionIds, goal, planMode, profileId, runState, onRestoreDraft }) {
   const [drafts, setDrafts] = React.useState({});
   React.useEffect(() => { setDrafts(m => _UG_pruneEntries(m, sessionIds)); }, [sessionIds]);
-  // Read when a start resolves: a tab closed meanwhile gets no entry back,
+  // Read when a start resolves: a tab closed meanwhile gets nothing back,
   // and only the tab still shown gets its objective back in the composer.
   const idsRef = React.useRef(sessionIds);
   idsRef.current = sessionIds;
@@ -84,21 +87,25 @@ function useGoalMode({ bridge, tabId, sessionIds, goal, planMode, profileId, run
   const toggle = () => { if (mode || !goalBlocked) update(tabId, _UG_toggle); };
   const enter = () => { if (!goalBlocked) update(tabId, _UG_enter); };
 
-  /** The goal-mode send: `goal create` plus, when omp does not start on
-   *  its own, the objective as the first prompt (OMP_BRIDGE.goalStart).
+  /** The goal-mode send: `goal create` with the typed objective plus, when
+   *  omp does not start on its own, the first prompt (OMP_BRIDGE.goalStart).
    *  Leaves goal mode on success; on a refusal keeps it, shows omp's
-   *  reason in the strip and hands the objective back. */
-  const start = async (text, images) => {
+   *  reason in the strip and hands the draft back. `typed` is the draft as
+   *  the user wrote it (`{ text, images, chips? }`): `text` becomes the
+   *  goal's objective. `out` is what the first prompt delivers (`{ text,
+   *  images }`: the typed text and images with the tab's browser
+   *  annotations merged in); it defaults to `typed`. */
+  const start = async (typed, out = typed) => {
     const id = tabId;
     const budget = draft.budget;
     update(id, d => (d.error ? { ...d, error: null } : d));
-    const res = await bridge?.goalStart(text, budget, images);
+    const res = await bridge?.goalStart(typed.text, budget, out.images, out.text);
     if (res?.ok) {
       update(id, () => _UG_IDLE);
       return;
     }
     update(id, d => ({ ...d, mode: true, error: res?.error ?? "Could not start the goal." }));
-    if (tabRef.current === id) onRestoreDraft?.(text, images);
+    if (idsRef.current?.includes(id)) onRestoreDraft?.(typed, { tabId: id, shown: tabRef.current === id });
   };
 
   const strip = tabId && shown ? (

@@ -1,18 +1,33 @@
 /* Right rail — status bar, ambient peripherals, minimap ──────────── */
 
 /* ── Status bar ────────────────────────────────────────────────────── */
+/* The window's last row, under `.workspace` and across its full width, so
+   no side column (rail, tree, split pane, browser) narrows it. One line
+   always: cells never wrap, the bar clips what still does not fit, and the
+   low-priority cells (each with its separator) drop out first as the bar
+   narrows. It is its own query container (it holds no pop-ups, which
+   containment would clip); rem thresholds follow the font-size tweak. */
 .status {
+  container: status / inline-size;
+  flex: none;
   display: flex; align-items: center; gap: 8px;
-  height: 26px;
+  height: 26px; min-width: 0;
   padding: 0 12px;
   border-top: 1px solid var(--line);
-  background: linear-gradient(180deg, transparent, color-mix(in oklab, var(--bg-window) 80%, transparent));
+  background: var(--bg-window);
   font-size: var(--d-text-xs);
   color: var(--fg-3);
+  white-space: nowrap;
+  overflow: hidden;
 }
+.status > * { flex: none; }
+.status > .status-gap { flex: 1 1 0; min-width: 0; }
 .status-cell { display: inline-flex; align-items: center; gap: 5px; }
 .status-mode { font-family: var(--font-mono); font-size: var(--d-text-xs); }
 .status-sep { color: var(--fg-5); }
+@container status (max-width: 58rem) { .st-tps { display: none; } }
+@container status (max-width: 54rem) { .st-cost { display: none; } }
+@container status (max-width: 50rem) { .st-ctx .status-bar-tube, .st-ctx-pct { display: none; } }
 .status-bar-tube {
   display: inline-flex;
   width: 60px; height: 4px;

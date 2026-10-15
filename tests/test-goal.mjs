@@ -5,12 +5,16 @@
 // already forgotten, a malformed payload), the strip's view of each status,
 // and the budget input. Frame shapes are the ones omp 18.6.0 emitted in RPC
 // probes (rpc-goal.ts / goals/runtime.ts).
+// Also the composer hook app/use-goal-mode.jsx: where a refused goal start
+// hands its draft back.
 // Run: node tests/test-goal.mjs
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { runInNewContext } from "node:vm";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const win = {};
@@ -321,6 +325,87 @@ check("plan mode and goal mode exclude each other", () => {
   // A completed goal blocks nothing.
   gate = G.composerGate(G.GOAL_DRAFT_IDLE, known(goal({ status: "complete" }), { enabled: false }), false);
   assert.deepEqual([gate.mode, gate.goalBlocked, gate.planBlocked, gate.tint], [false, "", "", false]);
+});
+
+// ---- use-goal-mode.jsx: a refused start hands the draft back ---------------
+
+// The hook compiled as index.html's Babel does (JSX only matters here), run
+// under a React stand-in that keeps state per call position and runs effects
+// during the render; the test only talks to what the hook returns.
+const Babel = createRequire(import.meta.url)(join(root, "src/babel.min.js"));
+// eslint-disable-next-line no-new-func
+new Function("window", readFileSync(join(root, "src/app/session-ui.js"), "utf8"))(win);
+function goalHook() {
+  const slots = [];
+  let i = 0;
+  const changed = (a, b) => !a || !b || a.length !== b.length || a.some((v, k) => !Object.is(v, b[k]));
+  const React = {
+    createElement: () => null,
+    useState(initial) {
+      const k = i++;
+      if (!(k in slots)) slots[k] = { value: initial };
+      const s = slots[k];
+      return [s.value, (v) => { s.value = typeof v === "function" ? v(s.value) : v; }];
+    },
+    useRef(initial) { const k = i++; return (slots[k] ??= { current: initial }); },
+    useEffect(fn, deps) {
+      const k = i++;
+      if (!slots[k] || changed(slots[k].deps, deps)) { slots[k] = { deps }; fn(); }
+    },
+  };
+  const { code } = Babel.transform(readFileSync(join(root, "src/app/use-goal-mode.jsx"), "utf8"), { presets: ["react"] });
+  const window = { ...win, GoalStrip: () => null, OMP_TURN_STATUS: { isBusyRunState: () => false } };
+  const useGoalMode = runInNewContext(`${code}\nuseGoalMode`, { window, React });
+  return (props) => { i = 0; return useGoalMode(props); };
+}
+
+/** Starts a goal on tab "a" that omp refuses once `after(render, props)` ran. */
+async function refusedStart(after) {
+  const render = goalHook();
+  let refuse;
+  const bridge = { goalStart: () => new Promise((resolve) => { refuse = () => resolve({ ok: false, error: "no" }); }) };
+  const restored = [];
+  const props = (tabId, sessionIds = ["a", "b"]) => ({
+    bridge, tabId, sessionIds, goal: G.NONE, planMode: false, profileId: "p", runState: "idle",
+    onRestoreDraft: (draft, where) => restored.push([draft, { ...where }]),
+  });
+  const draft = { text: "ship it", images: [], chips: [{ id: 1 }] };
+  const started = render(props("a")).start(draft);
+  after(render, props);
+  refuse();
+  await started;
+  return { restored, draft };
+}
+
+async function checkAsync(label, fn) {
+  try {
+    await fn();
+  } catch (err) {
+    console.error(`FAILED: ${label}`);
+    throw err;
+  }
+  passed++;
+}
+
+await checkAsync("a refused goal start hands its draft back to the tab still shown", async () => {
+  const { restored, draft } = await refusedStart(() => {});
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0][0], draft);
+  assert.deepEqual(restored[0][1], { tabId: "a", shown: true });
+});
+
+// The chips were taken from tab a's browser: they go back to it although
+// the composer shows tab b now (only the text stays out of b's composer).
+await checkAsync("a refused goal start after a tab switch still hands the draft to its own tab, marked not shown", async () => {
+  const { restored, draft } = await refusedStart((render, props) => render(props("b")));
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0][0], draft);
+  assert.deepEqual(restored[0][1], { tabId: "a", shown: false });
+});
+
+await checkAsync("a refused goal start of a tab closed meanwhile hands nothing back", async () => {
+  const { restored } = await refusedStart((render, props) => render(props("b", ["b"])));
+  assert.deepEqual(restored, []);
 });
 
 console.log(`test-goal: ${passed} checks passed`);

@@ -32,7 +32,7 @@ Same three values as omp (`docs/approval-mode.md` in the omp repo), kebab-case o
 ```
 
 - Written only by `approval_mode_set_default` and `approval_mode_set_project`, through `json_store::update_strict` under the store's file lock; the cache is updated in the commit closure (as `set_shell` does for `terminal.json`).
-- A missing file reads as the defaults (`write`, no overrides). A malformed file also reads as the defaults, is logged, and makes the store refuse writes (`… is unreadable: …`), the same policy as `terminal/settings.rs`: the user's file is not overwritten.
+- A missing file reads as the defaults (`write`, no overrides). A malformed file also reads as the defaults, is logged, and makes the store refuse writes (`… is unreadable: …`), the same policy as `program_setting.rs` (the terminal's and browser's program settings): the user's file is not overwritten.
 - No app config folder: the mode lives in memory only.
 - `approval_mode_set_project(projectRoot, mode)`: `projectRoot` must be an absolute path; `mode: null` removes the key ("default" in the panel). Unknown mode strings are refused at the command boundary (`Err`), so `"Write"` or `"auto"` never reach the file.
 - Keys are the canonical folder string (`Path::canonicalize()`, falling back to the raw path, as `approval::project_key`). The tab's `entry.path` is already canonical (`external_open::canonical_folder`), so a symlinked folder and its target share one override.

@@ -4,8 +4,9 @@
 use super::kill::process_exists as process_alive;
 use super::pty::HANGUP_GRACE;
 use super::pump::{TerminalEmit, MAX_EVENT, MIN_INTERVAL};
-use super::test_support::{open_with, stdout_of, wait_until};
+use super::test_support::{open_with, stdout_of};
 use super::{Emit, Slot, TerminalManager, TerminalState, TerminalStatus};
+use crate::test_support::{wait_until, TempDir};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
@@ -46,29 +47,6 @@ fn sweep_stale_shell_dirs() {
         if pid.is_some_and(|pid| !process_alive(pid)) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
-    }
-}
-
-/// A fresh directory in the temp dir, removed with its content when dropped
-/// (also when the test fails).
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("omp-terminal-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -360,7 +338,7 @@ fn close_tab_kills_background_jobs() {
 /// leader runs (a real shell saves its history there).
 #[test]
 fn close_tab_hangs_up_the_shell_before_killing_it() {
-    let dir = TempDir::new("hup");
+    let dir = TempDir::new("terminal", "hup");
     let marker = dir.path().join("hung");
     let (manager, out) = open("hup");
     // The trap is set by a non-interactive `sh` that replaces the prompt
@@ -716,7 +694,7 @@ fn bad_requests_are_rejected() {
 
 #[test]
 fn settings_are_validated_persisted_and_reloaded() {
-    let guard = TempDir::new("settings");
+    let guard = TempDir::new("terminal", "settings");
     // Not created yet, like a first start's config folder.
     let dir = guard.path().join("config");
     let path = dir.join("terminal.json");
@@ -1024,7 +1002,7 @@ fn a_jobs_output_within_the_grace_period_is_delivered_before_the_exit() {
 /// an interactive `sh`: lets a test see every shell a manager ever started.
 /// Both live in the returned directory.
 fn recording_shell(tag: &str) -> (TempDir, String, PathBuf) {
-    let dir = TempDir::new(tag);
+    let dir = TempDir::new("terminal", tag);
     let pidfile = dir.path().join("pids");
     let path = dir.path().join("recordsh");
     let script = format!(

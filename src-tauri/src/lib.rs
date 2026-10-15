@@ -7,6 +7,7 @@
 mod agent;
 mod approval;
 mod approval_mode;
+mod browser;
 mod child_path;
 mod conversation_tree;
 mod external_open;
@@ -22,11 +23,15 @@ mod navigation_guard;
 mod omp_cli;
 mod open_tabs;
 mod profiles;
+mod program_setting;
 mod recent_projects;
 mod redaction;
 mod saved_sessions;
 mod stats;
+mod supervisor;
 mod terminal;
+#[cfg(test)]
+mod test_support;
 mod text;
 mod updater;
 mod widgets;
@@ -110,6 +115,16 @@ fn start_session(
         .state::<Arc<ApprovalModeStore>>()
         .resolve(cwd_opt.map(Path::new));
     terminal.register_tab(&args.session_id, cwd_opt.map(Path::new));
+    // The tab's browser (idempotent: a respawn under the same tab id reuses
+    // it). Which Chromium it runs is Rust's `browser.json` setting, read at
+    // launch time. Only an app run with no managed browsers at all starts omp
+    // without `--config`; a tab whose browser can't be set up (a respawn
+    // racing the tab's close: "still closing") fails to start, and the
+    // frontend's rollback closes it.
+    let overlay = app
+        .state::<browser::BrowserManager>()
+        .allocate_if_available(&args.session_id)
+        .map_err(|e| format!("browser: {e}"))?;
     bridge.start_session(
         // Owned by the bridge's map; the widget hook below still needs the id.
         args.session_id.clone(),
@@ -118,6 +133,7 @@ fn start_session(
             resume: args.resume.as_deref(),
             profile,
             mode,
+            config: overlay.as_deref(),
         },
         app,
         Arc::clone(rule_book.inner()),
@@ -126,19 +142,27 @@ fn start_session(
     Ok(mode.as_str().to_string())
 }
 
-/// Run a blocking operation against a shared `Arc<S>` off the main command
-/// thread — the `Arc::clone` + `spawn_blocking` + join-error tail every
-/// state-mutating command shares (`ProfileStore` and the keybindings
-/// `OverlayStore` alike): each one is a locked, fsync'd read-modify-write of
-/// its own JSON file (same rationale as `approval_rules_grant`).
+/// Run blocking `work` (file or process I/O, a long scan) off Tauri's IPC
+/// thread, which would otherwise freeze the webview: `spawn_blocking`, with
+/// a panic in `work` reported as `"join error: …"`.
+async fn off_ipc<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("join error: {e}"))
+}
+
+/// [`off_ipc`] against a shared `Arc<S>` — what every state-mutating command
+/// shares (`ProfileStore` and the keybindings `OverlayStore` alike): each one
+/// is a locked, fsync'd read-modify-write of its own JSON file (same
+/// rationale as `approval_rules_grant`).
 async fn with_blocking<S: Send + Sync + 'static, T: Send + 'static>(
     shared: &Arc<S>,
     f: impl FnOnce(&S) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
     let shared = Arc::clone(shared);
-    tauri::async_runtime::spawn_blocking(move || f(&shared))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || f(&shared)).await?
 }
 
 /// The profile list plus which entry is the startup default, in one payload.
@@ -230,9 +254,7 @@ async fn clear_profile_bootstrap(
         return Ok(());
     };
     let home = app.path().home_dir().map_err(|e| e.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || profiles::clear_bootstrap(&home, &id))
-        .await
-        .map_err(|e| format!("join error: {e}"))
+    off_ipc(move || profiles::clear_bootstrap(&home, &id)).await
 }
 
 /// Rename a profile. Only the display label changes — see
@@ -271,11 +293,8 @@ async fn list_saved_sessions(
     app: tauri::AppHandle,
 ) -> Result<Vec<saved_sessions::SavedSession>, String> {
     let profile = store.resolve_owned(profile)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        saved_sessions::scan_saved_sessions(&app, cwd.as_deref(), profile.as_deref())
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || saved_sessions::scan_saved_sessions(&app, cwd.as_deref(), profile.as_deref()))
+        .await?
 }
 
 /// The conversation family of one saved session file (`session_file`, under
@@ -291,21 +310,16 @@ async fn conversation_tree(
     app: tauri::AppHandle,
 ) -> Result<conversation_tree::ConversationTree, String> {
     let profile = store.resolve_owned(profile)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        conversation_tree::load(&app, &session_file, profile.as_deref())
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || conversation_tree::load(&app, &session_file, profile.as_deref())).await?
 }
 
 /// Kill the omp process for a tab session. Also drops its session-scoped
 /// approval-rule grants (see `approval::RuleBook::clear_session`) and its
 /// widget runs.
 ///
-/// Deliberately does NOT touch the tab's terminal: a profile switch stops and
-/// respawns the omp process under the same tab id while the tab, and with it
-/// its shell, stays. The terminal ends only through [`close_tab`] /
-/// [`close_all_tabs`] and `TerminalManager::shutdown_all`.
+/// Deliberately does NOT touch the tab's terminal or browser: a profile switch
+/// respawns omp while its shell and Chromium stay. Both end only through
+/// [`end_tabs`] and [`kill_child_processes`].
 #[tauri::command]
 fn stop_session(
     session_id: String,
@@ -317,32 +331,35 @@ fn stop_session(
     widget_host.session_closed(&session_id);
 }
 
-/// End a tab for good: its omp process (with its session grants), widget
-/// runs, git watcher and terminal shell. The one place a tab ends.
-fn end_tab(app: &AppHandle, session_id: &str) {
-    end_tab_but_terminal(app, session_id);
-    app.state::<Arc<terminal::TerminalManager>>()
-        .close_tab(session_id);
-}
-
-/// [`end_tab`] without the terminal, for [`close_all_tabs`], which ends
-/// every terminal at once.
-fn end_tab_but_terminal(app: &AppHandle, session_id: &str) {
+/// End tabs for good: their omp processes (with their session grants),
+/// widget runs, git watchers, browsers and terminal shells. The one place a
+/// tab ends. The two slow teardowns are independent and run side by side:
+/// the browsers (Chromium kill, profile removal) and the shells (one shared
+/// hang-up grace, `TerminalManager::close_tabs`).
+fn end_tabs<S: AsRef<str> + Sync>(app: &AppHandle, ids: &[S]) {
     let rule_book = app.state::<Arc<RuleBook>>();
-    app.state::<AgentBridge>()
-        .stop_session(session_id, &rule_book);
-    app.state::<Arc<widgets::WidgetHost>>()
-        .session_closed(session_id);
-    app.state::<GitWatcherState>().stop(session_id);
+    let bridge = app.state::<AgentBridge>();
+    let widgets = app.state::<Arc<widgets::WidgetHost>>();
+    let watchers = app.state::<GitWatcherState>();
+    for id in ids {
+        let id = id.as_ref();
+        bridge.stop_session(id, &rule_book);
+        widgets.session_closed(id);
+        watchers.stop(id);
+    }
+    let browser = app.state::<browser::BrowserManager>();
+    std::thread::scope(|scope| {
+        scope.spawn(|| browser.release_many(ids));
+        app.state::<Arc<terminal::TerminalManager>>()
+            .close_tabs(ids);
+    });
 }
 
-/// Close a tab (the frontend's `closeSession`) — see [`end_tab`]. `async` +
+/// Close a tab (the frontend's `closeSession`) — see [`end_tabs`]. `async` +
 /// `spawn_blocking`: reaping omp and killing the shell's processes block.
 #[tauri::command]
 async fn close_tab(session_id: String, app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || end_tab(&app, &session_id))
-        .await
-        .map_err(|e| format!("join error: {e}"))
+    off_ipc(move || end_tabs(&app, &[session_id])).await
 }
 
 /// End every tab the backend knows. Called by the webview at boot, before
@@ -350,22 +367,15 @@ async fn close_tab(session_id: String, app: AppHandle) -> Result<(), String> {
 /// whatever is registered then belongs to a previous document and would
 /// otherwise run on unseen. The terminal's registry is the tab set:
 /// [`start_session`] registers the tab before it spawns omp, and only
-/// [`end_tab`] (or an app exit) unregisters it. Only the tabs registered at
-/// the start end: one started meanwhile keeps its terminal. Their shells
-/// share one hang-up grace (`TerminalManager::close_tabs`) instead of one
-/// per tab.
+/// [`end_tabs`] (or an app exit) unregisters it. Only the tabs registered at
+/// the start end: one started meanwhile keeps its terminal and browser.
 #[tauri::command]
 async fn close_all_tabs(app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let terminal = app.state::<Arc<terminal::TerminalManager>>();
-        let ids = terminal.tab_ids();
-        for id in &ids {
-            end_tab_but_terminal(&app, id);
-        }
-        terminal.close_tabs(&ids);
+    off_ipc(move || {
+        let ids = app.state::<Arc<terminal::TerminalManager>>().tab_ids();
+        end_tabs(&app, &ids);
     })
     .await
-    .map_err(|e| format!("join error: {e}"))
 }
 
 /// Start the tab's terminal shell, in the tab's folder (else the home
@@ -479,29 +489,79 @@ async fn terminal_pick_shell(
     window: tauri::WebviewWindow,
     terminal: State<'_, Arc<terminal::TerminalManager>>,
 ) -> Result<Option<terminal::TerminalSettings>, String> {
+    let picked = pick_program(&window, "Choose a Shell");
+    with_blocking(&terminal, move |t| {
+        picked_program(&picked)?.map_or(Ok(None), |path| t.set_shell(&path).map(Some))
+    })
+    .await
+}
+
+/// Open the native "pick a program" dialog over `window` (`.exe` only on
+/// Windows); the receiver yields the choice, `None` when cancelled.
+fn pick_program(
+    window: &tauri::WebviewWindow,
+    title: &str,
+) -> std::sync::mpsc::Receiver<Option<tauri_plugin_dialog::FilePath>> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = std::sync::mpsc::channel();
-    let dialog = window
-        .dialog()
-        .file()
-        .set_title("Choose a Shell")
-        .set_parent(&window);
+    let dialog = window.dialog().file().set_title(title).set_parent(window);
     #[cfg(windows)]
     let dialog = dialog.add_filter("Programs", &["exe"]);
     dialog.pick_file(move |result| {
         let _ = tx.send(result);
     });
-    with_blocking(&terminal, move |t| {
-        let Some(picked) = rx.recv().map_err(|e| format!("channel error: {e}"))? else {
-            return Ok(None);
-        };
-        let path = picked
-            .into_path()
-            .map_err(|e| format!("invalid picked path: {e}"))?;
-        let path = path
-            .to_str()
-            .ok_or_else(|| format!("{} is not a UTF-8 path", path.display()))?;
-        t.set_shell(path).map(Some)
+    rx
+}
+
+/// Wait (blocking) for [`pick_program`]'s answer: the picked path as UTF-8,
+/// `None` when the dialog was cancelled.
+fn picked_program(
+    picked: &std::sync::mpsc::Receiver<Option<tauri_plugin_dialog::FilePath>>,
+) -> Result<Option<String>, String> {
+    let Some(picked) = picked.recv().map_err(|e| format!("channel error: {e}"))? else {
+        return Ok(None);
+    };
+    let path = picked
+        .into_path()
+        .map_err(|e| format!("invalid picked path: {e}"))?;
+    path.into_os_string()
+        .into_string()
+        .map(Some)
+        .map_err(|p| format!("{} is not a UTF-8 path", p.to_string_lossy()))
+}
+
+/// The browser panel's Chromium setting, what automatic discovery finds and
+/// whether the stored browser still works. `spawn_blocking`: discovery
+/// checks files.
+#[tauri::command]
+async fn browser_settings(
+    settings: State<'_, Arc<browser::SettingsStore>>,
+) -> Result<browser::BrowserSettings, String> {
+    with_blocking(&settings, |s| Ok(s.settings())).await
+}
+
+/// Store the Chromium setting (empty = automatic, else an absolute path to
+/// an executable file; surrounding quotes are dropped) in `browser.json`;
+/// the next launch uses it.
+#[tauri::command]
+async fn browser_set_path(
+    path: String,
+    settings: State<'_, Arc<browser::SettingsStore>>,
+) -> Result<browser::BrowserSettings, String> {
+    with_blocking(&settings, move |s| s.set_path(&path)).await
+}
+
+/// "other…" in the browser menu: pick a program with the native file dialog
+/// and store it as `browser_set_path` would; `None` when cancelled. The path
+/// comes from the OS dialog, never from the webview.
+#[tauri::command]
+async fn browser_pick_path(
+    window: tauri::WebviewWindow,
+    settings: State<'_, Arc<browser::SettingsStore>>,
+) -> Result<Option<browser::BrowserSettings>, String> {
+    let picked = pick_program(&window, "Choose a Browser");
+    with_blocking(&settings, move |s| {
+        picked_program(&picked)?.map_or(Ok(None), |path| s.set_path(&path).map(Some))
     })
     .await
 }
@@ -573,11 +633,7 @@ async fn approval_rules_list(
     rule_book: State<'_, Arc<RuleBook>>,
 ) -> Result<Vec<approval::Rule>, String> {
     let rule_book = Arc::clone(rule_book.inner());
-    tauri::async_runtime::spawn_blocking(move || {
-        rule_book.list(&session_id, project_root.as_deref().map(Path::new))
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))
+    off_ipc(move || rule_book.list(&session_id, project_root.as_deref().map(Path::new))).await
 }
 
 /// Grant standing approval for `tool`. `scope` is `"session"` or `"project"`
@@ -595,7 +651,7 @@ async fn approval_rules_grant(
     rule_book: State<'_, Arc<RuleBook>>,
 ) -> Result<(), String> {
     let rule_book = Arc::clone(rule_book.inner());
-    tauri::async_runtime::spawn_blocking(move || {
+    off_ipc(move || {
         let scope = parse_rule_scope(&scope)?;
         rule_book.grant(
             &session_id,
@@ -604,8 +660,7 @@ async fn approval_rules_grant(
             scope,
         )
     })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+    .await?
 }
 
 /// Revoke a previously granted rule. No-op (not an error) if it wasn't granted.
@@ -621,7 +676,7 @@ async fn approval_rules_revoke(
     rule_book: State<'_, Arc<RuleBook>>,
 ) -> Result<(), String> {
     let rule_book = Arc::clone(rule_book.inner());
-    tauri::async_runtime::spawn_blocking(move || {
+    off_ipc(move || {
         let scope = parse_rule_scope(&scope)?;
         rule_book.revoke(
             &session_id,
@@ -630,8 +685,7 @@ async fn approval_rules_revoke(
             scope,
         )
     })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+    .await?
 }
 
 fn parse_rule_scope(scope: &str) -> Result<approval::RuleScope, String> {
@@ -686,9 +740,7 @@ async fn list_project_files(
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<files::FileHit>, String> {
-    tauri::async_runtime::spawn_blocking(move || files::list(&cwd, &query, limit))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || files::list(&cwd, &query, limit)).await?
 }
 
 /// Native folder picker — returns the chosen path or null.
@@ -712,7 +764,7 @@ async fn open_project(app: tauri::AppHandle) -> Result<Option<String>, String> {
         .pick_folder(move |result| {
             let _ = tx.send(result);
         });
-    tauri::async_runtime::spawn_blocking(move || {
+    off_ipc(move || {
         let Some(picked) = rx.recv().map_err(|e| format!("channel error: {e}"))? else {
             return Ok(None);
         };
@@ -729,8 +781,7 @@ async fn open_project(app: tauri::AppHandle) -> Result<Option<String>, String> {
         // filesystem call.
         external_open::canonical_folder(&path).map(Some)
     })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+    .await?
 }
 
 /// Start watching `.git/HEAD` for a session's project path.
@@ -787,36 +838,28 @@ fn open_url_external(url: String) -> Result<(), String> {
 /// (blob diffs, history walks).
 #[tauri::command]
 async fn git_browser_status(path: String) -> Result<git_browser::StatusView, String> {
-    tauri::async_runtime::spawn_blocking(move || git_browser::status(Path::new(&path)))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || git_browser::status(Path::new(&path))).await?
 }
 
 /// One work-tree file in full with its change against `HEAD` inline — see
 /// `git_browser::file`. `async` + `spawn_blocking`: see `git_browser_status`.
 #[tauri::command]
 async fn git_browser_file(path: String, rel_path: String) -> Result<git_browser::FileView, String> {
-    tauri::async_runtime::spawn_blocking(move || git_browser::file(Path::new(&path), &rel_path))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || git_browser::file(Path::new(&path), &rel_path)).await?
 }
 
 /// The commit graph with refs and lanes — see `git_browser::log`.
 /// `async` + `spawn_blocking`: see `git_browser_status`.
 #[tauri::command]
 async fn git_browser_log(path: String) -> Result<git_browser::LogView, String> {
-    tauri::async_runtime::spawn_blocking(move || git_browser::log(Path::new(&path)))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || git_browser::log(Path::new(&path))).await?
 }
 
 /// A commit's metadata and touched files — see `git_browser::commit`.
 /// `async` + `spawn_blocking`: see `git_browser_status`.
 #[tauri::command]
 async fn git_browser_commit(path: String, sha: String) -> Result<git_browser::CommitView, String> {
-    tauri::async_runtime::spawn_blocking(move || git_browser::commit(Path::new(&path), &sha))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || git_browser::commit(Path::new(&path), &sha)).await?
 }
 
 /// One file as of a commit with the commit's change inline — see
@@ -828,11 +871,7 @@ async fn git_browser_commit_file(
     sha: String,
     rel_path: String,
 ) -> Result<git_browser::FileView, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        git_browser::commit_file(Path::new(&path), &sha, &rel_path)
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || git_browser::commit_file(Path::new(&path), &sha, &rel_path)).await?
 }
 
 /// Stage a file's changes — see `workspace::accept`.
@@ -842,9 +881,7 @@ async fn git_browser_commit_file(
 /// the webview if run on Tauri's main command thread.
 #[tauri::command]
 async fn workspace_accept(path: String, rel_path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || workspace::accept(Path::new(&path), &rel_path))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || workspace::accept(Path::new(&path), &rel_path)).await?
 }
 
 /// Discard a file's working-tree changes (deletes it if untracked) — see
@@ -854,9 +891,7 @@ async fn workspace_accept(path: String, rel_path: String) -> Result<(), String> 
 /// `workspace_accept` — see its doc comment.
 #[tauri::command]
 async fn workspace_reject(path: String, rel_path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || workspace::reject(Path::new(&path), &rel_path))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || workspace::reject(Path::new(&path), &rel_path)).await?
 }
 
 /// Widget config, approvals, active view and runs — see
@@ -920,9 +955,7 @@ async fn usage_stats(
     store: State<'_, Arc<profiles::ProfileStore>>,
 ) -> Result<stats::DashboardStats, String> {
     let profile = store.resolve_owned(profile)?;
-    tauri::async_runtime::spawn_blocking(move || stats::fetch(profile.as_deref()))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || stats::fetch(profile.as_deref())).await?
 }
 
 /// Whether omp's goal mode auto-continues over RPC for `profile` — see
@@ -937,9 +970,7 @@ async fn goal_continuation_get(
     store: State<'_, Arc<profiles::ProfileStore>>,
 ) -> Result<bool, String> {
     let profile = store.resolve_owned(profile)?;
-    tauri::async_runtime::spawn_blocking(move || goal_config::get(profile.as_deref()))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || goal_config::get(profile.as_deref())).await?
 }
 
 /// Turn goal mode's auto-continue over RPC on or off for `profile` — see
@@ -953,9 +984,7 @@ async fn goal_continuation_set(
     store: State<'_, Arc<profiles::ProfileStore>>,
 ) -> Result<bool, String> {
     let profile = store.resolve_owned(profile)?;
-    tauri::async_runtime::spawn_blocking(move || goal_config::set(profile.as_deref(), enabled))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    off_ipc(move || goal_config::set(profile.as_deref(), enabled)).await?
 }
 
 /// Shared profile-resolution and home-dir setup for the three keybindings
@@ -1128,9 +1157,7 @@ async fn model_usage_list(
     app: AppHandle,
 ) -> Result<Vec<String>, String> {
     let profile = store.resolve_owned(profile)?;
-    tauri::async_runtime::spawn_blocking(move || model_usage::recent_for(&app, profile.as_deref()))
-        .await
-        .map_err(|e| format!("join error: {e}"))
+    off_ipc(move || model_usage::recent_for(&app, profile.as_deref())).await
 }
 
 /// Ask the release feed for a newer version — see `updater::check`.
@@ -1156,12 +1183,15 @@ async fn app_update_install(
 }
 
 /// Kill every child process tree the app owns — omp sessions first, then
-/// running widget plugins, then the terminal shells — on the calling thread.
-/// For the exits where managed state is never dropped (app exit, the updater
-/// relaunch); on Unix each tree sits in its own process group or session and
-/// would outlive us. Every step is idempotent.
+/// the tabs' Chromium browsers, running widget plugins and terminal shells —
+/// on the calling thread. For the exits where managed state is never dropped
+/// (app exit, the updater relaunch); on Unix each tree sits in its own process
+/// group or session and would outlive us. Every step is idempotent.
 pub(crate) fn kill_child_processes(app: &AppHandle) {
     app.state::<AgentBridge>().shutdown_all();
+    if let Some(browser) = app.try_state::<browser::BrowserManager>() {
+        browser.shutdown_all();
+    }
     widgets::kill_all(app);
     // Managed in `setup` (it needs the config dir): absent only if the app
     // exits before that ran, when there is no shell to kill either.
@@ -1203,11 +1233,50 @@ fn setup(app: &tauri::App) {
             .as_deref()
             .map(|dir| dir.join("approval-mode.json")),
     )));
+    // The browser panel's Chromium setting: <app_config_dir>/browser.json.
+    // No temp-dir fallback: another account could plant the browser this one
+    // runs; without a config dir the setting stays in memory. An
+    // unresolvable home only loses the candidates under it (omp's Chrome for
+    // Testing cache, macOS `~/Applications`).
+    let browser_store = Arc::new(browser::SettingsStore::load(
+        resolved_config_dir
+            .as_deref()
+            .map(|dir| dir.join("browser.json")),
+        app.path().home_dir().ok(),
+    ));
+    app.manage(Arc::clone(&browser_store));
     // Falls back to the temp dir if the config dir can't be resolved
     // (e.g. a locked-down test environment) rather than failing
     // startup — approval grants and profiles just won't survive a
     // restart there.
     let config_dir = resolved_config_dir.unwrap_or_else(std::env::temp_dir);
+    // Per-tab headless Chromium + the overlay omp reads its `cdpUrl` from.
+    // It lives under the per-user app cache dir (user-owned, unlike a shared
+    // temp dir); without one the manager is unavailable and sessions start
+    // without a managed browser.
+    let browser = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("no app cache dir: {e}"))
+        .and_then(|dir| browser::BrowserManager::new(&dir.join("browser"), browser_store))
+        .unwrap_or_else(|reason| {
+            eprintln!("[omp-desktop] managed browser disabled: {reason}");
+            browser::BrowserManager::unavailable(reason)
+        });
+    app.manage(browser);
+    // What crashed earlier runs left under the browser root: reaping their
+    // browsers can take seconds, so not on the main thread.
+    let pruner = app.handle().clone(); // the thread owns its handle
+    let pruning = std::thread::Builder::new()
+        .name("browser-prune".into())
+        .spawn(move || {
+            pruner
+                .state::<browser::BrowserManager>()
+                .prune_stale_instances();
+        });
+    if let Err(e) = pruning {
+        eprintln!("[omp-desktop] browser leftovers not pruned: {e}");
+    }
     // Approval-rule store: project-scoped grants persist under
     // <app_config_dir>/approval-rules/<project-hash>.json.
     app.manage(Arc::new(RuleBook::new(config_dir.join("approval-rules"))));
@@ -1259,29 +1328,17 @@ fn setup(app: &tauri::App) {
     );
 }
 
-/// Run the Tauri application. Panics if the runtime fails to initialise.
+/// Windows and Linux deliver a folder "Open with" by launching the
+/// executable with the path in argv, so without this a second open would
+/// start a whole second app — a second window, a second set of omp
+/// children — instead of adding a tab to the running one. The forwarded
+/// argv goes through the same queue as a cold start's.
 ///
-/// # Panics
-///
-/// Panics if `tauri::Builder::build` returns an error (e.g. the webview
-/// runtime cannot be initialised). This is a fatal startup condition;
-/// there is no meaningful recovery from inside `main`.
-pub fn run() {
-    let builder = tauri::Builder::default();
-    // Windows and Linux deliver a folder "Open with" by launching the
-    // executable with the path in argv, so without this a second open would
-    // start a whole second app — a second window, a second set of
-    // omp children — instead of adding a tab to the running one. The
-    // forwarded argv goes through the same queue as a cold start's.
-    //
-    // macOS needs none of it: LaunchServices reuses the running instance
-    // and delivers `RunEvent::Opened` to it (see the `app.run` callback).
-    //
-    // Registered first, as the plugin requires. Shadowed rather than
-    // reassigned through a `mut` binding, which would be an `unused_mut`
-    // warning (and so a lint-gate error) on macOS.
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+/// macOS needs none of it: `LaunchServices` reuses the running instance and
+/// delivers `RunEvent::Opened` to it (see [`handle_run_event`]).
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn single_instance_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri_plugin_single_instance::init(|app, argv, cwd| {
         // `cwd` is why the plugin sends it: the second process' argv may hold
         // a relative path (`omp-desktop .` from another shell), and resolving
         // that here would otherwise pick *this* instance's directory.
@@ -1293,7 +1350,23 @@ pub fn run() {
             let _ = win.unminimize();
             let _ = win.set_focus();
         }
-    }));
+    })
+}
+
+/// Run the Tauri application. Panics if the runtime fails to initialise.
+///
+/// # Panics
+///
+/// Panics if `tauri::Builder::build` returns an error (e.g. the webview
+/// runtime cannot be initialised). This is a fatal startup condition;
+/// there is no meaningful recovery from inside `main`.
+pub fn run() {
+    let builder = tauri::Builder::default();
+    // Registered first, as the plugin requires (see `single_instance_plugin`).
+    // Shadowed rather than reassigned through a `mut` binding, which would be
+    // an `unused_mut` warning (and so a lint-gate error) on macOS.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let builder = builder.plugin(single_instance_plugin());
     let app = builder
         .plugin(navigation_guard::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1315,8 +1388,24 @@ pub fn run() {
             terminal_settings,
             terminal_set_shell,
             terminal_pick_shell,
+            browser_settings,
+            browser_set_path,
+            browser_pick_path,
             close_tab,
             close_all_tabs,
+            browser::commands::browser_open_panel,
+            browser::commands::browser_close_panel,
+            browser::commands::browser_resize,
+            browser::commands::browser_navigate,
+            browser::commands::browser_history,
+            browser::commands::browser_tab_new,
+            browser::commands::browser_tab_close,
+            browser::commands::browser_tab_activate,
+            browser::commands::browser_input,
+            browser::commands::browser_frame_ack,
+            browser::commands::browser_annotate,
+            browser::commands::browser_capture,
+            browser::commands::browser_scroll_to,
             session_status,
             replay_events,
             extension_ui_state,
@@ -1374,19 +1463,22 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
-            kill_child_processes(app);
-        }
-        // macOS' "Open with" for a folder (see `Info.plist`) arrives as a
-        // run-loop event, on launch *and* while already running — the one
-        // delivery path that is neither argv nor a plugin. `RunEvent::Opened`
-        // does not exist on the other targets.
-        #[cfg(target_os = "macos")]
-        if let tauri::RunEvent::Opened { urls } = &event {
-            external_open::ingest_urls(app, urls);
-        }
-    });
+    app.run(handle_run_event);
+}
+
+/// Handle lifecycle and platform file-open events from the Tauri run loop.
+fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
+    if matches!(event, tauri::RunEvent::Exit) {
+        kill_child_processes(app);
+    }
+    // macOS' "Open with" for a folder (see `Info.plist`) arrives as a
+    // run-loop event, on launch *and* while already running — the one
+    // delivery path that is neither argv nor a plugin. `RunEvent::Opened`
+    // does not exist on the other targets.
+    #[cfg(target_os = "macos")]
+    if let tauri::RunEvent::Opened { urls } = &event {
+        external_open::ingest_urls(app, urls);
+    }
 }
 
 #[cfg(test)]

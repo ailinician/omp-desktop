@@ -46,8 +46,12 @@ jobs:
             librsvg2-dev \
             patchelf
 
+      # The runner images ship Google Chrome. A real-Chromium test that
+      # finds no browser fails here instead of passing without running.
       - name: cargo test
         working-directory: src-tauri
+        env:
+          OMP_REQUIRE_CHROMIUM: "1"
         run: cargo test --locked
 
   js:

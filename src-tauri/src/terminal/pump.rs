@@ -142,8 +142,8 @@ pub fn pump(rx: &Receiver<Msg>, mut emit: impl TerminalEmit, stream: &Stream) {
 #[cfg(test)]
 mod tests {
     use super::super::stream::{HIGH_WATER, LOW_WATER};
-    use super::super::test_support::wait_until;
     use super::*;
+    use crate::test_support::wait_until;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Mutex};
 

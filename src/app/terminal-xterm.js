@@ -5,7 +5,8 @@
 // - `createXterm(opts)`: a `window.Terminal` with the fit addon, OSC 8
 //   swallowed and the key routing (restart on Enter, copy / paste chords,
 //   chords handed back to the global keymap — the decisions themselves are
-//   app/terminal.js's `keymapShouldBypass` / `clipboardAction`).
+//   app/keymap.js's `guestShouldBypass` and app/terminal.js's
+//   `clipboardAction`).
 // - `applyWindowsPty(term, status)`: Rust's ConPTY info onto the instance.
 // - `copySelection(term)`: the selection to the clipboard (ctrl+shift+c,
 //   the panel's right-click).
@@ -14,8 +15,9 @@
 //   for an exited shell, a failed start, and output Rust's ring dropped.
 //
 // Exposes `window.OMP_TERMINAL_XTERM`; an IIFE (AGENTS.md "IIFE rule").
-// `window.Terminal`, `window.FitAddon` (vendored xterm) and
-// `window.OMP_TERMINAL` are looked up at call time, not at load.
+// `window.Terminal`, `window.FitAddon` (vendored xterm),
+// `window.OMP_TERMINAL` and `window.OMP_KEYMAP` are looked up at call time,
+// not at load.
 // app/use-terminal.jsx destructures it at top level, so it must load
 // before it.
 (function () {
@@ -121,7 +123,7 @@
         else copySelection(term);
         return false;
       }
-      return !T.keymapShouldBypass(e);
+      return !window.OMP_KEYMAP.guestShouldBypass(e);
     });
     term.onData(onData);
     term.onResize(onResize);

@@ -2,8 +2,9 @@
 // tab's shell — when it spawns, in which folder, with which program, its
 // output ring and its status (`terminal_*` commands, `terminal://data|exit/
 // {id}` events). This file holds only view state: whether a tab's panel is
-// shown, what Rust last said about its shell, which keystrokes xterm must
-// hand back to the global keymap and which are its copy / paste chords.
+// shown, what Rust last said about its shell and which are its copy / paste
+// chords (which keystrokes xterm hands back to the global keymap is
+// app/keymap.js's `guestShouldBypass`).
 //
 // Panel state is `{ [sessionId]: { open, created, status, error } }`,
 // immutable: every transition returns a new object, or the same one when
@@ -25,8 +26,8 @@
 //
 // Exposes `window.OMP_TERMINAL`; an IIFE (AGENTS.md "IIFE rule") that calls
 // `window.OMP_KEYMAP.detectMac()` at load, so it loads after app/keymap.js
-// (its other OMP_KEYMAP lookups, and `shellLabel`'s
-// `OMP_PROJECT_NAV.basename`, happen at call time). design/terminal-panel.jsx
+// (its other OMP_KEYMAP lookups, and `shellLabel` / `shellMenu`'s
+// OMP_PATH_SETTING, happen at call time). design/terminal-panel.jsx
 // and app/use-terminal.jsx destructure it at top level, so it must load
 // before them.
 (function () {
@@ -128,9 +129,9 @@
   }
 
   // While xterm has focus, a keydown either goes to the shell or is handed
-  // back to the page, where the global keymap (use-keymap.jsx) handles it.
-  // The decision follows the *resolved* keymap, so rebinding an action in
-  // Settings → Keyboard changes what the terminal lets through.
+  // back to the page, where the global keymap (use-keymap.jsx) handles it —
+  // `OMP_KEYMAP.guestShouldBypass` decides, the same rule as the browser
+  // panel's page. These are the terminal's own clipboard chords.
   const IS_MAC = window.OMP_KEYMAP.detectMac();
 
   /**
@@ -150,73 +151,25 @@
     return null;
   }
 
-  /** The platform's copy / paste chords: always the terminal's. */
-  const RESERVED_MAC = new Set(["super+c", "super+v"]);
-  const RESERVED_OTHER = new Set(["ctrl+shift+c", "ctrl+shift+v"]);
-
-  /**
-   * True when xterm must hand this keydown back to the global keymap
-   * (`attachCustomKeyEventHandler` returns false for it, so it bubbles).
-   * A chord goes to the app iff it resolves (`OMP_KEYMAP.lookup`) to a
-   * global-scope action marked `fromTerminal` (switching tabs, leaving the
-   * shell), or the chord has the `super` modifier, or — off macOS — both
-   * `ctrl` and `shift`. Plain
-   * `ctrl+<key>` and `alt+<key>` stay the shell's (ctrl+w kills a word,
-   * ctrl+p is history), as do unbound chords and the platform's copy /
-   * paste chords. Chords are normalised exactly like the global keymap
-   * (`OMP_KEYMAP.chordFromEvent`), so shifted variants of the same
-   * physical key (e.g. Cmd+Shift+7 → "/" on German layouts) match too.
-   * @param {Pick<KeyboardEvent, "key"|"code"|"ctrlKey"|"shiftKey"|"altKey"|"metaKey"|"isComposing">} e
-   * @param {boolean} [isMac]
-   */
-  function keymapShouldBypass(e, isMac = IS_MAC) {
-    const keymap = window.OMP_KEYMAP;
-    const chord = keymap.chordFromEvent(e);
-    if (chord === null || (isMac ? RESERVED_MAC : RESERVED_OTHER).has(chord)) return false;
-    const id = keymap.lookup(chord);
-    if (id === null) return false;
-    const action = keymap.KEYMAP_ACTIONS.find((a) => a.id === id);
-    if (!action || action.scope !== "global") return false;
-    if (action.fromTerminal) return true;
-    const mods = chord.split("+").slice(0, -1);
-    if (mods.includes("super")) return true;
-    return !isMac && mods.includes("ctrl") && mods.includes("shift");
-  }
-
   /** `/bin/zsh` -> `zsh`; `C:\\Windows\\System32\\cmd.exe` -> `cmd`. */
-  function shellLabel(path) {
-    if (typeof path !== "string") return "shell";
-    return window.OMP_PROJECT_NAV.basename(path).replace(/\.exe$/i, "") || "shell";
-  }
-
-  /** Same program path, Windows drive/UNC paths ignoring case and `/` vs `\`
-   *  (a 0.7.0 setting typed as `C:\Windows\…` or `C:/Windows/…` names the
-   *  listed `C:\WINDOWS\…`). */
-  function samePath(a, b) {
-    const { normPath } = window.OMP_PROJECT_NAV;
-    return normPath(a) === normPath(b);
-  }
+  const shellLabel = (path) => window.OMP_PATH_SETTING.programName(path, "shell");
 
   /**
    * Tweaks → Terminal's shell button and menu for Rust's `TerminalSettings`
-   * (`{ shell, defaultShell, shells }`): `{ label, rows }`. `label` names the
-   * shell new terminals run (the stored one, else the default). `rows` are
-   * `{ name, hint, path, value, checked }`: `default` (value "", `hint` the
-   * default shell's name, so a row says what it runs), each installed shell,
-   * and the stored shell when it is none of them (set before, or picked with
-   * "other…"; `hint` "other", so it stands apart from a listed shell of the
-   * same name), so the menu always shows what is in use. `path` is the full
-   * program, for a tooltip. `value` is what `setTerminalShell` stores;
-   * exactly one row is checked.
+   * (`{ shell, defaultShell, shells }`): `OMP_PATH_SETTING.menu`'s
+   * `{ label, rows }`. `label` names the shell new terminals run (the stored
+   * one, else the default); the first row is `default` (`hint` the default
+   * shell's name, so a row says what it runs), then each installed shell.
+   * `value` is what `setTerminalShell` stores.
    */
   function shellMenu(settings) {
-    const shell = settings?.shell ?? "";
     const defaultShell = settings?.defaultShell ?? "";
-    const row = (name, path, value, hint = "") => ({ name, hint, path, value, checked: samePath(value, shell) });
-    const rows = [row("default", defaultShell, "", defaultShell ? shellLabel(defaultShell) : "")];
-    for (const s of settings?.shells ?? []) rows.push(row(s.name, s.path, s.path));
-    if (shell && !rows.some((r) => r.checked)) rows.push(row(shellLabel(shell), shell, shell, "other"));
-    return { label: shellLabel(shell || defaultShell), rows };
+    return window.OMP_PATH_SETTING.menu({
+      stored: settings?.shell ?? "",
+      name: shellLabel,
+      fallback: { name: "default", hint: defaultShell ? shellLabel(defaultShell) : "", path: defaultShell },
+      installed: settings?.shells ?? [],
+    });
   }
 
   /**
@@ -244,7 +197,6 @@
     shellLive,
     canRestart,
     entryOf,
-    keymapShouldBypass,
     clipboardAction,
     shellLabel,
     shellMenu,

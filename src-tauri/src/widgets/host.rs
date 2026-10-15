@@ -31,8 +31,8 @@ use std::time::Duration;
 use serde::ser::SerializeStruct as _;
 use serde::Serialize;
 
-use crate::agent::supervisor::ProcessSupervisor;
 use crate::recent_projects::now_ms;
+use crate::supervisor::ProcessSupervisor;
 use crate::widgets::config::{self, PluginEntry, Trigger};
 use crate::widgets::context::{self, PluginContext};
 use crate::widgets::run;

@@ -23,7 +23,10 @@
   // no-op, not something this change touches. `branch` and `tree` both open
   // the conversation-tree pane. A local name shadows the RPC command of the
   // same name/alias (desktop UI wins), so omp's terminal `/branch` and
-  // `/tree` pickers never run from the desktop.
+  // `/tree` pickers never run from the desktop, nor does omp's
+  // `/browser [headless|visible]` (its browser tool's mode switch: the
+  // desktop's `/browser` opens the panel instead, and answers those two
+  // arguments with a note — OMP_BROWSER.browserCommand).
   const LOCAL_COMMANDS = Object.freeze([
     { name: "plan",      hint: "draft a plan before writing code",             icon: "◇", group: "Mode"    },
     { name: "goal",      hint: "start a goal the agent works on until done",   icon: "◎", group: "Mode"    },
@@ -37,6 +40,7 @@
     { name: "thinking",  hint: "cycle thinking level",                         icon: "✶", group: "Agent"   },
     { name: "login",     hint: "authenticate with a model provider",           icon: "⊙", group: "Agent"   },
     { name: "todo",      hint: "open the kanban surface",                      icon: "▦", group: "View"    },
+    { name: "browser",   hint: "open the browser panel; /browser <url> loads a page", icon: "◍", group: "View"    },
     { name: "export",    hint: "export this session to HTML",                  icon: "⇪", group: "View"    },
     { name: "shortcuts", hint: "view and rebind keyboard shortcuts",           icon: "⌘", group: "View"    },
     { name: "tweaks",    hint: "open the Tweaks panel (look, layout, chat)",   icon: "⚙", group: "View"    },
@@ -325,6 +329,38 @@
     return isLeadingCommand(cmds, text) || invokesSkill(cmds, text);
   }
 
+  // Where a composer submit goes: `{ isCmd, via }`, `via` one of
+  //   "goal"     goal mode starts a goal with it (never a command)
+  //   "followUp" the follow-up chord queues it
+  //   "steer"    a turn is running
+  //   "prompt"   idle and connected
+  //   "local"    no connection: the draft is kept as a local bubble
+  // `text` is the typed draft, classified *before* browser annotations
+  // (page data) merge in, so a page can never turn a message into a
+  // command; a command carries no annotations (they wait for the next
+  // message), so `isCmd` also says whether chips ride along.
+  function routeSubmit(cmds, text, { goalMode = false, followUp = false, streaming = false, connected = false } = {}) {
+    const isCmd = isCommandInvocation(cmds, text);
+    let via;
+    if (goalMode && !isCmd) via = "goal";
+    else if (followUp) via = "followUp";
+    else if (streaming) via = "steer";
+    else if (connected) via = "prompt";
+    else via = "local";
+    return { isCmd, via };
+  }
+
+  // The RPC frame of a steer / follow-up (`kind` "steer" | "followUp"). A
+  // command goes as a `prompt` with omp's `streamingBehavior`: the
+  // dedicated `steer` / `follow_up` frames skip command and skill dispatch,
+  // so it would reach the model as literal text. Every frame is a literal
+  // `{ type: "…" }`: agent/mod.rs checks them against ALLOWED_COMMAND_TYPES.
+  function queuedFrame(kind, text, images, isCmd) {
+    if (isCmd) return { type: "prompt", message: text, images, streamingBehavior: kind };
+    if (kind === "steer") return { type: "steer", message: text, images };
+    return { type: "follow_up", message: text, images };
+  }
+
   window.OMP_SLASH = {
     LOCAL_COMMANDS,
     isDesktop,
@@ -336,5 +372,7 @@
     matchesQuery,
     insertText,
     isCommandInvocation,
+    routeSubmit,
+    queuedFrame,
   };
 })();
