@@ -6,7 +6,7 @@
    - Ambient rail: TokenGauge, ActivityRadar, subagents card, Minimap
    ═════════════════════════════════════════════════════════════════════ */
 
-const { Icon, TokenGauge, ActivityRadar, Sparkline, TOOL_META, ProfileMenu, DEFAULT_PROFILE_ID, SubagentRailCard, TabGroupChip, TabRunDot, TabLabel, RenameField, THINKING_LEVELS } = window;
+const { Icon, TokenGauge, ActivityRadar, Sparkline, TOOL_META, ProfileMenu, DEFAULT_PROFILE_ID, SubagentRailCard, TabGroupChip, TabRunDot, TabLabel, RenameField } = window;
 const { groupTabs } = window.OMP_PROJECT_NAV;
 
 // Thin wrappers around the shared `OMP_KEYMAP.hintFor`/`hintKeyFor` — same
@@ -179,19 +179,13 @@ function TabBar({
   );
 }
 
-// ── Status bar (footer): connection, model, tokens, todos, extension ─
-function StatusBar({ ctx, model, thinking, todoDone, todoTotal, onTodo, onModel, onTweaks, onChanges, onRules, approvalMode, onStats, onTree, onTerminal, terminalOpen, autosave, onAutosave }) {
-  const thinkLabel = THINKING_LEVELS[thinking]?.short ?? thinking ?? "—";
+// ── Status bar (footer): connection, tokens, todos, panels ──────────
+// The model and thinking level are not repeated here: the composer's
+// pills below the prompt box show (and change) both.
+function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRules, approvalMode, onStats, onTree, onTerminal, terminalOpen, autosave, onAutosave }) {
   return (
     <div className="status">
       <span className="status-cell"><span className="dot live" /> connected</span>
-      <span className="status-sep">·</span>
-      <button className="status-cell btn ghost" onClick={onModel} style={{ height: 20, padding: "0 6px" }}>
-        <span style={{ color: "var(--accent)" }}>{model.name}</span>
-        <Icon name="chev" size={9} color="var(--fg-4)" />
-      </button>
-      <span className="status-sep">·</span>
-      <span className="status-cell"><Icon name="thinking" size={10} color="var(--lilac)" /> {thinkLabel}</span>
       <span className="status-sep">·</span>
       <span className="status-cell mono">
         <span style={{ color: "var(--fg-3)" }}>{ctx.label}</span>

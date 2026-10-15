@@ -730,12 +730,9 @@ function App() {
                 </>)}
                 <StatusBar
                   ctx={liveCtx}
-                  model={model}
-                  thinking={thinkingLevel}
                   todoDone={todoCounts.done}
                   todoTotal={todoCounts.total}
                   onTodo={() => setPlanOpen(true)}
-                  onModel={() => openBridge("models")}
                   onChanges={() => setChangesOpen(true)}
                   onRules={() => setRulesOpen(true)}
                   approvalMode={approvalCell}

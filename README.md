@@ -64,7 +64,7 @@ Toggle plan mode (`Shift+Alt+P`, `/plan` or the composer pill) and the agent dra
 - Attach images from a file picker or paste them from the clipboard. Click an attached image to view it full size.
 - Prompt history: `↑` in an empty prompt box recalls earlier prompts (`↓` goes back), and `Ctrl+↑` opens a searchable picker.
 - Send while the agent is working to *steer* the current turn, or queue a follow-up with `Ctrl+Enter`.
-- Model picker and thinking level (`off · minimal · low · medium · high · xhigh`) are available from the composer, the status bar, or the keyboard.
+- Model picker and thinking level (`off · minimal · low · medium · high · xhigh`) are available from the composer or the keyboard.
 
 ![Command bridge (Ctrl+K)](screenshots/command-bridge.webp)
 

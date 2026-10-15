@@ -141,12 +141,9 @@ function App() {
               />
               <StatusBar
                 ctx={data.ctx}
-                model={model}
-                thinking={thinkingLevel}
                 todoDone={todoCounts.done}
                 todoTotal={todoCounts.total}
                 onTodo={() => setPlanOpen(true)}
-                onModel={() => setBridgeOpen(true)}
               />
             </main>
 
