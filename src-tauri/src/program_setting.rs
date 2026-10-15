@@ -148,14 +148,7 @@ pub fn is_executable_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tempdir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("omp-program-setting-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use crate::test_support::tempdir;
 
     /// Windows Explorer's "Copy as path" quotes the path; one surrounding
     /// pair is dropped, inner or unbalanced quotes stay.
@@ -188,7 +181,7 @@ mod tests {
 
     #[test]
     fn a_value_persists_and_other_keys_survive() {
-        let file = tempdir("persist").join("setting.json");
+        let file = tempdir("program-setting", "persist").join("setting.json");
         std::fs::write(&file, br#"{ "other": 1 }"#).unwrap();
         let setting = ProgramSetting::load(Some(file.clone()), "program");
         assert_eq!(setting.get(), "");
@@ -201,7 +194,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_value_writes_nothing() {
-        let file = tempdir("noop").join("setting.json");
+        let file = tempdir("program-setting", "noop").join("setting.json");
         ProgramSetting::load(Some(file.clone()), "program")
             .set("")
             .unwrap();
@@ -210,7 +203,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_file_reads_as_unset_and_is_never_overwritten() {
-        let dir = tempdir("corrupt");
+        let dir = tempdir("program-setting", "corrupt");
         for (name, content) in [
             ("bad.json", &b"{ not json"[..]),
             ("typed.json", br#"{ "program": 7 }"#),

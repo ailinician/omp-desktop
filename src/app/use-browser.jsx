@@ -18,6 +18,7 @@ let _ubChipSeq = 0;
 
 function useBrowser({ bridge, activeSessionId, sessionIds, open: shown, setOpen, tweaks, setTweak }) {
   const sid = activeSessionId || null;
+  // precedent:ignore — hook state declarations, alike in every component
   const [fullView, setFullView] = React.useState(false);
   const [state, setState] = React.useState(_UB_IDLE);
   const [tabs, setTabs] = React.useState(_UB_NO_TABS);

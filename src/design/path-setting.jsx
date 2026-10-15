@@ -66,6 +66,7 @@ function usePathSetting(bridge, api) {
 function PathPicker({ name, label, title, rows, disabled, error, save, pick }) {
   const [open, setOpen] = React.useState(false);
   const rootRef = React.useRef(null);
+  // precedent:ignore — the menu trigger/close pattern of the other popover menus, moved here from terminal-tweaks.jsx
   const menuRef = React.useRef(null);
   const triggerRef = React.useRef(null);
 

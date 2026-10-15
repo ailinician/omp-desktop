@@ -209,6 +209,8 @@ fn on_target_destroyed(core: &Core, target_id: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use serde_json::json;
@@ -242,28 +244,32 @@ mod tests {
 
     #[test]
     fn the_history_is_asked_again_once_the_page_stopped_loading() {
-        let mut asked = 0;
+        // Refused for as long as the commit lasts, longer than `Core::call`
+        // sends a refused command again.
+        let committing = Arc::new(AtomicBool::new(false));
+        let refusing = Arc::clone(&committing);
         let (core, _states, _sent) = fake_core(move |request| {
             if request["method"] != "Page.getNavigationHistory" {
                 return None;
             }
-            asked += 1;
-            match asked {
-                1 => None, // the switch's: one entry
-                2 => Some(cdp_error(request, "Not attached to an active page")),
-                _ => Some(cdp_result(
-                    request,
-                    json!({ "currentIndex": 1, "entries": [
-                        { "id": 1, "url": "about:blank" },
-                        { "id": 2, "url": "data:text/html,a" },
-                    ] }),
-                )),
+            if refusing.load(Ordering::SeqCst) {
+                return Some(cdp_error(request, "Not attached to an active page"));
             }
+            Some(cdp_result(
+                request,
+                json!({ "currentIndex": 1, "entries": [
+                    { "id": 1, "url": "about:blank" },
+                    { "id": 2, "url": "data:text/html,a" },
+                ] }),
+            ))
         });
         assert_eq!(core.switch_to("a"), Ok(()));
+        core.update_state(|s| s.can_back = false);
+        committing.store(true, Ordering::SeqCst);
         let committed = json!({ "frame": { "id": "a", "url": "data:text/html,a" } });
         on_page_event(&core, "Page.frameNavigated", &committed);
         assert!(!lock(&core.inner).state.can_back, "asked while committing");
+        committing.store(false, Ordering::SeqCst);
         on_page_event(
             &core,
             "Page.frameStoppedLoading",

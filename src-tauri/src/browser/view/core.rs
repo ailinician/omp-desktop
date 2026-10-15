@@ -4,6 +4,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -15,6 +16,14 @@ use super::emit::{BrowserEmit, Pick, ViewState};
 use super::events::{FollowSlot, InputItem};
 use super::frames::FrameFlow;
 use super::model::{Inner, Size};
+
+/// What Chromium answers a page command while the page commits a navigation
+/// to a new document, for a moment; the command did not run.
+const NOT_ATTACHED: &str = "Not attached to an active page";
+/// Sends of a page command Chromium refused that way, `NOT_ATTACHED_PAUSE`
+/// apart (about a quarter second in all).
+const NOT_ATTACHED_TRIES: u32 = 6;
+const NOT_ATTACHED_PAUSE: Duration = Duration::from_millis(50);
 
 pub(in crate::browser) struct Core {
     pub(super) sid: String,
@@ -80,16 +89,27 @@ impl Core {
         was_open
     }
 
+    /// A CDP command; a page command refused while its page commits a
+    /// navigation ([`NOT_ATTACHED`]) is sent again, so a click on back, a
+    /// switch or a resize right after a navigation still lands.
     pub(in crate::browser) fn call(
         &self,
         session: Option<&str>,
         method: &str,
         params: Value,
     ) -> Result<Value, String> {
-        self.client
-            .get()
-            .ok_or("cdp not connected")?
-            .call(session, method, params)
+        let client = self.client.get().ok_or("cdp not connected")?;
+        let mut tries = 1;
+        loop {
+            // Kept for a resend: the client consumes what it sends.
+            match client.call(session, method, params.clone()) {
+                Err(e) if session.is_some() && tries < NOT_ATTACHED_TRIES && e == NOT_ATTACHED => {
+                    tries += 1;
+                    thread::sleep(NOT_ATTACHED_PAUSE);
+                }
+                result => return result,
+            }
+        }
     }
 
     /// Send a command whose reply nobody reads; CDP keeps each session's
@@ -450,5 +470,42 @@ mod tests {
         );
         let sent = super::super::tests::sent_count(&sent, "Page.stopScreencast");
         assert_eq!(sent, 0, "not stopped for a size that did not apply");
+    }
+
+    #[test]
+    fn a_page_command_refused_while_the_page_commits_is_sent_again() {
+        let mut refusals = 2;
+        let (core, _states, sent) = super::super::tests::fake_core(move |request| {
+            (request["method"] == "Page.getNavigationHistory" && refusals > 0).then(|| {
+                refusals -= 1;
+                crate::browser::tests::cdp_error(request, NOT_ATTACHED)
+            })
+        });
+        lock(&core.inner).set_active("a", "sa");
+        assert!(core
+            .call_active("Page.getNavigationHistory", json!({}))
+            .is_ok());
+        let sent = super::super::tests::sent_count(&sent, "Page.getNavigationHistory");
+        assert_eq!(sent, 3, "two refusals, then the answer");
+    }
+
+    #[test]
+    fn other_errors_and_browser_commands_are_not_sent_again() {
+        let (core, _states, sent) =
+            super::super::tests::fake_core(|request| match request["method"].as_str() {
+                Some("Page.reload") => Some(crate::browser::tests::cdp_error(request, "boom")),
+                Some("Target.getTargets") => {
+                    Some(crate::browser::tests::cdp_error(request, NOT_ATTACHED))
+                }
+                _ => None,
+            });
+        lock(&core.inner).set_active("a", "sa");
+        assert!(core.call_active("Page.reload", json!({})).is_err());
+        assert!(core.call(None, "Target.getTargets", json!({})).is_err());
+        assert_eq!(super::super::tests::sent_count(&sent, "Page.reload"), 1);
+        assert_eq!(
+            super::super::tests::sent_count(&sent, "Target.getTargets"),
+            1
+        );
     }
 }

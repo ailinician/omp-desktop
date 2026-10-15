@@ -623,6 +623,52 @@ fn fake_chromium(
     port
 }
 
+/// An agent's browser WebSocket after [`agent_exchange`].
+struct AgentSocket {
+    _proxy: Proxy, // keeps the splice alive while the test talks
+    socket: TcpStream,
+    reported: Reported,
+    got: Vec<u8>,
+}
+
+/// Opens an agent's browser WebSocket through a fresh proxy in front of the
+/// fake Chromium on `up`: the upgrade head goes out with `first` (`split`:
+/// the frame in a write of its own), then the agent reads until `reply`'s
+/// text frame arrived. `client_push_delay_ms` slows the client-side feed of
+/// the connection (0: none).
+fn agent_exchange(
+    up: u16,
+    first: &[u8],
+    reply: &str,
+    split: bool,
+    client_push_delay_ms: u64,
+) -> AgentSocket {
+    let reported = Reported::default();
+    let proxy = Proxy::bind(Arc::new(move || Ok(up)), reported.callback()).unwrap();
+    proxy.set_client_push_delay_ms(client_push_delay_ms);
+    let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let head = upgrade("/devtools/browser/x");
+    if split {
+        socket.write_all(head.as_bytes()).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        socket.write_all(first).unwrap();
+    } else {
+        socket
+            .write_all(&[head.as_bytes(), first].concat())
+            .unwrap();
+    }
+    let got = read_until_ends_with(&mut socket, &text(reply));
+    AgentSocket {
+        _proxy: proxy,
+        socket,
+        reported,
+        got,
+    }
+}
+
 /// An agent that asks for a new page through a proxy in front of
 /// [`fake_chromium`], which sends `before` ahead of the reply; returns what
 /// the tap reported once the reply arrived and the bytes the agent got.
@@ -640,25 +686,13 @@ fn agent_creates_a_page(
         CREATE_REPLY,
         Duration::from_millis(100),
     );
-    let reported = Reported::default();
-    let proxy = Proxy::bind(Arc::new(move || Ok(up)), reported.callback()).unwrap();
-    let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    let head = upgrade("/devtools/browser/x");
-    if split {
-        s.write_all(head.as_bytes()).unwrap();
-        thread::sleep(Duration::from_millis(50));
-        s.write_all(&frame).unwrap();
-    } else {
-        s.write_all(&[head.as_bytes(), &frame].concat()).unwrap();
-    }
-    let got = read_until_ends_with(&mut s, &text(CREATE_REPLY));
+    let agent = agent_exchange(up, &frame, CREATE_REPLY, split, 0);
     // The tap is fed before the forward, but observes on its own thread.
     let _ = eventually(Duration::from_secs(1), || {
-        (!reported.all().is_empty()).then_some(())
+        (!agent.reported.all().is_empty()).then_some(())
     });
     thread::sleep(Duration::from_millis(100)); // nothing more arrives
-    (reported.all(), got)
+    (agent.reported.all(), agent.got)
 }
 
 #[test]
@@ -720,25 +754,12 @@ fn attach_then_navigate_at_once(split: bool, client_push_delay_ms: u64) -> Vec<S
         ATTACH_REPLY,
         Duration::ZERO,
     );
-    let reported = Reported::default();
-    let proxy = Proxy::bind(Arc::new(move || Ok(up)), reported.callback()).unwrap();
-    proxy.set_client_push_delay_ms(client_push_delay_ms);
-    let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-    let head = upgrade("/devtools/browser/x");
-    if split {
-        s.write_all(head.as_bytes()).unwrap();
-        thread::sleep(Duration::from_millis(50));
-        s.write_all(&attach).unwrap();
-    } else {
-        s.write_all(&[head.as_bytes(), &attach].concat()).unwrap();
-    }
-    read_until_ends_with(&mut s, &text(ATTACH_REPLY));
-    s.write_all(&masked_text(NAVIGATE)).unwrap();
+    let mut agent = agent_exchange(up, &attach, ATTACH_REPLY, split, client_push_delay_ms);
+    agent.socket.write_all(&masked_text(NAVIGATE)).unwrap();
     let _ = eventually(Duration::from_secs(3), || {
-        (!reported.all().is_empty()).then_some(())
+        (!agent.reported.all().is_empty()).then_some(())
     });
-    reported.all()
+    agent.reported.all()
 }
 
 #[test]

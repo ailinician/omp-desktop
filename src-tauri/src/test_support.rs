@@ -36,3 +36,32 @@ pub fn executable(path: &Path, content: &str) -> PathBuf {
     }
     path.to_path_buf()
 }
+
+/// A fresh, empty scratch directory `omp-<scope>-<name>-<pid>` in the temp
+/// dir. `scope` keeps the suites apart: their tests share one process.
+pub fn tempdir(scope: &str, name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("omp-{scope}-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// A [`tempdir`] removed with its content when dropped (also when the test
+/// fails).
+pub struct TempDir(PathBuf);
+
+impl TempDir {
+    pub fn new(scope: &str, name: &str) -> Self {
+        Self(tempdir(scope, name))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}

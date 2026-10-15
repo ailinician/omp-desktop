@@ -14,12 +14,9 @@ use tungstenite::Message;
 /// fixture creation through teardown; `lock` recovers after a test panics.
 pub(super) static CHROMIUM: Mutex<()> = Mutex::new(());
 
-/// A fresh, empty scratch directory for `name` (unique per test process).
+/// A fresh, empty scratch directory for `name`, in the browser suites' scope.
 pub(super) fn tempdir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("omp-browser-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    crate::test_support::tempdir("browser", name)
 }
 
 /// The user's home, as the app would resolve it; `None` when unset.
@@ -340,7 +337,42 @@ fn orphan_browser(profile: Option<&Path>, own_group: bool) -> std::process::Chil
     if own_group {
         command.process_group(0);
     }
-    command.spawn().unwrap()
+    let child = command.spawn().unwrap();
+    // `spawn` returns once the exec is under way, before the kernel
+    // publishes the new argv: until then the reaper reads the test binary's
+    // command line and rightly leaves the pid alone. A crashed run's
+    // browser has long been running; wait for that.
+    assert!(
+        eventually(Duration::from_secs(5), || shows_argv(child.id())
+            .then_some(()))
+        .is_some(),
+        "the child's argv is never published"
+    );
+    child
+}
+
+/// Whether `pid`'s command line, as the reaper reads it, is the
+/// [`orphan_browser`] shell's.
+#[cfg(target_os = "linux")]
+fn shows_argv(pid: u32) -> bool {
+    std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|argv| {
+        argv.windows(b"fake-chromium".len())
+            .any(|w| w == b"fake-chromium")
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn shows_argv(pid: u32) -> bool {
+    std::process::Command::new("/bin/ps")
+        .args(["-o", "command=", "-p"])
+        .arg(pid.to_string())
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("fake-chromium"))
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+const fn shows_argv(_pid: u32) -> bool {
+    true
 }
 
 /// Waits for `child` on a thread of its own (real orphans are reaped by
