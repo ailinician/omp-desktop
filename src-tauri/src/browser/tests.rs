@@ -67,7 +67,44 @@ pub(super) fn chromium_or_skip(test: &str) -> Option<PathBuf> {
         .launch_candidates()
         .and_then(|binaries| binaries.into_iter().next().ok_or_else(|| "none".to_owned()));
     let required = std::env::var_os("OMP_REQUIRE_CHROMIUM").is_some_and(|v| v == "1");
-    require_chromium(test, found, required)
+    let binary = require_chromium(test, found, required)?;
+    warm_up(&binary);
+    Some(binary)
+}
+
+/// Run `binary` to completion once per test process, before any test
+/// launches it: a machine's first Chromium start (cold disk cache, a virus
+/// scan of its files; seen on Windows CI runners) can take longer than the
+/// app's 10 s startup timeout, and a test would report that as a launch
+/// failure. Later starts are quick.
+fn warm_up(binary: &Path) {
+    static WARM: std::sync::Once = std::sync::Once::new();
+    WARM.call_once(|| {
+        let profile = tempdir("warm-up");
+        let mut flag = std::ffi::OsString::from("--user-data-dir=");
+        flag.push(&profile);
+        let started = std::process::Command::new(binary)
+            .args([
+                "--headless=new",
+                "--no-first-run",
+                "--dump-dom",
+                "about:blank",
+            ])
+            .arg(flag)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(mut child) = started {
+            // Bounded: a browser that never exits must not hang the suite.
+            let exited = eventually(Duration::from_secs(60), || child.try_wait().ok().flatten());
+            if exited.is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        let _ = std::fs::remove_dir_all(&profile);
+    });
 }
 
 /// [`chromium_or_skip`] over what discovery `found` and whether a browser
