@@ -1245,10 +1245,20 @@ fn setup(app: &tauri::App) {
         app.path().home_dir().ok(),
     ));
     app.manage(Arc::clone(&browser_store));
+    // Approval-rule store: project-scoped grants persist under
+    // <app_config_dir>/approval-rules/<project-hash>.json. No temp-dir
+    // fallback: another account could plant grants there that approve
+    // tools without asking; without a config dir they stay in memory.
+    app.manage(Arc::new(
+        resolved_config_dir
+            .as_deref()
+            .map_or_else(RuleBook::in_memory, |dir| {
+                RuleBook::new(dir.join("approval-rules"))
+            }),
+    ));
     // Falls back to the temp dir if the config dir can't be resolved
     // (e.g. a locked-down test environment) rather than failing
-    // startup — approval grants and profiles just won't survive a
-    // restart there.
+    // startup — profiles just won't survive a restart there.
     let config_dir = resolved_config_dir.unwrap_or_else(std::env::temp_dir);
     // Per-tab headless Chromium + the overlay omp reads its `cdpUrl` from.
     // It lives under the per-user app cache dir (user-owned, unlike a shared
@@ -1277,9 +1287,6 @@ fn setup(app: &tauri::App) {
     if let Err(e) = pruning {
         eprintln!("[omp-desktop] browser leftovers not pruned: {e}");
     }
-    // Approval-rule store: project-scoped grants persist under
-    // <app_config_dir>/approval-rules/<project-hash>.json.
-    app.manage(Arc::new(RuleBook::new(config_dir.join("approval-rules"))));
     // Profile list: <app_config_dir>/profiles.json.
     app.manage(Arc::new(profiles::ProfileStore::load(
         config_dir.join("profiles.json"),

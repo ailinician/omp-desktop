@@ -147,13 +147,20 @@ fn project_key(project_root: &Path) -> String {
     hex
 }
 
-/// Every on-disk path derived from one project root, plus the key they all
-/// share. Built once per public `RuleBook` method and threaded down, so the
-/// `canonicalize()` syscall and SHA-256 behind [`project_key`] run once per
-/// call instead of once per derived path — previously four to six times for
-/// a single `grant`.
+/// Every per-project location derived from one project root, plus the key
+/// they share. Built once per public `RuleBook` method and threaded down, so
+/// the `canonicalize()` syscall and SHA-256 behind [`project_key`] run once
+/// per call instead of once per derived path — previously four to six times
+/// for a single `grant`.
 struct ProjectPaths {
     key: String,
+    /// `None` for an [`RuleBook::in_memory`] book: the project's rules live
+    /// only in the cache, keyed by `key`.
+    files: Option<ProjectFiles>,
+}
+
+/// The on-disk files of one project's rules (see [`RuleBook::project_paths`]).
+struct ProjectFiles {
     rules: PathBuf,
     snapshots: PathBuf,
     lock: PathBuf,
@@ -207,9 +214,12 @@ fn humantime_utc(secs: u64) -> String {
 /// Project rules are lazily loaded from disk on first access per project
 /// and cached in memory thereafter; a read error (missing/corrupt file) is
 /// treated as an empty rule set rather than failing the caller — fail
-/// closed toward "no grants", never toward blocking the whole app.
+/// closed toward "no grants", never toward blocking the whole app. An
+/// [`Self::in_memory`] book has no disk at all: its project rules last for
+/// the app run.
 pub struct RuleBook {
-    config_root: PathBuf,
+    /// `None`: no private per-user directory to keep project rules in.
+    config_root: Option<PathBuf>,
     project_rules: Mutex<HashMap<String, Vec<Rule>>>,
     session_rules: Mutex<HashMap<String, HashSet<String>>>,
 }
@@ -217,8 +227,21 @@ pub struct RuleBook {
 impl RuleBook {
     /// `config_root`: directory under which each project's rules file is
     /// stored, e.g. `<app_config_dir>/approval-rules`. Created lazily on
-    /// first write; safe to pass a path that doesn't exist yet.
+    /// first write; safe to pass a path that doesn't exist yet. It must be
+    /// private to the user: every rules file in it is standing consent.
     pub fn new(config_root: PathBuf) -> Self {
+        Self::with_root(Some(config_root))
+    }
+
+    /// A book that never reads or writes a file: project rules are kept in
+    /// memory for the app run. For when the app config dir can't be
+    /// resolved — a shared fallback such as the temp dir would let another
+    /// local account plant rules files there that approve tools for us.
+    pub fn in_memory() -> Self {
+        Self::with_root(None)
+    }
+
+    fn with_root(config_root: Option<PathBuf>) -> Self {
         Self {
             config_root,
             project_rules: Mutex::new(HashMap::new()),
@@ -240,16 +263,16 @@ impl RuleBook {
     ///   the lock protects the file).
     fn project_paths(&self, project_root: &Path) -> ProjectPaths {
         let key = project_key(project_root);
-        ProjectPaths {
-            rules: self.config_root.join(format!("{key}.json")),
-            snapshots: self.config_root.join(format!("{key}.snapshots")),
-            lock: self.config_root.join(format!("{key}.lock")),
-            key,
-        }
+        let files = self.config_root.as_deref().map(|root| ProjectFiles {
+            rules: root.join(format!("{key}.json")),
+            snapshots: root.join(format!("{key}.snapshots")),
+            lock: root.join(format!("{key}.lock")),
+        });
+        ProjectPaths { key, files }
     }
 
-    fn snapshot_ring(paths: &ProjectPaths) -> json_store::SnapshotRing {
-        json_store::SnapshotRing::new(paths.snapshots.clone(), 8)
+    fn snapshot_ring(files: &ProjectFiles) -> json_store::SnapshotRing {
+        json_store::SnapshotRing::new(files.snapshots.clone(), 8)
     }
 
     /// Load (or return the cached copy of) a project's persisted rules. A
@@ -289,12 +312,16 @@ impl RuleBook {
             }
         }
 
-        let raw = std::fs::read(&paths.rules).ok().and_then(|bytes| {
+        // In memory only, a project the cache doesn't hold has no rules.
+        let Some(files) = &paths.files else {
+            return f(&[]);
+        };
+        let raw = std::fs::read(&files.rules).ok().and_then(|bytes| {
             if serde_json::from_slice::<ProjectRulesFile>(&bytes).is_ok() {
                 Some(bytes)
             } else {
                 // File exists but is corrupt: only now does the ring apply.
-                Self::snapshot_ring(paths).restore_latest().ok().flatten()
+                Self::snapshot_ring(files).restore_latest().ok().flatten()
             }
         });
         let rules: Vec<Rule> = raw
@@ -333,7 +360,7 @@ impl RuleBook {
     /// later corruption of the primary file could resurrect an
     /// already-revoked grant — snapshotting the incoming content keeps the
     /// ring's latest entry always in sync with the latest legitimate write.
-    fn persist_project_rules(paths: &ProjectPaths, rules: &[Rule]) -> Result<(), String> {
+    fn persist_project_rules(files: &ProjectFiles, rules: &[Rule]) -> Result<(), String> {
         let file = ProjectRulesFile {
             version: RULES_FILE_VERSION,
             rules: rules
@@ -345,30 +372,41 @@ impl RuleBook {
                 .collect(),
         };
         let bytes = serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())?;
-        if let Some(dir) = paths.rules.parent() {
+        if let Some(dir) = files.rules.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         // Best-effort — a failed snapshot must never block the actual
         // write, it only narrows future recovery options.
-        let _ = Self::snapshot_ring(paths).snapshot(&bytes);
-        json_store::write_atomic(&paths.rules, &bytes).map_err(|e| e.to_string())
+        let _ = Self::snapshot_ring(files).snapshot(&bytes);
+        json_store::write_atomic(&files.rules, &bytes).map_err(|e| e.to_string())
     }
 
     /// Read-modify-write a project's rules under the advisory lock: load,
     /// apply `mutate`, persist, and refresh the in-memory cache. `grant` and
     /// `revoke` differ only in `mutate`, so the lock/persist/cache-refresh
     /// sequence — the part that is easy to get subtly wrong — lives here
-    /// once rather than being duplicated per operation.
+    /// once rather than being duplicated per operation. In memory only, the
+    /// cache entry is the whole state and is changed under the cache lock.
     fn mutate_project_rules(
         &self,
         project_root: &Path,
         mutate: impl FnOnce(&mut Vec<Rule>),
     ) -> Result<(), String> {
         let paths = self.project_paths(project_root);
-        json_store::with_lock_str(&paths.lock, || {
+        let Some(files) = &paths.files else {
+            mutate(
+                self.project_rules
+                    .lock()
+                    .map_err(|_| "approval rules unavailable".to_string())?
+                    .entry(paths.key)
+                    .or_default(),
+            );
+            return Ok(());
+        };
+        json_store::with_lock_str(&files.lock, || {
             let mut rules = self.load_project_rules(&paths);
             mutate(&mut rules);
-            Self::persist_project_rules(&paths, &rules)?;
+            Self::persist_project_rules(files, &rules)?;
             if let Ok(mut cache) = self.project_rules.lock() {
                 cache.insert(paths.key.clone(), rules);
             }
@@ -508,6 +546,13 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir
+    }
+
+    fn rules_file(book: &RuleBook, project: &Path) -> PathBuf {
+        book.project_paths(project)
+            .files
+            .expect("a disk-backed book")
+            .rules
     }
 
     #[test]
@@ -719,7 +764,7 @@ mod tests {
         let dir = scratch_dir();
         let project = scratch_dir();
         let book = RuleBook::new(dir);
-        std::fs::write(book.project_paths(&project).rules, b"not json").unwrap();
+        std::fs::write(rules_file(&book, &project), b"not json").unwrap();
         assert!(!book.is_granted("sess-a", Some(&project), "bash"));
     }
 
@@ -738,7 +783,7 @@ mod tests {
         // [bash] alone — either way the ring has a non-empty entry now.
         book.grant("sess-a", Some(&project), "read", RuleScope::Project)
             .unwrap();
-        std::fs::remove_file(book.project_paths(&project).rules).unwrap();
+        std::fs::remove_file(rules_file(&book, &project)).unwrap();
         // Fresh instance so the in-memory cache can't mask the on-disk state.
         let book2 = RuleBook::new(dir);
         assert!(!book2.is_granted("sess-a", Some(&project), "bash"));
@@ -761,7 +806,7 @@ mod tests {
             .unwrap();
         book.revoke("sess-a", Some(&project), "bash", RuleScope::Project)
             .unwrap();
-        std::fs::write(book.project_paths(&project).rules, b"not json").unwrap();
+        std::fs::write(rules_file(&book, &project), b"not json").unwrap();
         let book2 = RuleBook::new(dir);
         assert!(!book2.is_granted("sess-a", Some(&project), "bash"));
     }
@@ -776,6 +821,32 @@ mod tests {
             .unwrap();
         assert!(book.is_granted("sess-a", Some(&project_a), "bash"));
         assert!(!book.is_granted("sess-a", Some(&project_b), "bash"));
+    }
+
+    #[test]
+    fn in_memory_project_grant_applies_per_project_until_revoked() {
+        let project_a = scratch_dir();
+        let project_b = scratch_dir();
+        let book = RuleBook::in_memory();
+        book.grant("sess-a", Some(&project_a), "bash", RuleScope::Project)
+            .unwrap();
+        assert!(book.is_granted("other-session", Some(&project_a), "bash"));
+        assert!(!book.is_granted("sess-a", Some(&project_b), "bash"));
+        let rules = book.list("sess-a", Some(&project_a));
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].scope, RuleScope::Project);
+        book.revoke("sess-a", Some(&project_a), "bash", RuleScope::Project)
+            .unwrap();
+        assert!(!book.is_granted("sess-a", Some(&project_a), "bash"));
+    }
+
+    #[test]
+    fn in_memory_project_grant_dies_with_the_book() {
+        let project = scratch_dir();
+        RuleBook::in_memory()
+            .grant("sess-a", Some(&project), "bash", RuleScope::Project)
+            .unwrap();
+        assert!(!RuleBook::in_memory().is_granted("sess-a", Some(&project), "bash"));
     }
 
     #[test]
