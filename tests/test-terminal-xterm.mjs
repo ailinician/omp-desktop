@@ -82,6 +82,9 @@ function make({ restart = () => false } = {}) {
 check("createXterm: options, OSC 8 swallowed, fit addon, wiring", () => {
   const { term, fit, seen } = make();
   assert.equal(term.options.fontSize, 14);
+  assert.equal(term.options.fontFamily, X.fontFamily());
+  assert.match(term.options.fontFamily, /Cascadia Code/);
+  assert.match(term.options.fontFamily, /Microsoft YaHei UI/);
   assert.deepEqual(term.options.theme, { background: "#000" });
   assert.equal(term.options.allowProposedApi, false);
   assert.equal(term.options.scrollback, 5000);

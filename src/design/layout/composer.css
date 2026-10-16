@@ -94,8 +94,9 @@
   transition: border-color 160ms;
 }
 .composer-row:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.composer-input { flex: 1; padding: 4px 4px 4px 4px; }
+.composer-input { flex: 1; padding: 1px 4px; }
 .composer-input textarea {
+  display: block;
   width: 100%;
   min-height: 22px; max-height: 180px;
   overflow-y: hidden;

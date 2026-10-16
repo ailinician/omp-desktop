@@ -36,7 +36,8 @@ const {
 } = window.OMP_TERMINAL;
 const { pruneEntries: _UT_pruneEntries } = window.OMP_SESSION_UI;
 const {
-  SKIPPED_LINE: _UT_SKIPPED, exitLine: _UT_exitLine, failLine: _UT_failLine, theme: _UT_theme,
+  SKIPPED_LINE: _UT_SKIPPED, exitLine: _UT_exitLine, failLine: _UT_failLine,
+  fontFamily: _UT_fontFamily, theme: _UT_theme,
   applyWindowsPty: _UT_applyWindowsPty, createXterm: _UT_createXterm, copySelection: _UT_copySelection,
 } = window.OMP_TERMINAL_XTERM;
 const {
@@ -202,6 +203,7 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
     // `rec` (declared below) exists by the time any of these callbacks runs.
     const { term, fit: fitAddon } = _UT_createXterm({
       fontSize: fontSizeRef.current,
+      fontFamily: _UT_fontFamily(),
       theme: _UT_theme(),
       tryRestart: () => {
         if (!_UT_canRestart(_UT_entryOf(stateRef.current, sid), rec.opened)) return false;
@@ -325,6 +327,7 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
   React.useEffect(() => {
     for (const [sid, rec] of recs.current) {
       rec.term.options.theme = _UT_theme();
+      rec.term.options.fontFamily = _UT_fontFamily();
       rec.term.options.fontSize = fontSize;
       fit(sid);
     }

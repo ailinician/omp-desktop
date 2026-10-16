@@ -543,6 +543,9 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const bridgeKeyHint = hintKeyFor("desktop.commands.open", "K");
   const abortHint = hintFor("app.interrupt", "⎋");
   const cycleThinkingHint = hintFor("app.thinking.cycle", "⇧Tab");
+  const isMac = window.OMP_KEYMAP ? window.OMP_KEYMAP.detectMac() : false;
+  const enterKey = isMac ? "↵" : "Enter";
+  const newlineKey = isMac ? "⇧↵" : "Shift+Enter";
 
   return (
     <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}${dropActive ? " drop-on" : ""}`}
@@ -640,8 +643,8 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
                 : planMode && !isStreaming
                 ? (microcopy?.planTip ?? "describe what to build, or give feedback on the plan…")
                 : isStreaming
-                  ? microcopy?.streamingTip
-                  : (microcopy?.paletteTip ?? `what should we ship?  ·  / for commands${bridgeHint ? `  ·  ${bridgeHint} for the bridge` : ""}`)
+                  ? (microcopy?.streamingTip ?? `Press ${abortHint || "Esc"} to interrupt — your cursor is in the room.`)
+                  : (microcopy?.paletteTip ?? `type / to give orders${bridgeHint ? ` · ${bridgeHint} opens the bridge` : ""}`)
             }
             value={text}
             onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart); }}
@@ -721,8 +724,8 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
         <span className="mono" style={{ color: "var(--fg-4)", fontSize: "var(--d-text-xs)" }}>
           {[
             ...(isStreaming && steerable
-              ? [goalMode ? "↵ start goal" : "↵ steer"]
-              : [goalMode ? "↵ start goal" : "↵ send", "⇧↵ newline"]),
+              ? [goalMode ? `${enterKey} start goal` : `${enterKey} steer`]
+              : [goalMode ? `${enterKey} start goal` : `${enterKey} send`, `${newlineKey} newline`]),
             // Dropped entirely when unbound rather than showing a keyless
             // "abort" segment that advertises a shortcut that isn't there.
             ...(abortHint ? [`${abortHint} abort`] : []),

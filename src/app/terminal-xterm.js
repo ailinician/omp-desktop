@@ -10,7 +10,7 @@
 // - `applyWindowsPty(term, status)`: Rust's ConPTY info onto the instance.
 // - `copySelection(term)`: the selection to the clipboard (ctrl+shift+c,
 //   the panel's right-click).
-// - `theme()`: xterm colours from the active theme's CSS variables.
+// - `theme()`, `fontFamily()`: xterm colours and `--font-mono` stack from the active theme's CSS variables.
 // - `exitLine(code)`, `failLine(error)`, `SKIPPED_LINE`: what the xterm shows
 //   for an exited shell, a failed start, and output Rust's ring dropped.
 //
@@ -22,6 +22,8 @@
 // before it.
 (function () {
   const SKIPPED_LINE = "\r\n\x1b[2m[output skipped]\x1b[0m\r\n";
+  const DEFAULT_FONT_FAMILY =
+    '"JetBrains Mono", "Berkeley Mono", ui-monospace, "SF Mono", Menlo, "Cascadia Mono", "Cascadia Code", Consolas, "Microsoft YaHei UI", monospace';
 
   function exitLine(code) {
     const label = code == null ? "" : ` (code ${code})`;
@@ -42,6 +44,13 @@
       cursor: v("--accent", "#8AF0C8"),
       selectionBackground: v("--accent-soft", "rgba(138, 240, 200, 0.25)"),
     };
+  }
+
+  /** xterm font stack from the active theme's `--font-mono` CSS variable. */
+  function fontFamily() {
+    if (typeof document === "undefined" || !document.documentElement) return DEFAULT_FONT_FAMILY;
+    const css = getComputedStyle(document.documentElement);
+    return css.getPropertyValue("--font-mono").trim() || DEFAULT_FONT_FAMILY;
   }
 
   /**
@@ -92,10 +101,10 @@
    * copy the selection and paste; `preventDefault` keeps the keymap and the
    * WebView's own paste out of them. macOS keeps native ⌘C / ⌘V.
    */
-  function createXterm({ fontSize, theme: colours, tryRestart, onData, onResize }) {
+  function createXterm({ fontSize, fontFamily: family = fontFamily(), theme: colours, tryRestart, onData, onResize }) {
     const T = window.OMP_TERMINAL;
     const term = new window.Terminal({
-      scrollback: 5000, fontSize, theme: colours, allowProposedApi: false, cursorBlink: true,
+      scrollback: 5000, fontSize, fontFamily: family, theme: colours, allowProposedApi: false, cursorBlink: true,
     });
     // OSC 8 hyperlinks are on by default in xterm 6, and every one a program
     // prints keeps an invisible link entry for as long as its cells live —
@@ -135,6 +144,7 @@
     exitLine,
     failLine,
     theme,
+    fontFamily,
     applyWindowsPty,
     createXterm,
     copySelection,

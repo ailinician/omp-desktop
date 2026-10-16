@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Typography on Windows: `--font-sans`, `--font-mono` and `--font-display` now include Windows system UI and monospace fallbacks (`Segoe UI Variable`, `Segoe UI`, `Cascadia Mono`, `Cascadia Code`, `Consolas`, `Microsoft YaHei UI`) instead of falling straight through macOS-only fonts to `Arial` or `SimSun`, and the terminal panel (`xterm.js`) now inherits `--font-mono`.
+
 ## [0.10.0] - 2026-10-15
 
 ### Added

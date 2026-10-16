@@ -36,8 +36,6 @@
     ctx: { used: 0, total: 200000, pct: 0, label: "0 / 200k", cost: "$0.00", tokensPerSec: 0 },
     microcopy: {
       empty:        "Hand me a project. I'll set the table.",
-      streamingTip: "Press ⎋ to interrupt — your cursor is in the room.",
-      paletteTip:   "type / to give orders · ⌘K opens the bridge",
       planTip:      "describe what to build, or give feedback on the plan…",
       todoEmpty:    "no plan yet. think out loud below.",
       radarHint:    "agent has been busy — last 60 seconds",
