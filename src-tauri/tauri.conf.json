@@ -54,7 +54,8 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "infoPlist": "packaging/Info.plist"
+      "infoPlist": "packaging/Info.plist",
+      "signingIdentity": "-"
     },
     "linux": {
       "deb": {
