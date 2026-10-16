@@ -23,7 +23,7 @@
 (function () {
   const SKIPPED_LINE = "\r\n\x1b[2m[output skipped]\x1b[0m\r\n";
   const DEFAULT_FONT_FAMILY =
-    '"JetBrains Mono", "Berkeley Mono", ui-monospace, "SF Mono", Menlo, "Cascadia Mono", "Cascadia Code", Consolas, "Microsoft YaHei UI", monospace';
+    '"JetBrains Mono", "Berkeley Mono", "SF Mono", Menlo, "Cascadia Mono", "Cascadia Code", Consolas, "Microsoft YaHei UI", ui-monospace, monospace';
 
   function exitLine(code) {
     const label = code == null ? "" : ` (code ${code})`;
