@@ -1,10 +1,12 @@
 use crate::approval_mode::ApprovalMode;
-use crate::child_path::apply_child_path;
+use crate::child_path::trusted_child_path;
+use crate::program_setting::is_executable_file;
+use std::ffi::{OsStr, OsString};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 /// Windows: prevent a console window from flashing when we spawn omp.exe
 /// (or a widget plugin) from a GUI-subsystem parent. omp speaks JSON-RPC
@@ -17,91 +19,95 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Candidate binary names tried in order. Explicit `.exe` first on Windows
-/// because some systems have unusual PATHEXT handling.
-const CANDIDATES: &[&str] = if cfg!(windows) {
-    &["omp.exe", "omp"]
-} else {
-    &["omp"]
-};
+/// omp's file name in a PATH folder. Windows: only `omp.exe` — `Command`
+/// appended `.exe` to a bare `omp` anyway, so nothing else ever ran.
+const OMP_FILE: &str = if cfg!(windows) { "omp.exe" } else { "omp" };
 
-/// Build a `Command` for candidate binary `name` with every cross-cutting
-/// concern any bare invocation of omp needs applied uniformly: the
-/// launcher-PATH augmentation ([`apply_child_path`]), the
-/// profile-env-var strip ([`sanitize_child_env`] — without it an
-/// inherited `OMP_PROFILE`/`PI_PROFILE` silently redirects the child to
-/// one named profile's tree instead of whatever this call intends), an
-/// explicit closed-stdin default, and (Windows) `CREATE_NO_WINDOW` so a
-/// GUI-subsystem parent spawning a console-subsystem binary doesn't flash
-/// a console window.
+/// The omp binary every run uses, and the PATH it runs with.
 ///
-/// The `.stdin(Stdio::null())` default only matters for a `.spawn()`-based
-/// caller: `Command::spawn()`/`.status()` default to *inheriting* the
-/// parent's stdin, where a child that tries to read from it could block —
-/// concretely reachable under `tauri dev`, where the parent's stdin is
-/// the terminal, though a Finder/launchd/`.desktop`-launched release
-/// build's stdin is typically already closed or `/dev/null`.
-/// [`spawn_candidate_output`]'s `.output()` call needs no such default —
-/// per `Command::output()`'s own documented behavior, it doesn't inherit
-/// stdin *by default* (i.e. with no `.stdin()` set at all), closing the
-/// stream immediately if the child attempts to read it. Set uniformly
-/// here anyway, both because [`spawn_omp`] uses `.spawn()` and overrides
-/// it to `Stdio::piped()` for the RPC session's own use (this default
-/// just gets replaced, not fought), and so no future `.spawn()`-based
-/// caller can forget it.
-///
-/// Shared by [`spawn_omp`] and [`spawn_candidate_output`] (the latter,
-/// in turn, by [`check_omp_version`] and `omp_cli::run` — the last is
-/// outside this module, which is why `spawn_candidate_output` is `pub`)
-/// so none of them can duplicate — or silently drift from — this list.
-fn omp_command(name: &str) -> Command {
-    let mut cmd = Command::new(name);
-    cmd.stdin(Stdio::null());
-    apply_child_path(&mut cmd);
-    sanitize_child_env(&mut cmd);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd
+/// Located once per run as an absolute path and spawned by that path, never
+/// by a bare name: a session starts in the project folder, and a bare `omp`
+/// would be looked up through any empty or relative PATH entry *there*, so
+/// a project could ship its own `omp`. The PATH is
+/// [`trusted_child_path`] — the same absolute folders the lookup searched,
+/// and what omp inherits, so a `#!/usr/bin/env` interpreter (an npm-installed
+/// omp) isn't resolved inside the project either.
+struct Omp {
+    binary: PathBuf,
+    path: Option<OsString>,
 }
 
-/// Run `omp <args>` to completion via the first candidate binary name that
-/// can actually be spawned, returning its captured output regardless of
-/// exit status — each caller decides how to interpret a non-zero exit;
-/// this only decides *which binary* answered. Moves on to the next
-/// [`CANDIDATES`] entry only for an error kind that actually means the
-/// binary couldn't be launched (`NotFound`, `PermissionDenied`) — not on
-/// every error `.output()` can return: its own docs also report a
-/// post-spawn pipe-read or `wait()` failure the same way, and retrying
-/// *that* against the next candidate name would re-run a binary that did
-/// already execute (on Windows, re-syncing `omp stats`' warehouse a
-/// second time). A found binary's non-zero *exit status* is a separate,
-/// successful `Ok(Output)` from `.output()`'s own perspective and is
-/// always returned as-is, never retried.
-///
-/// Shared by [`check_omp_version`] and `omp_cli::run` (`omp stats`,
-/// `omp config`; outside this module, hence `pub`) — `check_omp_version`
-/// and `stats::fetch` used to run their own copy of this exact loop.
-pub fn spawn_candidate_output<S: AsRef<std::ffi::OsStr>>(
-    args: &[S],
-) -> Result<std::process::Output, String> {
-    let mut last_err = None;
-    for name in CANDIDATES {
-        let mut cmd = omp_command(name);
-        cmd.args(args);
-        match cmd.output() {
-            Ok(output) => return Ok(output),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-                ) =>
-            {
-                last_err = Some(format!("failed to run {name}: {e}"));
-            }
-            Err(e) => return Err(format!("failed to run {name}: {e}")),
-        }
+impl Omp {
+    fn locate() -> Result<Self, String> {
+        let path = trusted_child_path();
+        let binary = path
+            .as_deref()
+            .and_then(|path| find_program(path, OMP_FILE, is_executable_file))
+            .ok_or_else(|| {
+                "omp was not found in any absolute PATH folder (relative entries are ignored). \
+                 Make sure omp is installed and on PATH."
+                    .to_string()
+            })?;
+        Ok(Self { binary, path })
     }
-    Err(last_err.unwrap_or_else(|| "no omp candidates configured".to_string()))
+
+    /// A `Command` for this binary with every cross-cutting concern a run of
+    /// omp needs applied uniformly: the trusted PATH, the profile-env-var
+    /// strip ([`sanitize_child_env`] — without it an inherited
+    /// `OMP_PROFILE`/`PI_PROFILE` silently redirects the child to one named
+    /// profile's tree instead of whatever this call intends), an explicit
+    /// closed-stdin default, and (Windows) `CREATE_NO_WINDOW` so a
+    /// GUI-subsystem parent spawning a console-subsystem binary doesn't
+    /// flash a console window.
+    ///
+    /// The `.stdin(Stdio::null())` default only matters for a
+    /// `.spawn()`-based caller: `Command::spawn()`/`.status()` default to
+    /// *inheriting* the parent's stdin, where a child that tries to read
+    /// from it could block — concretely reachable under `tauri dev`, where
+    /// the parent's stdin is the terminal. [`omp_output`]'s `.output()` would
+    /// not inherit it anyway; [`spawn_omp`] overrides it with a pipe.
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(&self.binary);
+        cmd.stdin(Stdio::null());
+        if let Some(path) = &self.path {
+            cmd.env("PATH", path);
+        }
+        sanitize_child_env(&mut cmd);
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd
+    }
+
+    /// Run `omp <args>` to completion, returning its captured output
+    /// regardless of exit status — each caller decides how to interpret a
+    /// non-zero exit.
+    fn output<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<std::process::Output, String> {
+        self.command()
+            .args(args)
+            .output()
+            .map_err(|e| format!("failed to run {}: {e}", self.binary.display()))
+    }
+}
+
+/// The first `name` that `is_executable` accepts in an absolute folder of
+/// `path`, in PATH order. Empty and relative entries are skipped here too,
+/// not only by [`trusted_child_path`]: they would resolve against the
+/// working directory.
+fn find_program(
+    path: &OsStr,
+    name: &str,
+    is_executable: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable(candidate))
+}
+
+/// Run `omp <args>` to completion (see [`Omp::output`]). Used by
+/// `omp_cli::run` (`omp stats`, `omp config`).
+pub fn omp_output<S: AsRef<OsStr>>(args: &[S]) -> Result<std::process::Output, String> {
+    Omp::locate()?.output(args)
 }
 
 // ── omp version floor ───────────────────────────────────────────────────────
@@ -114,11 +120,13 @@ pub fn spawn_candidate_output<S: AsRef<std::ffi::OsStr>>(
 /// reply").
 const MIN_OMP_VERSION: [u32; 3] = [18, 4, 11];
 
-/// Set once an `omp --version` check passed. Only a pass is remembered: after
-/// a refusal the next tab start asks again, so an `omp update` takes effect
-/// without restarting the app. A binary replaced by an older one after a pass
-/// goes unnoticed until the next launch.
-static VERSION_OK: AtomicBool = AtomicBool::new(false);
+/// The binary whose `omp --version` check passed. Only a pass is
+/// remembered, and only for that path: after a refusal the next tab start
+/// asks again, so an `omp update` takes effect without restarting the app,
+/// and a PATH change that finds another omp is checked anew. A binary
+/// replaced in place by an older one after a pass goes unnoticed until the
+/// next launch.
+static VERSION_OK: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// `[major, minor, patch]` from one line of `omp --version` output
 /// (`omp/18.5.1`). A leading `v` and a pre-release or build suffix
@@ -169,15 +177,16 @@ fn version_refusal(output: &str) -> Option<String> {
 
 /// Refuse to spawn an omp older than [`MIN_OMP_VERSION`]: it would start,
 /// and then the RPC commands the frontend sends would fail one by one. Runs
-/// `omp --version` through the same candidates and environment as the real
-/// spawn. When no candidate can be run at all the check stands aside and the
-/// spawn fails with the real reason — a missing omp is a PATH problem, not an
-/// upgrade requirement.
-fn check_omp_version() -> Result<(), String> {
-    if VERSION_OK.load(Ordering::Relaxed) {
+/// `--version` on the very binary the session spawns. When it can't be run
+/// at all the check stands aside and the spawn fails with the real reason.
+fn check_omp_version(omp: &Omp) -> Result<(), String> {
+    if VERSION_OK
+        .lock()
+        .is_ok_and(|ok| ok.as_deref() == Some(omp.binary.as_path()))
+    {
         return Ok(());
     }
-    let output = match spawn_candidate_output(&["--version"]) {
+    let output = match omp.output(&["--version"]) {
         Ok(output) => output,
         Err(e) => {
             eprintln!("[omp-desktop] version check skipped: {e}");
@@ -192,7 +201,9 @@ fn check_omp_version() -> Result<(), String> {
     if let Some(refusal) = version_refusal(&text) {
         return Err(refusal);
     }
-    VERSION_OK.store(true, Ordering::Relaxed);
+    if let Ok(mut ok) = VERSION_OK.lock() {
+        *ok = Some(omp.binary.clone()); // the cache owns its copy; `omp` is borrowed
+    }
     Ok(())
 }
 
@@ -331,8 +342,9 @@ fn sanitize_child_env(cmd: &mut Command) {
     cmd.env_remove("PI_PROFILE");
 }
 
-/// Spawn omp for a live session in `rpc-ui` mode (see `omp_args`), once
-/// [`check_omp_version`] has confirmed the binary meets [`MIN_OMP_VERSION`].
+/// Spawn omp for a live session in `rpc-ui` mode (see `omp_args`), by the
+/// absolute path [`Omp::locate`] found and [`check_omp_version`] confirmed
+/// meets [`MIN_OMP_VERSION`].
 /// If `resume` is specified, `--resume=<path_or_id>` is passed to resume an
 /// existing session (a single token, not two separate argv entries — see
 /// `omp_args` for why). Returns the child alongside a
@@ -346,54 +358,35 @@ pub(super) fn spawn_omp(
     mode: ApprovalMode,
     config: Option<&Path>,
 ) -> Result<(Child, crate::supervisor::ProcessSupervisor), String> {
+    let omp = Omp::locate()?;
     // Refused here rather than left to fail later: an omp too old for the
     // RPC surface the frontend uses would start and then break feature by
     // feature. The message is cached in `last_errors`, where `session_status`
     // and `switchSessionProfile`'s failure note both surface it.
-    check_omp_version()?;
+    check_omp_version(&omp)?;
     // Resolve once so `current_dir` and `--cwd=` (see `resolve_cwd`) can
     // never disagree or compound a relative value into a nested path.
     let resolved_cwd = cwd.filter(|dir| !dir.is_empty()).map(resolve_cwd);
     let args = omp_args(profile, resume, resolved_cwd.as_deref(), mode, config);
-    // On Windows, `Command::new` resolves bare "omp" against PATH and
-    // PATHEXT (.exe etc.) via CreateProcess. We try the explicit ".exe"
-    // name first because some systems have weird PATHEXT handling, then
-    // fall back to bare "omp". We do NOT use `cmd /C` as a fallback —
-    // it leaves the omp process orphaned when the parent cmd.exe is
-    // killed, since Windows does not propagate process termination to
-    // descendants without a Job Object.
-    let mut last_err = String::from("no candidates tried");
-    for name in CANDIDATES {
-        // `omp_command` defaults stdin to closed (right for a one-shot
-        // probe/report); a live RPC session needs a piped stdin instead,
-        // so this overrides it — `Command::stdin` just replaces the prior
-        // setting, it does not require `omp_command` to leave it unset.
-        let mut cmd = omp_command(name);
-        cmd.args(&args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(dir) = resolved_cwd.as_deref() {
-            cmd.current_dir(dir);
-        }
-        // Unix: must run before spawn() (installs the child as its own
-        // process-group leader). Windows: only `CREATE_NO_WINDOW` again.
-        crate::supervisor::ProcessSupervisor::prepare(&mut cmd);
-        match cmd.spawn() {
-            Ok(child) => {
-                let supervisor = crate::supervisor::ProcessSupervisor::attach(&child);
-                return Ok((child, supervisor));
-            }
-            Err(e) => {
-                let msg = format!("{name}: {e}");
-                eprintln!("[omp-desktop] spawn attempt failed: {msg}");
-                last_err = msg;
-            }
-        }
+    // `Omp::command` defaults stdin to closed; a live RPC session needs it
+    // piped. No `cmd /C` wrapper on Windows: killing cmd.exe would orphan
+    // omp without a Job Object.
+    let mut cmd = omp.command();
+    cmd.args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(dir) = resolved_cwd.as_deref() {
+        cmd.current_dir(dir);
     }
-    Err(format!(
-        "failed to spawn omp ({last_err}). Make sure omp is installed and on PATH."
-    ))
+    // Unix: must run before spawn() (installs the child as its own
+    // process-group leader). Windows: only `CREATE_NO_WINDOW` again.
+    crate::supervisor::ProcessSupervisor::prepare(&mut cmd);
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn {}: {e}", omp.binary.display()))?;
+    let supervisor = crate::supervisor::ProcessSupervisor::attach(&child);
+    Ok((child, supervisor))
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -401,10 +394,47 @@ pub(super) fn spawn_omp(
 #[cfg(test)]
 mod tests {
     use super::{
-        fmt_version, omp_args, parse_version_line, resolve_cwd, sanitize_child_env,
+        find_program, fmt_version, omp_args, parse_version_line, resolve_cwd, sanitize_child_env,
         version_refusal, ApprovalMode, Command, MIN_OMP_VERSION,
     };
+    use crate::program_setting::is_executable_file;
+    use crate::test_support::{executable, TempDir};
     use std::path::Path;
+
+    /// The issue's attack: a project folder holding an executable `omp`,
+    /// reached through an empty or relative PATH entry once the session's
+    /// cwd is that folder. Only the absolute folder's binary may be found,
+    /// even when the relative entries come first.
+    #[test]
+    fn find_program_skips_empty_and_relative_path_entries() {
+        let trusted = if cfg!(windows) {
+            r"C:\tools"
+        } else {
+            "/opt/omp"
+        };
+        let path = std::env::join_paths([".", "", "bin", trusted]).unwrap();
+        // Accepts any candidate, so only `find_program` decides.
+        let found = find_program(&path, "omp", |_| true);
+        assert_eq!(found, Some(Path::new(trusted).join("omp")));
+    }
+
+    #[test]
+    fn find_program_takes_the_first_absolute_folder_holding_it() {
+        let dir = TempDir::new("spawn", "find-program");
+        let [none, first, second] = ["a", "b", "c"].map(|name| dir.path().join(name));
+        std::fs::create_dir_all(&none).unwrap();
+        let found = executable(&first.join("omp-test"), "");
+        executable(&second.join("omp-test"), "");
+        let path = std::env::join_paths([&none, &first, &second]).unwrap();
+        assert_eq!(
+            find_program(&path, "omp-test", is_executable_file),
+            Some(found)
+        );
+        assert_eq!(
+            find_program(none.as_os_str(), "omp-test", is_executable_file),
+            None
+        );
+    }
 
     /// The desktop's default mode; the `omp_args` tests below are about
     /// the other flags.

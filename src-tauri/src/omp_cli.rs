@@ -1,5 +1,5 @@
 //! One-shot `omp <subcommand>` runs outside the RPC bridge (`omp stats`,
-//! `omp config`): spawn through `agent::spawn::spawn_candidate_output`,
+//! `omp config`): spawn through `agent::spawn::omp_output`,
 //! return stdout on success, and turn a non-zero exit into one readable
 //! error string.
 
@@ -14,7 +14,7 @@ const STDOUT_TAIL_MAX_BYTES: usize = 4 * 1024;
 ///
 /// Spawns `omp`, so callers MUST run this off the main thread.
 pub fn run(args: &[String], label: &str) -> Result<Vec<u8>, String> {
-    let output = crate::agent::spawn::spawn_candidate_output(args)?;
+    let output = crate::agent::spawn::omp_output(args)?;
     if output.status.success() {
         Ok(output.stdout)
     } else {
@@ -30,7 +30,7 @@ pub fn run(args: &[String], label: &str) -> Result<Vec<u8>, String> {
 /// Build the error string for a non-zero exit.
 ///
 /// Confirmed failure modes that reach here (`omp` not being on PATH at
-/// all is a separate, earlier error from `spawn_candidate_output`):
+/// all is a separate, earlier error from `omp_output`):
 /// probing this CLI's own argument parser with an unrecognized subcommand
 /// and no flags exits non-zero with *both* streams empty (observed
 /// directly: exit 129, no stderr, no stdout); the same probe with an added

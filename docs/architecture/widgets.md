@@ -189,7 +189,7 @@ Frontend handling:
 - **Spawn.**
   - argv comes from the config, with no shell.
   - The working directory is the project, or the home dir (`config::home_dir`) when there is none; never a temp dir.
-  - The child gets `apply_child_path`, then a `PATH` with empty and relative entries removed.
+  - The child gets `child_path::apply_trusted_child_path`: the extended `PATH` with empty and relative entries removed.
   - On Windows it starts with `CREATE_NO_WINDOW` (`agent::spawn::CREATE_NO_WINDOW`).
 - **Context.** Written as `OMP_WIDGET_*` env vars plus one stdin JSON line, then stdin is closed. Every field except `project` is limited to 2048 bytes: one env string over 128 KiB fails `spawn` with E2BIG on Linux.
 - **Supervision.** `Arc<ProcessSupervisor>` (process group / Job Object). On timeout or stdout overflow (256 KiB), the whole tree is killed. When the direct child exits, the tree is also killed, so a background holder of the pipes cannot turn a success into a timeout; stderr is still collected.

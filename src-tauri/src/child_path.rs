@@ -31,22 +31,43 @@ pub fn child_path() -> Option<OsString> {
 
 /// The absolute folders of [`child_path`] (the inherited PATH when that
 /// can't be built), in lookup order: where a search for a user-installed
-/// program looks (the terminal's shell list, Chromium discovery). Blocking
-/// on Windows (registry reads).
+/// program looks (omp, the terminal's shell list, Chromium discovery).
+/// Blocking on Windows (registry reads).
 pub fn child_path_dirs() -> Vec<PathBuf> {
-    absolute_dirs(
-        &child_path()
-            .or_else(|| std::env::var_os("PATH"))
-            .unwrap_or_default(),
-    )
+    full_child_path().map_or_else(Vec::new, |path| absolute_dirs(&path).collect())
+}
+
+/// [`child_path`] without its empty and relative entries (the inherited
+/// PATH when that can't be built); `None` when there is no PATH at all. The
+/// PATH for a child started in an untrusted project folder: there such an
+/// entry resolves a program name — the child's own, or a `#!/usr/bin/env`
+/// interpreter's — inside the project.
+pub fn trusted_child_path() -> Option<OsString> {
+    full_child_path().map(|path| absolute_entries(&path))
+}
+
+/// Set the child command's PATH to [`trusted_child_path`].
+pub fn apply_trusted_child_path(cmd: &mut Command) {
+    if let Some(path) = trusted_child_path() {
+        cmd.env("PATH", path);
+    }
+}
+
+fn full_child_path() -> Option<OsString> {
+    child_path().or_else(|| std::env::var_os("PATH"))
 }
 
 /// The absolute folders of `path`. A relative one is dropped: it would
-/// resolve against the app's working directory.
-fn absolute_dirs(path: &OsStr) -> Vec<PathBuf> {
-    std::env::split_paths(path)
-        .filter(|dir| dir.is_absolute())
-        .collect()
+/// resolve against the working directory.
+fn absolute_dirs(path: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+    std::env::split_paths(path).filter(|dir| dir.is_absolute())
+}
+
+/// `path` with every empty or relative entry removed.
+fn absolute_entries(path: &OsStr) -> OsString {
+    // `split_paths` strips the quotes `join_paths` would reject, so joining
+    // its own output cannot fail; an empty PATH is the safe answer if it did.
+    std::env::join_paths(absolute_dirs(path)).unwrap_or_default()
 }
 
 /// Override the child command's PATH with [`child_path`]. `Command`
@@ -181,7 +202,7 @@ fn path_key(dir: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute_dirs, merged_path};
+    use super::{absolute_dirs, absolute_entries, merged_path};
 
     fn entries(path: &std::ffi::OsStr) -> Vec<String> {
         std::env::split_paths(path)
@@ -315,6 +336,23 @@ mod tests {
     fn only_absolute_path_folders_are_searched() {
         let bin = if cfg!(windows) { r"C:\bin" } else { "/bin" };
         let path = std::env::join_paths(["relative", "", bin]).unwrap();
-        assert_eq!(absolute_dirs(&path), [std::path::PathBuf::from(bin)]);
+        assert_eq!(
+            absolute_dirs(&path).collect::<Vec<_>>(),
+            [std::path::PathBuf::from(bin)]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_path_keeps_only_absolute_entries() {
+        let got = absolute_entries(std::ffi::OsStr::new("/usr/bin::.:bin:/bin:"));
+        assert_eq!(got, std::ffi::OsString::from("/usr/bin:/bin"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_path_keeps_only_absolute_entries() {
+        let got = absolute_entries(std::ffi::OsStr::new(r"C:\Windows;;.;bin;\rooted;C:\x;"));
+        assert_eq!(got, std::ffi::OsString::from(r"C:\Windows;C:\x"));
     }
 }
