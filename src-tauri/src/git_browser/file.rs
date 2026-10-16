@@ -140,8 +140,9 @@ pub(super) fn blob_at(
 }
 
 /// Read the work-tree side of `rel` through git's filter pipeline
-/// (`core.autocrlf`, `eol`/`text`/`ident` attributes, clean filters), so a
-/// file checked out with CRLF line endings compares equal to its LF blob.
+/// (`core.autocrlf`, `eol`/`text`/`ident` attributes, clean filters other
+/// than the repository's own, which [`super::open`] removed), so a file
+/// checked out with CRLF line endings compares equal to its LF blob.
 fn read_worktree(repo: &gix::Repository, work_dir: &Path, rel: &str) -> Result<Side, String> {
     let abs = work_dir.join(rel);
     let meta = match std::fs::symlink_metadata(&abs) {
@@ -340,7 +341,7 @@ pub(super) fn view(
 #[cfg(test)]
 mod tests {
     use super::{file, view, FileKind, Line, LineKind, MAX_LINES, MAX_LINE_CHARS, MAX_SIDE_BYTES};
-    use crate::git_browser::{fixture, StatusKind};
+    use crate::git_browser::{fixture, status, StatusKind};
     use std::fmt::Write as _;
 
     fn line(kind: LineKind, old: Option<u32>, new: Option<u32>, text: &str) -> Line {
@@ -673,5 +674,32 @@ mod tests {
         let out = file(repo.path(), "a.txt").expect("file");
         assert_eq!(out.status, Some(StatusKind::Added));
         assert_eq!(out.lines, [line(LineKind::Add, None, Some(1), "x")]);
+    }
+
+    #[test]
+    fn a_clean_filter_from_the_repository_config_never_runs() {
+        let Some(repo) = fixture::init("file-repo-filter") else {
+            return;
+        };
+        repo.write("a.txt", "one\n");
+        repo.git(&["add", "."]);
+        repo.commit("init", 1_700_000_000);
+        let marker = repo.arm_clean_filter(".git");
+        // Same size: status can't call it modified from the stat data alone
+        // and has to hash the file, so it is a reader of its own.
+        repo.write("a.txt", "uno\n");
+
+        status(repo.path()).expect("status");
+        assert!(!marker.exists(), "status ran the repository's clean filter");
+        let out = file(repo.path(), "a.txt").expect("file");
+        assert!(!marker.exists(), "the repository's clean filter ran");
+        assert_eq!(out.status, Some(StatusKind::Modified));
+        assert_eq!(
+            out.lines,
+            [
+                line(LineKind::Rem, Some(1), None, "one"),
+                line(LineKind::Add, None, Some(1), "uno"),
+            ]
+        );
     }
 }

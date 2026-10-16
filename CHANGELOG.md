@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Typography on Windows: interface text now uses Segoe UI Variable (Segoe UI on Windows 10) and code uses Cascadia Mono, Cascadia Code or Consolas, instead of falling through the macOS-only fonts to Arial and Consolas. Chinese and Japanese characters still take Windows' fallback font for the display language.
 - Windows title-bar buttons (minimize, maximize, close) were coloured red, yellow and green by leftover prototype rules. They now use the theme's text colour, draw as line icons instead of text glyphs, and sit flush with no gaps or rounded corners.
+- Opening the git browser, or a file in it, no longer runs commands that the repository's own config attaches to files as clean or process filters (`filter.<name>.clean` / `process` in `.git/config`). A downloaded or extracted repository could use them to run a program just because it was previewed. Filters from your own git config, such as Git LFS installed with `git lfs install`, still apply, and so do line-ending conversions. A submodule now shows as changed only when it has a different commit checked out, not for edits inside it.
 
 ## [0.10.1] - 2026-10-16
 

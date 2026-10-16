@@ -29,8 +29,45 @@ pub use file::{file, FileView};
 pub use log::{log, LogView};
 pub use status::{status, StatusView};
 
-use crate::workspace::discover as open;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// [`crate::workspace::discover`] for the git browser, minus the filter
+/// drivers (`filter.<name>.clean`/`smudge`/`process`) the repository
+/// configures itself (`.git/config`, `config.worktree` and their includes).
+///
+/// gix runs a driver's command whenever it reads a work-tree file through
+/// git's filter pipeline — status hashing a changed file, the file view —
+/// and its trust check is only that the user owns the repository. A
+/// downloaded or extracted repository is owned by the user, so its own
+/// config could make a mere preview run a command. Drivers from the
+/// user's and the system's config (`git lfs install`) stay: those
+/// commands are the user's own choice, as they are for `git status`. The
+/// built-in conversions (`eol`, `text`, `ident`, `working-tree-encoding`)
+/// run no command and are kept too.
+fn open(path: &Path) -> Result<(gix::Repository, PathBuf), String> {
+    let (mut repo, work_dir) = crate::workspace::discover(path)?;
+    // Collected first: the read borrows the config the removal replaces.
+    let local: Vec<_> = repo
+        .config_snapshot()
+        .sections_and_ids_by_name("filter")
+        .into_iter()
+        .flatten()
+        .filter(|(section, _)| {
+            section.meta().source.kind() == gix::config::source::Kind::Repository
+        })
+        .map(|(_, id)| id)
+        .collect();
+    if !local.is_empty() {
+        let mut config = repo.config_snapshot_mut();
+        for id in local {
+            config.remove_section_by_id(id);
+        }
+        config
+            .commit()
+            .map_err(fail("failed to configure git filters"))?;
+    }
+    Ok((repo, work_dir))
+}
 
 /// Files a tree carries before it is cut off and marked `truncated` —
 /// shared by the project tree ([`status`]) and a commit's touched files
@@ -181,6 +218,36 @@ pub mod fixture {
                 std::fs::create_dir_all(parent).expect("create parent dirs");
             }
             std::fs::write(path, content).expect("write fixture file");
+        }
+
+        /// Configure, in the repository config of the git dir `git_dir`
+        /// (relative to the repo, `.git` or `.git/modules/<name>`), a
+        /// `clean` filter for every path that appends to the returned marker
+        /// file whenever it runs and passes the content through unchanged.
+        ///
+        /// The filter is `required`: gix silently skips a failing optional
+        /// filter, so where it could not run the command (no `sh`), a read
+        /// that still applied it would leave no marker and look safe. A
+        /// required one fails that read instead.
+        pub fn arm_clean_filter(&self, git_dir: &str) -> PathBuf {
+            let git_dir = self.0.join(git_dir);
+            let marker = git_dir.join("filter-ran");
+            // Forward slashes: the command runs through `sh` on every platform.
+            let quoted = marker.to_string_lossy().replace('\\', "/");
+            let config = git_dir.join("config");
+            let config = config.to_str().expect("utf-8 temp path");
+            let set = |key: &str, value: &str| {
+                self.git(&["config", "--file", config, key, value]);
+            };
+            set(
+                "filter.probe.clean",
+                &format!("echo ran >> '{quoted}'; cat"),
+            );
+            set("filter.probe.required", "true");
+            let info = git_dir.join("info");
+            std::fs::create_dir_all(&info).expect("create info dir");
+            std::fs::write(info.join("attributes"), "* filter=probe\n").expect("write attributes");
+            marker
         }
     }
 
