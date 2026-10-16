@@ -545,3 +545,161 @@
   scrollbar-width: thin;
   scrollbar-color: var(--line-bright) transparent;
 }
+
+/* ── Prompt Turn Rail (right-edge user message scrubber + 3-tier fisheye preview) ── */
+.turn-rail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 6px;
+  z-index: 18;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+}
+.turn-rail-track {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  max-height: calc(100% - 48px);
+  padding: 6px 2px 6px 8px;
+  border-radius: 999px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  transition: background 140ms var(--ease-out);
+}
+.turn-rail-track::-webkit-scrollbar { display: none; }
+.turn-rail.is-open .turn-rail-track {
+  background: color-mix(in oklab, var(--bg-elevated) 72%, transparent);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+}
+.turn-dot-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 4px 2px 4px 6px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  cursor: pointer;
+}
+.turn-dot {
+  display: block;
+  width: 8px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--fg-4);
+  opacity: 0.45;
+  transition: width 140ms var(--ease-out), height 140ms var(--ease-out), background 140ms var(--ease-out), opacity 140ms var(--ease-out), box-shadow 140ms var(--ease-out);
+}
+.turn-dot-btn.is-current .turn-dot {
+  width: 14px;
+  height: 3.5px;
+  background: var(--accent);
+  opacity: 0.9;
+  box-shadow: 0 0 6px var(--accent-glow);
+}
+.turn-dot-btn.is-adj .turn-dot {
+  width: 13px;
+  height: 3.5px;
+  background: color-mix(in oklab, var(--accent) 65%, var(--fg-2));
+  opacity: 0.82;
+}
+.turn-dot-btn.is-hot .turn-dot,
+.turn-dot-btn:hover .turn-dot {
+  width: 18px;
+  height: 4px;
+  background: var(--accent);
+  opacity: 1;
+  box-shadow: 0 0 8px var(--accent-glow);
+}
+.turn-pop {
+  pointer-events: auto;
+  position: absolute;
+  right: 26px;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  width: 310px;
+  transition: top 90ms var(--ease-out);
+}
+.turn-card {
+  width: 100%;
+  padding: 8px 11px;
+  border-radius: var(--r-2, 10px);
+  background: color-mix(in oklab, var(--bg-elevated) 95%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  backdrop-filter: blur(20px) saturate(150%);
+  border: 1px solid var(--line-bright);
+  box-shadow: var(--shadow-card);
+  cursor: pointer;
+  user-select: none;
+  transition: transform 140ms var(--ease-out), opacity 140ms var(--ease-out), border-color 140ms var(--ease-out);
+}
+.turn-card.is-focus {
+  border-color: color-mix(in oklab, var(--accent) 60%, var(--line-bright));
+  box-shadow: var(--shadow-pop), 0 0 0 1px color-mix(in oklab, var(--accent) 20%, transparent);
+}
+.turn-card.is-neighbor {
+  width: 292px;
+  padding: 6px 10px;
+  opacity: 0.5;
+  background: color-mix(in oklab, var(--bg-surface) 90%, transparent);
+}
+.turn-card.is-prev {
+  transform: scale(0.94) translateX(4px);
+  transform-origin: right bottom;
+  -webkit-mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.38) 0%, #000 90%);
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.38) 0%, #000 90%);
+}
+.turn-card.is-next {
+  transform: scale(0.94) translateX(4px);
+  transform-origin: right top;
+  -webkit-mask-image: linear-gradient(0deg, rgba(0, 0, 0, 0.38) 0%, #000 90%);
+  mask-image: linear-gradient(0deg, rgba(0, 0, 0, 0.38) 0%, #000 90%);
+}
+.turn-card.is-neighbor:hover {
+  opacity: 0.88;
+  transform: scale(0.97) translateX(1px);
+  border-color: color-mix(in oklab, var(--accent) 45%, var(--line-bright));
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+.turn-card-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+  font-size: var(--d-text-xs, 10.5px);
+}
+.turn-card-badge {
+  color: var(--accent);
+  font-weight: 600;
+}
+.turn-card.is-neighbor .turn-card-badge { color: var(--fg-3); }
+.turn-card-time { color: var(--fg-4); }
+.turn-card-hint {
+  margin-left: auto;
+  color: var(--fg-4);
+  font-size: 10px;
+}
+.turn-card-text {
+  color: var(--fg);
+  font-size: var(--d-text-sm, 11.5px);
+  line-height: 1.42;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  word-break: break-word;
+}
+.turn-card.is-neighbor .turn-card-text {
+  color: var(--fg-2);
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+}

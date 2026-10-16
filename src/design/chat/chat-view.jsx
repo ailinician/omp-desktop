@@ -130,6 +130,49 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
   // text being read doesn't fold away under the reader.
   const [collapseHorizon, setCollapseHorizon] = React.useState(null);
 
+  const [activeTurn, setActiveTurn] = React.useState(0);
+  const activeTurnRef = React.useRef(0);
+  const [hoverTurn, setHoverTurn]   = React.useState(null);
+  const [popY, setPopY]             = React.useState(120);
+  const [flashIdx, setFlashIdx]     = React.useState(null);
+  const hideTimerRef                = React.useRef(null);
+  const flashTimerRef               = React.useRef(null);
+  const wrapRef                     = React.useRef(null);
+
+  const userTurns = React.useMemo(() => {
+    const out = [];
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (!m || m.kind !== "user" || window.OMP_TURN_STATUS.isHidden(m)) continue;
+      const raw = (m.text || "").replace(/\s+/g, " ").trim();
+      const text = raw || (m.images?.length ? `[图片 ×${m.images.length}]` : "（空消息）");
+      out.push({ turnNum: out.length + 1, msgIdx: i, id: m._id ?? i, text, time: m.time || "" });
+    }
+    return out;
+  }, [messages]);
+
+  const syncActiveTurn = React.useCallback((el) => {
+    if (!el || !userTurns.length) return;
+    if (pinnedRef.current) {
+      const last = userTurns.length - 1;
+      if (activeTurnRef.current !== last) {
+        activeTurnRef.current = last;
+        setActiveTurn(last);
+      }
+      return;
+    }
+    const threshold = el.scrollTop + el.clientHeight * 0.42;
+    let found = 0;
+    for (let k = 0; k < userTurns.length; k++) {
+      const node = el.querySelector(`[data-msg-idx="${userTurns[k].msgIdx}"]`);
+      if (node && node.offsetTop <= threshold) found = k;
+      else if (node && node.offsetTop > threshold) break;
+    }
+    if (activeTurnRef.current !== found) {
+      activeTurnRef.current = found;
+      setActiveTurn(found);
+    }
+  }, [userTurns]);
   const setPinned = (val) => {
     pinnedRef.current = val;
     setShowJump(!val);
@@ -151,6 +194,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
     const pinned = _CV_nextPinned(pinnedRef.current, prevTopRef.current, el);
     prevTopRef.current = el.scrollTop;
     if (pinned !== pinnedRef.current) setPinned(pinned);
+    syncActiveTurn(el);
   };
 
   const jumpToLatest = () => {
@@ -175,7 +219,8 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
     if (!pinnedRef.current && _CV_shouldRepin(lastIdRef.current, messages)) setPinned(true);
     lastIdRef.current = messages[messages.length - 1]?._id ?? null;
     if (pinnedRef.current) stickToBottom(el);
-  }, [messages]);
+    syncActiveTurn(el);
+  }, [messages, syncActiveTurn]);
 
   // The composer below grows and shrinks on its own (the queue strip, image
   // attachments, a growing draft), which shortens this view from below
@@ -203,8 +248,66 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
     horizonId: collapseHorizon, hidden: window.OMP_TURN_STATUS.isHidden,
   }), [messages, foldModes.thinking, foldModes.tool, collapseAfter, collapseOverrides, collapseHorizon]);
 
+  const clearHideTimer = () => {
+    clearTimeout(hideTimerRef.current);
+    hideTimerRef.current = null;
+  };
+
+  const scheduleHideRail = () => {
+    clearHideTimer();
+    hideTimerRef.current = setTimeout(() => setHoverTurn(null), 110);
+  };
+
+  const updatePopYForTurn = (k, dotEl) => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const wrapRect = wrap.getBoundingClientRect();
+    const targetEl = dotEl || wrap.querySelector(`[data-turn-dot="${k}"]`);
+    if (!targetEl) return;
+    const dotRect = targetEl.getBoundingClientRect();
+    const centerY = dotRect.top - wrapRect.top + dotRect.height / 2;
+    const clamped = Math.max(88, Math.min(wrapRect.height - 88, centerY));
+    setPopY(clamped);
+  };
+
+  const onEnterDot = (k, e) => {
+    clearHideTimer();
+    setHoverTurn(k);
+    updatePopYForTurn(k, e.currentTarget);
+  };
+
+  const onRailWheel = (e) => {
+    if (hoverTurn === null || userTurns.length < 2) return;
+    e.preventDefault();
+    const dir = e.deltaY > 0 ? 1 : -1;
+    const next = Math.max(0, Math.min(userTurns.length - 1, hoverTurn + dir));
+    if (next !== hoverTurn) {
+      setHoverTurn(next);
+      updatePopYForTurn(next, null);
+    }
+  };
+
+  const jumpToTurn = (k) => {
+    const t = userTurns[k];
+    const el = scrollRef.current;
+    if (!t || !el) return;
+    const rowEl = el.querySelector(`[data-msg-idx="${t.msgIdx}"]`);
+    if (!rowEl) return;
+    const isLast = k === userTurns.length - 1;
+    if (!isLast) setPinned(false);
+    const targetTop = Math.max(0, rowEl.offsetTop - 24);
+    prevTopRef.current = targetTop;
+    el.scrollTo({ top: targetTop, behavior: "smooth" });
+    activeTurnRef.current = k;
+    setActiveTurn(k);
+    setFlashIdx(t.msgIdx);
+    clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = setTimeout(() => setFlashIdx(null), 1500);
+  };
+
+  const hoveredTurnMsgIdx = hoverTurn !== null ? userTurns[hoverTurn]?.msgIdx : null;
   return (
-    <div className="chat-wrap">
+    <div className="chat-wrap" ref={wrapRef}>
       <div className="chat-scroll selectable" ref={scrollRef} onScroll={onScroll}>
         <div className="chat-pad" style={_CV_PAD_STYLE}>
           {/* Note: after a trim, idx shifts for all surviving messages, causing a full
@@ -213,7 +316,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
              and scroll-targeting off _id instead of idx would make trim zero-cost for
              history, but requires a larger refactor. */}
           {messages.map((m, i) => {
-            const hl = hoveredMsgIdx === i;
+            const hl = hoveredMsgIdx === i || hoveredTurnMsgIdx === i || flashIdx === i;
             if (window.OMP_TURN_STATUS.isHidden(m)) return null;
             if (m.kind === "user")    return <_CV_UserBubble_M    key={m._id ?? i} idx={i} highlighted={hl} msg={m} />;
             if (m.kind === "compact") return <CompactRow          key={m._id ?? i} msg={m} />;
@@ -233,6 +336,61 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
           <div style={{ height: 24 }} />
         </div>
       </div>
+      {userTurns.length > 0 && (
+        <div
+          className={`turn-rail${hoverTurn !== null ? " is-open" : ""}`}
+          onMouseEnter={clearHideTimer}
+          onMouseLeave={scheduleHideRail}
+          onWheel={onRailWheel}
+        >
+          <div className="turn-rail-track">
+            {userTurns.map((t, k) => {
+              const isCurrent = k === activeTurn;
+              const isHot     = k === hoverTurn;
+              const isAdj     = hoverTurn !== null && Math.abs(k - hoverTurn) === 1;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  data-turn-dot={k}
+                  className={`turn-dot-btn${isCurrent ? " is-current" : ""}${isHot ? " is-hot" : ""}${isAdj ? " is-adj" : ""}`}
+                  onMouseEnter={(e) => onEnterDot(k, e)}
+                  onClick={() => jumpToTurn(k)}
+                  aria-label={`Jump to prompt #${t.turnNum}`}
+                >
+                  <span className="turn-dot" />
+                </button>
+              );
+            })}
+          </div>
+          {hoverTurn !== null && userTurns[hoverTurn] && (
+            <div className="turn-pop" style={{ top: `${popY}px` }}>
+              {[-1, 0, 1].map((offset) => {
+                const idx = hoverTurn + offset;
+                const item = userTurns[idx];
+                if (!item) return null;
+                const posClass = offset === 0 ? "is-focus" : (offset < 0 ? "is-neighbor is-prev" : "is-neighbor is-next");
+                return (
+                  <div
+                    key={item.id}
+                    className={`turn-card ${posClass}`}
+                    onClick={() => jumpToTurn(idx)}
+                  >
+                    <div className="turn-card-hd">
+                      <span className="turn-card-badge mono">
+                        #{item.turnNum}{offset === 0 ? ` / ${userTurns.length}` : ""}
+                      </span>
+                      {item.time && <span className="turn-card-time mono">{item.time}</span>}
+                      {offset === 0 && <span className="turn-card-hint">点击定位</span>}
+                    </div>
+                    <div className="turn-card-text">{item.text}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
       {showJump && (
         <button type="button" className="chat-jump-latest" onClick={jumpToLatest}>
           <_CV_Icon name="chev" size={12} />
