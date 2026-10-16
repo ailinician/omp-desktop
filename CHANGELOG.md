@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Typography on Windows: interface text now uses Segoe UI Variable (Segoe UI on Windows 10) and code uses Cascadia Mono, Cascadia Code or Consolas, instead of falling through the macOS-only fonts to Arial and Consolas. Chinese and Japanese characters still take Windows' fallback font for the display language.
 - Windows title-bar buttons (minimize, maximize, close) were coloured red, yellow and green by leftover prototype rules. They now use the theme's text colour, draw as line icons instead of text glyphs, and sit flush with no gaps or rounded corners.
+- The example git widget (`examples/widgets/git.sh`) no longer runs programs named by the project's own git configuration. A repository could make it run a command of its choice: a clean or process filter when the widget checked for changed files, or a signature checker (`gpg.program`) when it listed commits. The widget now turns off every filter the project's configuration defines or overrides (filters from your own git configuration, such as git-lfs, keep working), never shows commit signatures, never fetches missing objects of a partial clone, and no longer counts a submodule as changed for edits inside it, only for a different checked-out commit. It now needs git 2.26 or later. Copy the script to `~/.omp-desktop/widgets/` again to get the fix.
 
 ## [0.10.1] - 2026-10-16
 
