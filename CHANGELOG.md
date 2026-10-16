@@ -8,8 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- Typography on Windows: `--font-sans`, `--font-mono` and `--font-display` now include Windows system UI and monospace fallbacks (`Segoe UI Variable Text`, `Segoe UI`, `Cascadia Mono`, `Cascadia Code`, `Consolas`, `Microsoft YaHei UI`) instead of falling straight through macOS-only fonts to `Arial` or `SimSun`.
-- Windows title-bar buttons (minimize, maximize, close): removed leftover `!important` traffic-light colour rules in `chrome.css` that turned the buttons yellow, green and red on Windows, replaced the text glyphs with crisp 10×10 1px-stroke SVGs, and aligned the 38px caption strip with the top bar.
+- Typography on Windows: interface text now uses Segoe UI Variable (Segoe UI on Windows 10) and code uses Cascadia Mono, Cascadia Code or Consolas, instead of falling through the macOS-only fonts to Arial and Consolas. Chinese and Japanese characters still take Windows' fallback font for the display language.
+- Windows title-bar buttons (minimize, maximize, close) were coloured red, yellow and green by leftover prototype rules. They now use the theme's text colour, draw as line icons instead of text glyphs, and sit flush with no gaps or rounded corners.
 
 ## [0.10.1] - 2026-10-16
 
