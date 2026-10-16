@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Typography on Windows: interface text now uses Segoe UI Variable (Segoe UI on Windows 10) and code uses Cascadia Mono, Cascadia Code or Consolas, instead of falling through the macOS-only fonts to Arial and Consolas. Chinese and Japanese characters still take Windows' fallback font for the display language.
 - Windows title-bar buttons (minimize, maximize, close) were coloured red, yellow and green by leftover prototype rules. They now use the theme's text colour, draw as line icons instead of text glyphs, and sit flush with no gaps or rounded corners.
+- A project folder can no longer start its own `omp` in place of yours (security). With an empty or relative entry in `PATH` (`.`, `bin`, or a stray `::`), a tab opened on a project that shipped an executable `omp` could run it with your permissions. omp is now looked up only in absolute `PATH` folders, its version is checked on that exact file, and the session runs that same file. omp, and so every command the agent runs, also gets `PATH` without those entries, so a project can't supply the interpreter an npm-installed omp starts with either: a project-local tool reached only through a relative entry such as `./node_modules/.bin` now needs its path spelled out. An `omp` on `PATH` that you aren't allowed to run is passed over for the next one, as a shell does.
 
 ## [0.10.1] - 2026-10-16
 

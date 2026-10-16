@@ -128,16 +128,24 @@ pub fn typed_path(input: &str) -> &str {
         .map_or(input, str::trim)
 }
 
-/// An absolute path to an executable file (unix: any execute bit; Windows:
-/// any file). What a program setting must be.
+/// An absolute path to an executable file: what a program setting must be,
+/// and what a PATH search takes.
+///
+/// Unix: one this user may execute, as `execvp` checks it, so an execute bit
+/// only for others doesn't count. Windows: any file.
 pub fn is_executable_file(path: &Path) -> bool {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        path.is_absolute()
-            && path
-                .metadata()
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        use std::os::unix::ffi::OsStrExt;
+        if !(path.is_absolute() && path.is_file()) {
+            return false;
+        }
+        let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false; // an interior NUL names no file
+        };
+        // SAFETY: `path` is a NUL-terminated string that outlives the call,
+        // and `access` only reads it.
+        unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
     }
     #[cfg(not(unix))]
     {
@@ -177,6 +185,26 @@ mod tests {
         assert!(!is_executable_file(exe.parent().unwrap()), "a folder");
         assert!(!is_executable_file(Path::new("sh")), "relative");
         assert!(!is_executable_file(&exe.with_extension("missing")));
+    }
+
+    /// An execute bit for the group or others only: `execvp` would refuse
+    /// it, so a PATH search must pass over it for the next folder. Not
+    /// checkable as root, who may execute any file with an execute bit.
+    #[cfg(unix)]
+    #[test]
+    fn an_execute_bit_for_others_only_does_not_qualify() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::test_support::TempDir::new("program-setting", "others-exec");
+        let probe = dir.path().join("unreadable");
+        std::fs::write(&probe, "").unwrap();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&probe).is_ok() {
+            return; // root: permission bits don't bind
+        }
+        let file = crate::test_support::executable(&dir.path().join("prog"), "");
+        assert!(is_executable_file(&file));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o611)).unwrap();
+        assert!(!is_executable_file(&file));
     }
 
     #[test]

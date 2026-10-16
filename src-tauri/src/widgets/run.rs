@@ -18,7 +18,6 @@
 //! created with `thread::Builder`; if the OS refuses one, the child is killed
 //! and reaped and the run fails instead of panicking.
 
-use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -141,31 +140,15 @@ fn spawn(entry: &PluginEntry, ctx: &PluginContext) -> Result<Child, String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crate::child_path::apply_child_path(&mut cmd);
     // A bare program name is looked up on PATH; an empty or relative entry
     // would resolve it inside the untrusted project directory.
-    let path = cmd
-        .get_envs()
-        .find(|(key, _)| *key == "PATH")
-        .and_then(|(_, value)| value.map(OsStr::to_os_string))
-        .or_else(|| std::env::var_os("PATH"));
-    if let Some(path) = path {
-        cmd.env("PATH", absolute_path_entries(&path));
-    }
+    crate::child_path::apply_trusted_child_path(&mut cmd);
     // Also hides the console window on Windows.
     ProcessSupervisor::prepare(&mut cmd);
     // The OS error names the cause; `NotFound` also means a missing shebang
     // interpreter or a vanished cwd, not only a missing program.
     cmd.spawn()
         .map_err(|e| format!("could not start {argv0}: {e}"))
-}
-
-/// `path` with every empty or relative entry removed.
-fn absolute_path_entries(path: &OsStr) -> OsString {
-    // `split_paths` strips the quotes `join_paths` would reject, so joining its
-    // own output cannot fail; an empty PATH is the safe answer if it ever did.
-    std::env::join_paths(std::env::split_paths(path).filter(|p| p.is_absolute()))
-        .unwrap_or_default()
 }
 
 /// Context on stdin from a detached thread, which closes the pipe when done so
@@ -507,20 +490,6 @@ mod tests {
                 .is_some_and(|e| e.starts_with("could not start omp-widget-does-not-exist-9f3a: ")),
             "{r:?}"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn path_keeps_only_absolute_entries() {
-        let got = absolute_path_entries(OsStr::new("/usr/bin::.:bin:/bin:"));
-        assert_eq!(got, OsString::from("/usr/bin:/bin"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn path_keeps_only_absolute_entries() {
-        let got = absolute_path_entries(OsStr::new(r"C:\Windows;;.;bin;\rooted;C:\x;"));
-        assert_eq!(got, OsString::from(r"C:\Windows;C:\x"));
     }
 
     #[cfg(windows)]
