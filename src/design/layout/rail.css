@@ -110,7 +110,7 @@
 .legend-item span:first-child { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
 
 /* ── Minimap (dense token-heatmap grid) ───────────────────────────── */
-.minimap { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.minimap { flex: 1; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
 .minimap-head { display: flex; align-items: center; gap: 6px; font-size: var(--d-text-xs); }
 
 .minimap-grid {

@@ -46,20 +46,20 @@
   font-size: var(--d-text-xs); color: var(--fg-3);
 }
 .sa-rail-stats b { color: var(--fg); font-weight: 500; }
-.sa-rail-list { display: flex; flex-direction: column; gap: 2px; margin: 0 -6px; }
+.sa-rail-list { display: flex; flex-direction: column; gap: 1px; margin: 0 -6px; max-height: 112px; overflow-y: auto; scrollbar-width: thin; }
 .sa-rail-row {
   appearance: none; border: 0; background: transparent; text-align: left;
-  display: grid; grid-template-columns: 6px minmax(0, 1fr) auto; align-items: center;
-  column-gap: 7px; row-gap: 3px;
-  padding: 5px 6px; border-radius: var(--r-1);
+  display: grid; grid-template-columns: 6px minmax(48px, max-content) minmax(0, 1fr) auto; align-items: center;
+  column-gap: 6px;
+  padding: 3px 6px; border-radius: var(--r-1);
   transition: background 120ms;
   animation: fadeUp 280ms var(--ease-out) both;
 }
 .sa-rail-row:hover { background: var(--bg-hover); }
 .sa-rail-now {
-  grid-column: 2 / 4;
-  display: flex; align-items: center; gap: 6px; min-width: 0;
+  display: flex; align-items: center; gap: 5px; min-width: 0;
   font-size: var(--d-text-xs); color: var(--fg-4);
+  overflow: hidden;
 }
 .sa-rail-now > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sa-rail-more { font-size: var(--d-text-xs); color: var(--fg-4); padding: 0 1px; }

@@ -9,6 +9,7 @@ const { Icon: _SAR_Icon, OMP_SUBAGENTS: _SAR, SaDot: _SAR_Dot, SaToolChip: _SAR_
 const SA_RAIL_MAX_ROWS = 5;
 
 function SubagentRailCard({ agents, paneOpen, onOpen, onTogglePane }) {
+  const _col = React.useState(false), collapsed = _col[0], setCollapsed = _col[1];
   const t = _SAR.totals(agents);
   const now = _SAR_useNow(t.live > 0, 500);
   // Live first (spawn order), then finished most-recent-first.
@@ -19,7 +20,7 @@ function SubagentRailCard({ agents, paneOpen, onOpen, onTogglePane }) {
 
   return (
     <div className="rail-card glass">
-      <div className="rail-card-head">
+      <div className="rail-card-head" style={{ cursor: "pointer", userSelect: "none" }} onClick={() => setCollapsed(c => !c)} title={collapsed ? "Expand subagents" : "Collapse subagents"}>
         <_SAR_Icon name="agent" size={11} color="var(--cyan)" />
         <span className="mono" style={{ color: "var(--fg-2)" }}>subagents</span>
         {t.live > 0 ? (
@@ -27,45 +28,49 @@ function SubagentRailCard({ agents, paneOpen, onOpen, onTogglePane }) {
         ) : (
           <span className="chip muted mono" style={{ marginLeft: "auto" }}>{t.total ? `${t.total} ran` : "idle"}</span>
         )}
+        <_SAR_Icon name={collapsed ? "chevR" : "chev"} size={10} color="var(--fg-4)" />
       </div>
 
-      {t.total === 0 ? (
-        <div className="sa-empty">Agents spawned by <span className="mono">task</span> calls show up here, live.</div>
-      ) : (
+      {!collapsed && (
         <>
-          <div className="sa-rail-stats mono">
-            <span><b>{window.formatTokens(t.tokens)}</b> tok</span>
-            <span><b>{_SAR.fmtCost(t.cost)}</b></span>
-            <span><b>{t.tools}</b> tools</span>
-            {t.failed > 0 && <span style={{ color: "var(--rose)" }}>{t.failed} failed</span>}
-          </div>
-          <div className="sa-rail-list">
-            {rows.map(a => (
-              <button key={a.id} className="sa-rail-row" style={_SAR_hue(a)} onClick={() => onOpen(a.id)}
-                title={a.description ?? a.task ?? a.id}>
-                <_SAR_Dot status={a.status} />
-                <span className="sa-name">{a.id}</span>
-                <_SAR_Elapsed agent={a} now={now} />
-                <span className="sa-rail-now">
-                  {a.status === "running" && a.progress?.currentTool ? (
-                    <>
-                      <_SAR_ToolChip tool={a.progress.currentTool} running />
-                      <span>{a.progress.lastIntent ?? a.progress.currentToolArgs}</span>
-                    </>
-                  ) : (
-                    <span>{a.description ?? a.task ?? a.agent}</span>
-                  )}
-                </span>
-              </button>
-            ))}
-          </div>
-          {hidden > 0 && <div className="sa-rail-more mono">+{hidden} more</div>}
+          {t.total === 0 ? (
+            <div className="sa-empty">Agents spawned by <span className="mono">task</span> calls show up here, live.</div>
+          ) : (
+            <>
+              <div className="sa-rail-stats mono">
+                <span><b>{window.formatTokens(t.tokens)}</b> tok</span>
+                <span><b>{_SAR.fmtCost(t.cost)}</b></span>
+                <span><b>{t.tools}</b> tools</span>
+                {t.failed > 0 && <span style={{ color: "var(--rose)" }}>{t.failed} failed</span>}
+              </div>
+              <div className="sa-rail-list">
+                {rows.map(a => (
+                  <button key={a.id} className="sa-rail-row" style={_SAR_hue(a)} onClick={() => onOpen(a.id)}
+                    title={a.description ?? a.task ?? a.id}>
+                    <_SAR_Dot status={a.status} />
+                    <span className="sa-name">{a.id}</span>
+                    <span className="sa-rail-now">
+                      {a.status === "running" && a.progress?.currentTool ? (
+                        <>
+                          <_SAR_ToolChip tool={a.progress.currentTool} running />
+                          <span>{a.progress.lastIntent ?? a.progress.currentToolArgs}</span>
+                        </>
+                      ) : (
+                        <span>{a.description ?? a.task ?? a.agent}</span>
+                      )}
+                    </span>
+                    <_SAR_Elapsed agent={a} now={now} />
+                  </button>
+                ))}
+              </div>
+              {hidden > 0 && <div className="sa-rail-more mono">+{hidden} more</div>}
+            </>
+          )}
+          <button className="btn ghost outlined sa-rail-open" onClick={onTogglePane}>
+            <_SAR_Icon name="split" size={11} /> {paneOpen ? "hide manager" : "open manager"}
+          </button>
         </>
       )}
-
-      <button className="btn ghost outlined sa-rail-open" onClick={onTogglePane}>
-        <_SAR_Icon name="split" size={11} /> {paneOpen ? "hide manager" : "open manager"}
-      </button>
     </div>
   );
 }
