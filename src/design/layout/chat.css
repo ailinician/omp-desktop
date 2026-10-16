@@ -645,29 +645,24 @@
   box-shadow: var(--shadow-pop), 0 0 0 1px color-mix(in oklab, var(--accent) 20%, transparent);
 }
 .turn-card.is-neighbor {
-  width: 292px;
+  width: 294px;
   padding: 6px 10px;
-  opacity: 0.5;
-  background: color-mix(in oklab, var(--bg-surface) 90%, transparent);
+  opacity: 0.85;
+  background: color-mix(in oklab, var(--bg-elevated) 94%, transparent);
+  border-color: var(--line);
 }
 .turn-card.is-prev {
-  transform: scale(0.94) translateX(4px);
+  transform: scale(0.95) translateX(3px);
   transform-origin: right bottom;
-  -webkit-mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.38) 0%, #000 90%);
-  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.38) 0%, #000 90%);
 }
 .turn-card.is-next {
-  transform: scale(0.94) translateX(4px);
+  transform: scale(0.95) translateX(3px);
   transform-origin: right top;
-  -webkit-mask-image: linear-gradient(0deg, rgba(0, 0, 0, 0.38) 0%, #000 90%);
-  mask-image: linear-gradient(0deg, rgba(0, 0, 0, 0.38) 0%, #000 90%);
 }
 .turn-card.is-neighbor:hover {
-  opacity: 0.88;
-  transform: scale(0.97) translateX(1px);
-  border-color: color-mix(in oklab, var(--accent) 45%, var(--line-bright));
-  -webkit-mask-image: none;
-  mask-image: none;
+  opacity: 1;
+  transform: scale(0.98) translateX(1px);
+  border-color: color-mix(in oklab, var(--accent) 50%, var(--line-bright));
 }
 .turn-card-hd {
   display: flex;
@@ -680,7 +675,7 @@
   color: var(--accent);
   font-weight: 600;
 }
-.turn-card.is-neighbor .turn-card-badge { color: var(--fg-3); }
+.turn-card.is-neighbor .turn-card-badge { color: var(--fg-2); }
 .turn-card-time { color: var(--fg-4); }
 .turn-card-hint {
   margin-left: auto;
