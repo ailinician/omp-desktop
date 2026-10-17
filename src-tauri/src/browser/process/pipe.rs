@@ -13,20 +13,27 @@ use std::io::{self, PipeReader, PipeWriter};
 use std::process::Command;
 use std::thread::JoinHandle;
 
-/// Our ends of a launched Chromium's CDP pipes, and (until
-/// [`spawned`](Self::spawned)) the ends its process takes over.
+/// Our ends of a launched Chromium's CDP pipes, and the ends its process
+/// takes over, until [`spawned`](Self::spawned).
 pub struct CdpPipes {
-    pub from_chromium: PipeReader,
-    pub to_chromium: PipeWriter,
+    from_chromium: PipeReader,
+    to_chromium: PipeWriter,
     /// Chromium's ends: what it reads commands from, what it writes to.
-    child: Option<(PipeReader, PipeWriter)>,
+    child: (PipeReader, PipeWriter),
 }
 
 impl CdpPipes {
     /// The spawn is done (or failed): close our copies of the child's ends,
-    /// so the pipes end when Chromium does.
-    pub fn spawned(&mut self) {
-        self.child = None;
+    /// so the pipes end when Chromium does, and hand over ours: what
+    /// Chromium writes, what it reads.
+    pub fn spawned(self) -> (PipeReader, PipeWriter) {
+        let Self {
+            from_chromium,
+            to_chromium,
+            child,
+        } = self;
+        drop(child);
+        (from_chromium, to_chromium)
     }
 }
 
@@ -35,19 +42,18 @@ pub fn attach(cmd: &mut Command) -> io::Result<CdpPipes> {
     let (child_reads, to_chromium) = io::pipe()?;
     let (from_chromium, child_writes) = io::pipe()?;
     cmd.arg("--remote-debugging-pipe");
-    #[cfg(unix)]
-    hand_over(cmd, &child_reads, &child_writes);
-    #[cfg(windows)]
     hand_over(cmd, &child_reads, &child_writes)?;
     Ok(CdpPipes {
         from_chromium,
         to_chromium,
-        child: Some((child_reads, child_writes)),
+        child: (child_reads, child_writes),
     })
 }
 
+/// Infallible here; the signature is the Windows one's.
 #[cfg(unix)]
-fn hand_over(cmd: &mut Command, reads: &PipeReader, writes: &PipeWriter) {
+#[allow(clippy::unnecessary_wraps)]
+fn hand_over(cmd: &mut Command, reads: &PipeReader, writes: &PipeWriter) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
 
@@ -72,6 +78,7 @@ fn hand_over(cmd: &mut Command, reads: &PipeReader, writes: &PipeWriter) {
             Ok(())
         });
     }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -154,7 +161,7 @@ mod tests {
     #[test]
     fn attach_asks_for_the_pipe_and_spawned_closes_the_child_ends() {
         let mut cmd = Command::new("chromium");
-        let mut pipes = attach(&mut cmd).unwrap();
+        let pipes = attach(&mut cmd).unwrap();
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -170,11 +177,11 @@ mod tests {
                 "{handles}"
             );
         }
-        pipes.spawned();
+        let (mut from_chromium, _to_chromium) = pipes.spawned();
         // With the child's write end closed, our read end sees EOF.
         let mut buf = [0u8; 1];
         assert_eq!(
-            std::io::Read::read(&mut pipes.from_chromium, &mut buf).unwrap(),
+            std::io::Read::read(&mut from_chromium, &mut buf).unwrap(),
             0
         );
     }
@@ -186,12 +193,12 @@ mod tests {
         use std::io::{Read, Write};
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "read line <&3; printf '%s!' \"$line\" >&4"]);
-        let mut pipes = attach(&mut cmd).unwrap();
+        let pipes = attach(&mut cmd).unwrap();
         let mut child = cmd.spawn().unwrap();
-        pipes.spawned();
-        pipes.to_chromium.write_all(b"hello\n").unwrap();
+        let (mut from_chromium, mut to_chromium) = pipes.spawned();
+        to_chromium.write_all(b"hello\n").unwrap();
         let mut got = String::new();
-        pipes.from_chromium.read_to_string(&mut got).unwrap();
+        from_chromium.read_to_string(&mut got).unwrap();
         assert_eq!(got, "hello!");
         assert!(child.wait().unwrap().success());
     }

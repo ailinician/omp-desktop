@@ -21,7 +21,7 @@ use std::thread;
 use super::tap::Tap;
 
 /// Largest command the tap reads (a client message over it is skipped).
-const MAX_COMMAND: usize = 1 << 20;
+const MAX_TAPPED_COMMAND: usize = 1 << 20;
 /// Largest reply or event the tap reads. Everything it needs is small; a
 /// screenshot's reply is not, and is skipped without being copied.
 const MAX_REPLY: usize = 64 << 10;
@@ -30,7 +30,7 @@ const MAX_REPLY: usize = 64 << 10;
 /// its keys sorted (dropping `sessionId`), and `method` < `params`, so the
 /// event still starts so. It carries the page's URL and title in full, and
 /// it is the only place an auto-attached session is named, so it is read up
-/// to [`MAX_COMMAND`]: a page whose URL fits a command the tap reads (the
+/// to [`MAX_TAPPED_COMMAND`]: a page whose URL fits a command the tap reads (the
 /// `Page.navigate` that opened it) is also followed.
 const ATTACHED: &str = r#"{"method":"Target.attachedToTarget""#;
 /// Messages queued for the observer of one connection, at most.
@@ -39,7 +39,7 @@ const QUEUE_MESSAGES: usize = 1024;
 /// of the largest commands (or attach events) the tap reads, or sixty-four
 /// of the largest replies. Skipped messages never count, so a burst of
 /// screenshots costs nothing here; only an observer stuck for good fills it.
-const QUEUE_BYTES: usize = 4 * MAX_COMMAND;
+const QUEUE_BYTES: usize = 4 * MAX_TAPPED_COMMAND;
 
 /// Which way a message went.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,8 +128,8 @@ impl Feed {
         #[cfg(test)]
         thread::sleep(self.delay);
         let cap = match self.direction {
-            Direction::Client => MAX_COMMAND,
-            Direction::Server if message.starts_with(ATTACHED) => MAX_COMMAND,
+            Direction::Client => MAX_TAPPED_COMMAND,
+            Direction::Server if message.starts_with(ATTACHED) => MAX_TAPPED_COMMAND,
             Direction::Server => MAX_REPLY,
         };
         if message.len() > cap {
@@ -175,7 +175,7 @@ fn observe(mut tap: Tap, messages: &Receiver<Queued>, state: &State) {
         if state.is_off() {
             return;
         }
-        if let Err(why) = tap.on_message(direction, message.as_bytes()) {
+        if let Err(why) = tap.on_message(direction, &message) {
             return state.off(why);
         }
     }
@@ -197,8 +197,6 @@ mod tests {
     use crate::browser::broker::Recv;
     use crate::browser::lock;
     use crate::test_support::eventually;
-
-    const BROWSER: &[u8] = b"GET /devtools/browser/x HTTP/1.1\r\nHost: h\r\n\r\n";
 
     /// What the feeds queued so far, in queue order.
     fn drained(queue: &Receiver<Queued>) -> Vec<Queued> {
@@ -266,7 +264,7 @@ mod tests {
             drop(lock(&stuck));
             report(target);
         });
-        (Tap::new(BROWSER, callback), calls)
+        (Tap::new(None, callback), calls)
     }
 
     /// Waits until the gated callback was entered `n` times.
@@ -356,7 +354,7 @@ mod tests {
     #[test]
     fn a_page_whose_attach_event_is_over_the_reply_cap_is_followed() {
         let reported = Reported::default();
-        let (up, down) = spawn(Tap::new(BROWSER, reported.callback()));
+        let (up, down) = spawn(Tap::new(None, reported.callback()));
         // Chromium's layout: `method` first, the URL in full.
         let attached = format!(
             r#"{{"method":"Target.attachedToTarget","params":{{"sessionId":"S1","targetInfo":{{"targetId":"T1","type":"page","title":"","url":"data:text/plain,{}"}},"waitingForDebugger":false}}}}"#,

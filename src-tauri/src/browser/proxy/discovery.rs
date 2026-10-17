@@ -112,12 +112,8 @@ pub(super) fn answer(request: &Request<'_>, broker: &Broker, port: u16) -> Resul
             }
             // A page that has just been created has not loaded anything: its
             // title is its URL.
-            let mut info = Map::new();
-            info.insert("targetId".into(), id);
-            info.insert("type".into(), "page".into());
-            info.insert("title".into(), url.into());
-            info.insert("url".into(), url.into());
-            Ok(Answer::Json(entry(Value::Object(info), port)))
+            let info = json!({ "targetId": id, "type": "page", "title": url, "url": url });
+            Ok(Answer::Json(entry(info, port)))
         }
         Request::Activate(id) => broker
             .call(

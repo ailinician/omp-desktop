@@ -14,7 +14,6 @@
 
 use std::io::{self, ErrorKind, Write};
 use std::net::{Shutdown, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
@@ -29,7 +28,8 @@ use super::feed::Feed;
 use crate::browser::broker::{BrokerClient, Recv, MAX_COMMAND};
 use crate::browser::lock;
 
-/// How often an idle pump looks at whether the other one has finished.
+/// How long an idle pump waits at a time (the reader's `peek`, the
+/// writer's `recv`).
 const POLL: Duration = Duration::from_millis(100);
 /// How long a write to the agent may block before the connection is cut.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -69,38 +69,31 @@ pub(super) fn serve(
         Role::Server,
         Some(config),
     ));
-    let done = AtomicBool::new(false);
     let (up_feed, down_feed) = feeds;
-    let (ws, socket, done) = (&ws, &socket, &done);
+    let (ws, socket) = (&ws, &socket);
     thread::scope(|scope| {
         let down = thread::Builder::new()
             .name("browser-proxy-down".into())
-            .spawn_scoped(scope, move || {
-                downstream(ws, socket, client, &down_feed, done);
-            });
+            .spawn_scoped(scope, move || downstream(ws, socket, client, &down_feed));
         if down.is_ok() {
-            upstream(ws, socket, client, &up_feed, done);
+            upstream(ws, socket, client, &up_feed);
         }
-        // Either side ending ends both.
-        done.store(true, Ordering::SeqCst);
+        // Either side ending ends both: downstream's `recv` returns
+        // `Closed` once the client is closed, a write to the shut-down
+        // socket fails.
         client.close();
         let _ = socket.shutdown(Shutdown::Both);
         down.map(|_| ())
     })
 }
 
-/// Agent to broker, until the agent closes or the broker is gone.
-fn upstream(
-    ws: &Socket,
-    socket: &TcpStream,
-    client: &BrokerClient,
-    feed: &Feed,
-    done: &AtomicBool,
-) {
+/// Agent to broker, until the agent closes, the broker is gone or
+/// downstream shuts the socket down (its `peek` then fails).
+fn upstream(ws: &Socket, socket: &TcpStream, client: &BrokerClient, feed: &Feed) {
     let mut probe = [0u8; 1];
     // Frames that came in with the request head are buffered already.
     let mut buffered = true;
-    while !done.load(Ordering::SeqCst) {
+    loop {
         if !buffered {
             match socket.peek(&mut probe) {
                 Ok(0) => return,
@@ -174,15 +167,10 @@ fn drain(ws: &Socket) -> (Vec<Utf8Bytes>, bool) {
     (messages, alive && blocking)
 }
 
-/// Broker to agent, until the broker ends this client or a write fails.
-fn downstream(
-    ws: &Socket,
-    socket: &TcpStream,
-    client: &BrokerClient,
-    feed: &Feed,
-    done: &AtomicBool,
-) {
-    while !done.load(Ordering::SeqCst) {
+/// Broker to agent, until the broker ends this client (or upstream's end
+/// closes it) or a write fails.
+fn downstream(ws: &Socket, socket: &TcpStream, client: &BrokerClient, feed: &Feed) {
+    loop {
         match client.recv(POLL) {
             Recv::Message(text) => {
                 feed.push(&text);
@@ -194,6 +182,5 @@ fn downstream(
             Recv::Closed => break,
         }
     }
-    done.store(true, Ordering::SeqCst);
     let _ = socket.shutdown(Shutdown::Both);
 }
