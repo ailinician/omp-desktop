@@ -1,22 +1,51 @@
 /* Stage layout + session column ──────────────────────────────────── */
 
 /* ── Stage layout ────────────────────────────────────────────────────── */
+/* Column widths come from app/use-pane-widths.jsx as variables on
+   `.workspace`, set for every shown column from the first render; the
+   fallbacks only repeat OMP_LAYOUT_WIDTHS.PANES' defaults. */
 .stage {
   flex: 1;
   min-width: 0;
   display: grid;
   grid-template-columns: 1fr;
   min-height: 0;
+  position: relative;
 }
 .stage.with-rail {
-  grid-template-columns: 1fr 280px;
+  grid-template-columns: 1fr var(--w-rail, 280px);
 }
 .window.is-split .stage.with-rail {
-  grid-template-columns: 1fr 320px 280px;
+  grid-template-columns: 1fr var(--w-split, 320px) var(--w-rail, 280px);
 }
 .window.is-split .stage:not(.with-rail) {
-  grid-template-columns: 1fr 320px;
+  grid-template-columns: 1fr var(--w-split, 320px);
 }
+
+/* ── Column resize handles (ui/resize-handle.jsx) ───────────────────── */
+/* A 6px line centred on the pane's edge. In the stage it is placed in its
+   pane's grid area without taking part in auto-placement (an absolutely
+   positioned grid child), so a scrolling pane does not carry it along. */
+.pane-resize {
+  position: absolute; top: 0; bottom: 0; left: -3px; z-index: 4;
+  width: 6px; cursor: col-resize; touch-action: none; outline: none;
+}
+.pane-resize:hover, .pane-resize.dragging, .pane-resize:focus-visible {
+  background: color-mix(in oklab, var(--accent) 35%, transparent);
+}
+.pane-resize.at-split { grid-row: 1; grid-column: 2; }
+.pane-resize.at-side { grid-row: 1; grid-column: -2; }
+.pane-resize.at-sidebar { left: calc(var(--w-sidebar, 220px) - 3px); }
+.pane-resize-tip {
+  display: none; position: absolute; top: 50%; transform: translateY(-50%);
+  padding: 2px 7px; white-space: nowrap; pointer-events: none;
+  background: var(--bg-elevated); border: 1px solid var(--line-bright); border-radius: var(--r-1);
+  font-family: var(--font-mono); font-size: var(--d-text-xs); color: var(--accent);
+}
+/* Shown over the pane being resized. */
+.pane-resize.edge-left .pane-resize-tip { left: 10px; }
+.pane-resize.edge-right .pane-resize-tip { right: 10px; }
+.pane-resize.dragging .pane-resize-tip, .pane-resize:focus-visible .pane-resize-tip { display: block; }
 
 /* ── Session column ─────────────────────────────────────────────────── */
 .session {

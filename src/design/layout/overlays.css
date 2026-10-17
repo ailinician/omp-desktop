@@ -260,12 +260,6 @@
 /* mono-chat tweak */
 .mono-chat .ass-text, .mono-chat .user-text { font-family: var(--font-mono); font-size: var(--d-text-sm); }
 
-/* small screens fallback */
-@media (max-width: 1100px) {
-  .stage.with-rail { grid-template-columns: 1fr 240px; }
-  .window.is-split .stage.with-rail { grid-template-columns: 1fr 280px 240px; }
-}
-
 /* ── Plan annotation blocks (rendered in AssistantBubble when planMode) ── */
 .plan-annot-blocks { display: flex; flex-direction: column; gap: 2px; }
 

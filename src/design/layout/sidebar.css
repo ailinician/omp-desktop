@@ -1,11 +1,13 @@
 /* Project sidebar (issue #27) ─────────────────────────────────────── */
 
 /* Row below the tab bar: sidebar + stage. The sidebar sits outside `.stage`,
-   so the stage's grid templates (rail / split pane) are untouched. */
-.workspace { flex: 1; min-height: 0; display: flex; }
+   so the stage's grid templates (rail / split pane) are untouched. Its
+   width is `--w-sidebar` (app/use-pane-widths.jsx); the row positions the
+   sidebar's resize handle (stage.css `.pane-resize.at-sidebar`). */
+.workspace { flex: 1; min-height: 0; display: flex; position: relative; }
 
 .project-sidebar {
-  width: 220px; flex: none; min-height: 0;
+  width: var(--w-sidebar, 220px); flex: none; min-height: 0;
   display: flex; flex-direction: column;
   border-right: 1px solid var(--line);
   background: var(--bg-window);
@@ -108,4 +110,3 @@ body.reordering, body.reordering * { cursor: grabbing !important; user-select: n
 [data-reorder-axis="y"].drop-before::after { left: 0; right: 0; top: 0; height: 2px; }
 [data-reorder-axis="y"].drop-after::after  { left: 0; right: 0; bottom: 0; height: 2px; }
 
-@media (max-width: 1100px) { .project-sidebar { width: 188px; } }

@@ -3,8 +3,8 @@
    expiring (< 10 min), cyan = partly cached, rose = cold price. */
 
 /* ── Stage: the pane takes the rail's column ───────────────────────────── */
-.stage.with-tree { grid-template-columns: minmax(0, 1fr) min(540px, 50%); }
-.window.is-split .stage.with-tree { grid-template-columns: minmax(0, 1fr) 320px min(540px, 50%); }
+.stage.with-tree { grid-template-columns: minmax(0, 1fr) var(--w-tree, min(540px, 50%)); }
+.window.is-split .stage.with-tree { grid-template-columns: minmax(0, 1fr) var(--w-split, 320px) var(--w-tree, min(540px, 50%)); }
 .rail-head-actions { display: inline-flex; align-items: center; gap: 2px; }
 
 .tree-drawer {

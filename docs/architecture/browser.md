@@ -18,7 +18,7 @@ One desktop tab owns one headless Chromium, shared by its omp agent and the brow
 | `src/live.js` | Browser command bridge and panel channel (`browserOpenPanel`), settings bridge (`browserSettings`, `browserSetPath`, `browserPickPath`), release on desktop-tab close |
 | `src/app/browser.js` | Pure URL, input, Esc, coordinate, chip, message-merge, width and Chromium-menu helpers |
 | `src/app/browser-screen.js`, `src/app/use-browser.jsx` | Canvas decoding/painting, frame acks, DOM input through a focus sink; view lifecycle, events, per-tab chips and chat localhost-link routing (`onChatClick`) |
-| `src/design/browser-{dock,panel,toolbar,chips,tweaks}.jsx`, `src/design/layout/browser.css` | Resizable/full-view dock (`ui/use-edge-drag.js`, shared with the terminal), page tabs, controls, annotation popover and chips; Tweaks → Browser `chromium` row (`design/path-setting.jsx` + `app/path-setting.js`, shared with the terminal's shell) |
+| `src/design/browser-{dock,panel,toolbar,chips,tweaks}.jsx`, `src/design/layout/browser.css` | Resizable/full-view dock (`ui/use-edge-drag.js`, shared with the terminal; its edge is `ui/resize-handle.jsx`, shared with the other columns beside the chat, whose widths and the chat's minimum are `app/layout-widths.js`), page tabs, controls, annotation popover and chips; Tweaks → Browser `chromium` row (`design/path-setting.jsx` + `app/path-setting.js`, shared with the terminal's shell) |
 
 ```text
 start_session -> BrowserManager.allocate -> private settings overlay

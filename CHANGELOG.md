@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Resizable columns (#41): drag the line between the chat and the project sidebar, the subagent pane, the ambient rail or the conversation tree to change that column's width. The widths are saved and come back on the next launch. Double-click a line (or focus it and press Enter) for the default width; with a line focused, the arrow keys move it 16 px (64 px with Shift) and Home/End jump to the narrowest and widest. A column grows only into room the chat can spare, so the chat keeps at least 420 px; in a smaller window the columns narrow first, down to their minimum widths. Tweaks → Layout → "reset column widths" puts every column back, the browser panel included. The browser panel's edge takes the same keys.
+
 ### Fixed
 
 - Typography on Windows: interface text now uses Segoe UI Variable (Segoe UI on Windows 10) and code uses Cascadia Mono, Cascadia Code or Consolas, instead of falling through the macOS-only fonts to Arial and Consolas. Chinese and Japanese characters still take Windows' fallback font for the display language.
