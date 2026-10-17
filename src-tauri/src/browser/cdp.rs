@@ -6,9 +6,7 @@
 //! [`CdpClient::connect`]). Sending goes straight to the broker from any
 //! thread, never behind the reader.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -17,6 +15,7 @@ use serde_json::{json, Value};
 
 use super::broker::{BrokerClient, Recv};
 use super::lock;
+use super::waiters::Waiters;
 
 /// How long [`CdpClient::call`] waits for the response.
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -34,7 +33,7 @@ pub const DISCONNECTED: &str = "CDP.disconnected";
 /// [`notify`](CdpClient::notify) is fine.
 pub type EventHandler = Box<dyn Fn(Option<&str>, &str, Value) + Send>;
 
-type Waiters = Mutex<HashMap<u64, Sender<Result<Value, String>>>>;
+const CLOSED: &str = "cdp connection closed";
 
 struct Shared {
     client: BrokerClient,
@@ -57,7 +56,7 @@ impl CdpClient {
     pub fn connect(client: BrokerClient, on_event: EventHandler) -> Result<Self, String> {
         let shared = Arc::new(Shared {
             client,
-            waiters: Mutex::new(HashMap::new()),
+            waiters: Waiters::new(CLOSED),
             next_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
         });
@@ -80,26 +79,17 @@ impl CdpClient {
         params: Value,
     ) -> Result<Value, String> {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel();
-        lock(&self.shared.waiters).insert(id, tx);
-        // The reader sets `closed` before it fails the waiters, so either it
-        // sees this entry or we see the flag.
+        // Dropped on any way out, it forgets the command.
+        let waiter = self.shared.waiters.register(id);
+        // Registered first: the reader sets `closed` before it fails the
+        // waiters (see `Waiters::register`).
         if self.shared.closed.load(Ordering::SeqCst) {
-            lock(&self.shared.waiters).remove(&id);
-            return Err("cdp connection closed".into());
+            return Err(CLOSED.into());
         }
-        if let Err(e) = self.send(id, session, method, params) {
-            lock(&self.shared.waiters).remove(&id);
-            return Err(e);
-        }
-        match rx.recv_timeout(CALL_TIMEOUT) {
-            Ok(result) => result,
-            Err(RecvTimeoutError::Timeout) => {
-                lock(&self.shared.waiters).remove(&id);
-                Err(format!("cdp {method}: timed out"))
-            }
-            Err(RecvTimeoutError::Disconnected) => Err("cdp connection closed".into()),
-        }
+        self.send(id, session, method, params)?;
+        waiter
+            .wait(CALL_TIMEOUT)
+            .unwrap_or_else(|| Err(format!("cdp {method}: timed out")))
     }
 
     /// Send a command without waiting for the response (it is discarded).
@@ -111,7 +101,7 @@ impl CdpClient {
     /// [`notify`](Self::notify) that says whether the command went out.
     pub fn post(&self, session: Option<&str>, method: &str, params: Value) -> Result<(), String> {
         if self.shared.closed.load(Ordering::SeqCst) {
-            return Err("cdp connection closed".into());
+            return Err(CLOSED.into());
         }
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         self.send(id, session, method, params)
@@ -165,8 +155,7 @@ fn read_loop(shared: &Shared, on_event: &EventHandler) {
         }
     }
     let lost = !shared.closed.swap(true, Ordering::SeqCst);
-    // Dropping the senders wakes every waiting `call`.
-    lock(&shared.waiters).clear();
+    shared.waiters.fail_all();
     if lost {
         on_event(None, DISCONNECTED, Value::Null);
     }
@@ -177,17 +166,7 @@ fn dispatch(shared: &Shared, on_event: &EventHandler, text: &str) {
         return;
     };
     if let Some(id) = message.get("id").and_then(Value::as_u64) {
-        let waiter = lock(&shared.waiters).remove(&id);
-        if let Some(waiter) = waiter {
-            let error = message.get("error").map(|e| {
-                e.get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("cdp error")
-                    .to_owned()
-            });
-            let result = error.map_or_else(|| Ok(message["result"].take()), Err);
-            let _ = waiter.send(result);
-        }
+        shared.waiters.complete(id, message);
     } else if message.get("method").is_some_and(Value::is_string) {
         let params = message["params"].take();
         let method = message["method"].as_str().unwrap_or_default();
