@@ -1,6 +1,7 @@
 # Every child process goes through `src/spawn_gate.rs`, so none but Chromium
-# can inherit Chromium's CDP pipe ends (Windows). A call that must stay holds
-# `spawn_gate::shared()` and allows the lint with a comment.
+# gets Chromium's CDP pipe ends (Windows, macOS). A call that must stay holds
+# `spawn_gate::shared()` and allows the lint with a comment. Checked only by
+# the local clippy command in AGENTS.md (Verify); CI runs no clippy.
 disallowed-methods = [
     { path = "std::process::Command::spawn", reason = "use spawn_gate::spawn" },
     { path = "std::process::Command::output", reason = "use spawn_gate::output" },

@@ -6,13 +6,16 @@
 //! except through the broker, and the pipe ends with Chromium.
 //!
 //! Unix: Chromium reads fd 3 and writes fd 4; the child's ends are moved
-//! there between fork and exec, and are close-on-exec everywhere else.
+//! there between fork and exec, and are close-on-exec everywhere else. On
+//! macOS std opens a pipe and only then sets close-on-exec on it, so
+//! [`attach`] creates them under the exclusive spawn gate
+//! ([`crate::spawn_gate`]): no child is forked in between.
 //! Windows: Chromium takes the two handle values from
 //! `--remote-debugging-io-pipes=<read>,<write>`, so its ends must be
 //! inheritable while its process is created — and every child created in
 //! that moment inherits every inheritable handle. [`CdpPipes::spawn`] makes
-//! them inheritable only under the exclusive spawn gate
-//! ([`crate::spawn_gate`]) and closes them before releasing it.
+//! them inheritable only under the exclusive spawn gate and closes them
+//! before releasing it.
 
 use std::io::{self, PipeReader, PipeWriter};
 use std::process::{Child, Command};
@@ -56,8 +59,14 @@ impl CdpPipes {
 
 /// Create the pipes and set `cmd` up to hand Chromium its ends.
 pub fn attach(cmd: &mut Command) -> io::Result<CdpPipes> {
-    let (child_reads, to_chromium) = io::pipe()?;
-    let (from_chromium, child_writes) = io::pipe()?;
+    let (child_reads, to_chromium, from_chromium, child_writes) = {
+        // Not atomic on macOS: the ends are inheritable for a moment.
+        #[cfg(target_vendor = "apple")]
+        let _gate = spawn_gate::exclusive();
+        let (child_reads, to_chromium) = io::pipe()?;
+        let (from_chromium, child_writes) = io::pipe()?;
+        (child_reads, to_chromium, from_chromium, child_writes)
+    };
     cmd.arg("--remote-debugging-pipe");
     hand_over(cmd, &child_reads, &child_writes);
     Ok(CdpPipes {
@@ -219,9 +228,7 @@ mod tests {
         assert!(ended, "the pipe ended with Chromium");
     }
 
-    /// Chromium's ends are made inheritable only once every spawn in flight
-    /// is done (Windows: elsewhere the gate does nothing).
-    #[cfg(windows)]
+    /// Chromium's spawn waits for every spawn in flight.
     #[test]
     fn spawn_waits_for_spawns_in_flight() {
         let mut cmd = exiting();

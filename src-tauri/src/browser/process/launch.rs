@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -110,7 +110,20 @@ impl Chromium {
                 Broker::start(from_chromium, to_chromium)
                     .map_err(|e| Failure::Fatal(format!("cdp pipe reader: {e}")))
             });
-        let stderr = child.stderr.take().map(StderrTail::drain);
+        // The end of Chromium's stderr closes the broker: the process tree
+        // is gone even if the pipe never reports its end (a process started
+        // outside the spawn gate could hold a copy of Chromium's ends; std
+        // makes a child's stdio ends inheritable only within its own spawn,
+        // under its own lock, so no other std spawn holds stderr). Weak: the
+        // drain thread must not keep the connection alive.
+        let watched = broker.as_ref().ok().map(Arc::downgrade);
+        let stderr = child.stderr.take().map(|stderr| {
+            StderrTail::drain(stderr, move || {
+                if let Some(broker) = watched.as_ref().and_then(Weak::upgrade) {
+                    broker.close();
+                }
+            })
+        });
 
         let started = broker.and_then(|broker| match wait_for_browser(&mut child, &broker) {
             Ok(()) => Ok(broker),
