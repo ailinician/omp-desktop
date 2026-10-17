@@ -402,9 +402,9 @@ impl AgentBridge {
     /// `pick` applied to `session_id`'s map entry, holding the `sessions`
     /// lock only while `pick` runs: callers take an `Arc` handle out and lock
     /// or write through it after the map lock is released, so a slow pipe or
-    /// a busy reader never blocks management calls (`grant_approval` instead
-    /// makes a session grant in `pick`: a set insert that must not outlive
-    /// the entry). `Ok(None)` for an unknown session.
+    /// a busy reader never blocks management calls (`approve_and_grant`
+    /// instead makes a session grant in `pick`: a set insert that must not
+    /// outlive the entry). `Ok(None)` for an unknown session.
     fn with_entry<T>(
         &self,
         session_id: &str,

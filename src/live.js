@@ -3579,26 +3579,21 @@
 
     /** Approve tool-approval prompt `prompt` (its ask bubble: `sessionId` +
      *  request `id`) and grant standing approval for its tool, `scope`
-     *  `"session"` or `"project"`. Rust takes the tool and the project from
-     *  the prompt that session's process forwarded and has not seen
-     *  answered, and refuses any other, so a grant never lands on another
-     *  tab's scope. The bubble settles at once (its buttons go inert); the
-     *  answer goes out only after the grant — an answer settles the prompt
-     *  in Rust — and to the prompt's own process, whichever tab is active
-     *  by then. A prompt not in the active tab is left alone. Proven with
-     *  an eval-kernel cell that loads this file into a stubbed-Tauri VM
-     *  (3/3 cases: the bubble reads answered before the grant resolves, a
-     *  second click sends no second grant, and a tab switch while the
-     *  grant is held still sends one "Approve" to the prompt's session). */
+     *  `"session"` or `"project"`, in ONE call: `approval_approve_and_grant`
+     *  answers the prompt on the stdin of the process that asked and saves
+     *  the rule only once that answer was written, so no rule outlives an
+     *  unanswered prompt and no answer reaches a respawned process. Rust
+     *  takes the tool and the project from the prompt that session's
+     *  process forwarded and has not seen answered, and refuses any other,
+     *  so a grant never lands on another tab's scope. The bubble settles at
+     *  once (its buttons go inert, so a second click sends nothing), and
+     *  the call names the prompt's own session, whichever tab is active by
+     *  the time it runs. A prompt not in the active tab is left alone. */
     async approveAndRemember(prompt, scope) {
       const sessionId = prompt?.sessionId;
       if (!sessionId || sessionId !== activeSessionId || !prompt.id) return;
       if (!_settleAsk(prompt.id, { answered: true, answer: "Approve" })) return;
-      await _invokeSafe("approval_rules_grant", { sessionId, requestId: prompt.id, scope });
-      await _invokeSafe("send_command", {
-        sessionId,
-        json: JSON.stringify({ type: "extension_ui_response", id: prompt.id, value: "Approve" }),
-      });
+      await _invokeSafe("approval_approve_and_grant", { sessionId, requestId: prompt.id, scope });
     },
 
     /** Revoke a previously granted rule. No-op if it wasn't granted. */
