@@ -12,7 +12,7 @@ Feature internals (RPC frames, state machines, measured omp behaviour) live in `
 |`session-title.md`|auto/manual `/rename` of tabs|`app/session-title.js`|
 |`recent-models.md`|model picker MRU from omp's `agent.db`|`model_usage.rs`|
 |`message-queue.md`|steer/follow-up queue strip|`app/message-queue.js`, `design/queue-strip.jsx`|
-|`ask-dialog.md`|omp's ask tool dialog, tool-approval prompts, auto-approval rows|`app/ask-dialog.js`, `chat/ask-dialog.jsx`, `app/approval.js`, `chat/approval-row.jsx`, `approval.rs`|
+|`ask-dialog.md`|omp's ask tool dialog, tool-approval prompts, auto-approval rows, grants bound to their prompt|`app/ask-dialog.js`, `chat/ask-dialog.jsx`, `app/approval.js`, `chat/approval-row.jsx`, `approval.rs`, `agent/approvals.rs`|
 |`approval-mode.md`|tool approval mode (global default, per-project override), restart-on-change|`approval_mode.rs`, `app/approval-mode.js`, `live.js` `_respawnSession`|
 |`turn-status.md`|run state, failed requests, auto-retry rows, job rows|`app/turn-status.js`|
 |`chat-collapse.md`|collapsible tool cards and thinking, auto-collapse, per-tab toggles|`app/chat-collapse.js`, `ui/collapse-toggle.jsx`, `chat/chat-view.jsx`|
@@ -58,7 +58,7 @@ Regression files are mostly named after the `src/app/<name>.js` module they cove
 |Path|What|
 |---|---|
 |`src-tauri/src/lib.rs`|Tauri setup, plugin registration, `generate_handler!` list, session commands|
-|`src-tauri/src/agent/`|`AgentBridge` (`mod.rs`, also `ALLOWED_COMMAND_TYPES`), per-session `inner.rs`, `spawn.rs` (omp resolution, version floor, `CREATE_NO_WINDOW`), `reader.rs` (stdout/stderr threads, 16 MiB `read_until_capped`, credential redaction), `journal.rs` (in-memory event ring for `replay_events` after a tab switch), `ext_ui.rs` (latest extension status lines/widgets per session, `extension_ui_state`)|
+|`src-tauri/src/agent/`|`AgentBridge` (`mod.rs`, also `ALLOWED_COMMAND_TYPES`), per-session `inner.rs`, `spawn.rs` (omp resolution, version floor, `CREATE_NO_WINDOW`), `reader.rs` (stdout/stderr threads, 16 MiB `read_until_capped`, credential redaction), `journal.rs` (in-memory event ring for `replay_events` after a tab switch), `ext_ui.rs` (latest extension status lines/widgets per session, `extension_ui_state`), `approvals.rs` (open tool-approval prompts per process; `approval_rules_grant` binds to one)|
 |`src-tauri/src/supervisor.rs`|process-tree kill for every spawn (omp, widget plugins, Chromium, the Windows terminal shell): process group / Job Object; `pid_is_alive`, `kill_group_if_leader`|
 |`src-tauri/src/program_setting.rs`|one-program setting shared by `terminal.json` and `browser.json` (file + lock, in-memory cache, refuse-to-overwrite policy) and the path rules (`typed_path`, `is_executable_file`)|
 |`src-tauri/src/test_support.rs`|`#[cfg(test)]` helpers shared by module test suites: `eventually`, `wait_until`, `executable` — use these, don't copy them|

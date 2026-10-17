@@ -390,7 +390,7 @@ function App() {
   const handleAskDialogAnswer = React.useCallback((id, answers) => { bridge?.answerAskDialog(id, answers); }, [bridge]);
   const handleConfirmAsk = React.useCallback((id, confirmed) => { bridge?.answerConfirm(id, confirmed); }, [bridge]);
   const handleCancelAsk  = React.useCallback((id) => { bridge?.cancelAsk(id); }, [bridge]);
-  const handleGrantApproval = React.useCallback((tool, scope) => { bridge?.grantApprovalRule(tool, scope); }, [bridge]);
+  const handleGrantApproval = React.useCallback((prompt, scope) => { bridge?.approveAndRemember(prompt, scope); }, [bridge]);
   const handleStopRetry  = React.useCallback(() => bridge?.stopRetry(), [bridge]);
   const handlePickLogin = async (provider) => {
     if (!bridge) return;

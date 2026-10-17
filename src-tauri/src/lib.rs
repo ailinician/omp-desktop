@@ -636,29 +636,30 @@ async fn approval_rules_list(
     off_ipc(move || rule_book.list(&session_id, project_root.as_deref().map(Path::new))).await
 }
 
-/// Grant standing approval for `tool`. `scope` is `"session"` or `"project"`
-/// (the latter requires `project_root`); anything else is a stable error.
+/// Grant standing approval for the tool of the open approval prompt
+/// `request_id` of `session_id`. `scope` is `"session"` or `"project"`
+/// (the latter needs a process started in a folder); anything else is a
+/// stable error. The tool and the project come from the prompt the
+/// session's process forwarded (`AgentBridge::grant_approval`), never from
+/// the webview, so a grant cannot outgrow the prompt the user is answering:
+/// a prompt with no open match in that process is refused.
 ///
-/// Runs `async` + `spawn_blocking`: `RuleBook::grant` performs a locked
-/// file read-modify-write with up to several blocking retry sleeps, which
-/// can stall the webview if run on Tauri's main command thread.
+/// Runs `async` + `spawn_blocking`: a project grant's `RuleBook::grant`
+/// performs a locked file read-modify-write with up to several blocking
+/// retry sleeps, which can stall the webview if run on Tauri's main command
+/// thread.
 #[tauri::command]
 async fn approval_rules_grant(
     session_id: String,
-    project_root: Option<String>,
-    tool: String,
+    request_id: String,
     scope: String,
-    rule_book: State<'_, Arc<RuleBook>>,
+    app: AppHandle,
 ) -> Result<(), String> {
-    let rule_book = Arc::clone(rule_book.inner());
+    let scope = parse_rule_scope(&scope)?;
     off_ipc(move || {
-        let scope = parse_rule_scope(&scope)?;
-        rule_book.grant(
-            &session_id,
-            project_root.as_deref().map(Path::new),
-            &tool,
-            scope,
-        )
+        let rule_book = app.state::<Arc<RuleBook>>();
+        app.state::<AgentBridge>()
+            .grant_approval(&rule_book, &session_id, &request_id, scope)
     })
     .await?
 }

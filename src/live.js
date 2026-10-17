@@ -435,6 +435,10 @@
       kind: "ask",
       method,
       id: ev.id,
+      // The tab whose process asked: frames are dispatched only for the
+      // active tab (see `_switchToSession`), and a tool approval's grant
+      // names this session with the request id (`approveAndRemember`).
+      sessionId: activeSessionId,
       time: timeNow(),
       title: ev.title ?? "",
       options: [],
@@ -878,9 +882,22 @@
     _replayBuffer = [];
     extSnapshotSeq = 0;
 
+    // Each callback checks it still belongs to this activation: an unlisten
+    // only settles after an IPC round-trip, and until it does a superseded
+    // activation's listener would dispatch its session's frames — a tool
+    // approval among them — into whichever tab is active now. A dropped
+    // line is not lost: `lastSeq` stays behind it, so the next activation
+    // of `id` replays it from the journal. `_detachActiveSession` (no new
+    // generation) clears `activeSessionId`, so that check covers it; the
+    // same check follows every await below, so a detached activation stops
+    // too instead of replaying into the detached state. Proven with an
+    // eval-kernel cell that loads this file into a stubbed-Tauri VM (tabs
+    // A→B→C with B's unlisten held: before, B's approval prompt surfaced in
+    // C with no binding; after, it is dropped and C shows none).
+    const current = () => _switchGen === myGen && activeSessionId === id;
     const { listen } = window.__TAURI__.event;
-    const ulLine = await listen(`agent://line/${id}`, ev => handleLine(ev.payload));
-    if (_switchGen !== myGen) {
+    const ulLine = await listen(`agent://line/${id}`, ev => { if (current()) handleLine(ev.payload); });
+    if (!current()) {
       // Superseded while this call's own listener was still being attached —
       // it was never stored into activeListeners, so nothing else will ever
       // tear it down. Without this it keeps dispatching the abandoned
@@ -890,6 +907,7 @@
       return;
     }
     const ulExit = await listen(`agent://exit/${id}`, ev => {
+      if (!current()) return;
       const reason = (ev?.payload && String(ev.payload).trim()) || "";
       console.warn(`[live] session '${id}' omp process exited${reason ? ": " + reason : ""}`);
       state.isStreaming = false;
@@ -900,7 +918,7 @@
       _endDeadProcessState();
       notify();
     });
-    if (_switchGen !== myGen) {
+    if (!current()) {
       // Same leak as above, but both listeners for this call exist and
       // haven't been committed to activeListeners yet.
       try { await ulLine(); } catch (_) {}
@@ -918,7 +936,7 @@
     // gone for good; get_messages still recovers the persisted text below.
     try {
       const replay = await window.__TAURI__.core.invoke("replay_events", { sessionId: id, afterSeq: lastSeq });
-      if (_switchGen !== myGen) return; // superseded by a newer switch
+      if (!current()) return; // superseded by a newer switch, or detached
       if (replay.dropped) {
         console.warn(`[live] session '${id}' replay desynced — recovered ${replay.events.length} event(s); earlier ones fell outside the journal window`);
       }
@@ -931,7 +949,7 @@
       // this tab with its old `lastSeq` and the next visit fetches again.
       if (replay.dropped) {
         const ext = await _invokeSafe("extension_ui_state", { sessionId: id }, null);
-        if (_switchGen !== myGen) return; // superseded by a newer switch
+        if (!current()) return; // superseded by a newer switch, or detached
         if (ext) {
           state.extWidgets = EXT.fromSnapshot(ext);
           extSnapshotSeq = Number.isInteger(ext.seq) ? ext.seq : 0;
@@ -950,13 +968,14 @@
       // Same for an abort: its response may be among the evicted events.
       if (replay.dropped) userAbortInFlight = false;
     } catch (e) {
+      if (!current()) return; // superseded by a newer switch, or detached
       console.warn(`[live] replay_events failed for '${id}':`, e);
       // The backend no longer has the session: its process ended while the
       // tab was in the background, with no exit listener attached and no
       // reason worth caching (a clean exit, a crash after startup).
       if (/not found/.test(String(e))) _endDeadProcessState();
     }
-    if (_switchGen !== myGen) return; // superseded by a newer switch
+    if (!current()) return; // superseded by a newer switch, or detached
 
     // Drain live events buffered while the replay fetch was in flight,
     // de-duplicated against lastSeq inside _dispatchEnvelope.
@@ -972,7 +991,7 @@
     // cached error synchronously — no event timing race.
     try {
       const startupError = await window.__TAURI__.core.invoke("session_status", { sessionId: id });
-      if (_switchGen !== myGen) return; // superseded by a newer switch
+      if (!current()) return; // superseded by a newer switch, or detached
       // Same renderer as the `agent://exit` path: this is the *same* backend
       // string (the reader writes `last_errors` and emits the event with one
       // value), and every background tab reaches the
@@ -993,7 +1012,7 @@
     } catch (e) {
       console.warn(`[live] session_status query failed:`, e);
     }
-    if (_switchGen !== myGen) return; // superseded by a newer switch
+    if (!current()) return; // superseded by a newer switch, or detached
 
     // Re-fetch to pick up events missed while not listening.
     // get_messages handler merges completed turns with the cached streaming bubble.
@@ -3555,14 +3574,30 @@
     // auto-answers "Approve" for an exact "Allow tool: X" prompt shape —
     // see the module doc comment there. Session scope is in-memory (dies
     // with the tab's omp process); project scope persists to disk keyed by
-    // a hash of the active tab's project path.
+    // a hash of the project path — for a grant, the folder of the process
+    // that asked; list and revoke use the active tab's.
 
-    /** Grant standing approval for `tool` in the active session/project.
-     *  `scope` is `"session"` or `"project"`. */
-    async grantApprovalRule(tool, scope) {
-      if (!activeSessionId) return;
-      await _invokeSafe("approval_rules_grant", {
-        sessionId: activeSessionId, projectRoot: _activeProjectPath(), tool, scope,
+    /** Approve tool-approval prompt `prompt` (its ask bubble: `sessionId` +
+     *  request `id`) and grant standing approval for its tool, `scope`
+     *  `"session"` or `"project"`. Rust takes the tool and the project from
+     *  the prompt that session's process forwarded and has not seen
+     *  answered, and refuses any other, so a grant never lands on another
+     *  tab's scope. The bubble settles at once (its buttons go inert); the
+     *  answer goes out only after the grant — an answer settles the prompt
+     *  in Rust — and to the prompt's own process, whichever tab is active
+     *  by then. A prompt not in the active tab is left alone. Proven with
+     *  an eval-kernel cell that loads this file into a stubbed-Tauri VM
+     *  (3/3 cases: the bubble reads answered before the grant resolves, a
+     *  second click sends no second grant, and a tab switch while the
+     *  grant is held still sends one "Approve" to the prompt's session). */
+    async approveAndRemember(prompt, scope) {
+      const sessionId = prompt?.sessionId;
+      if (!sessionId || sessionId !== activeSessionId || !prompt.id) return;
+      if (!_settleAsk(prompt.id, { answered: true, answer: "Approve" })) return;
+      await _invokeSafe("approval_rules_grant", { sessionId, requestId: prompt.id, scope });
+      await _invokeSafe("send_command", {
+        sessionId,
+        json: JSON.stringify({ type: "extension_ui_response", id: prompt.id, value: "Approve" }),
       });
     },
 
