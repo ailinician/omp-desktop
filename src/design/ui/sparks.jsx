@@ -60,7 +60,7 @@ const TokenGauge = ({ used, total, pct, label, sub }) => {
 
 // ── Activity radar — 60s strip of tool calls colored by kind ─────────
 const ActivityRadar = ({ activity, tps }) => {
-  const cells = Array.from({ length: 60 }, (_, i) => activity.find((a) => a.t === i));
+  const cells = Array.from({ length: 60 }, (_, i) => activity.find((a) => a.t === 59 - i));
   return (
     <div className="radar">
       <div className="radar-row">
@@ -71,7 +71,7 @@ const ActivityRadar = ({ activity, tps }) => {
               background: c ? _SP_TOOL_META[c.k]?.color : "transparent",
               animationDelay: `${i * 30}ms`,
             }}
-            title={c ? `t-${60 - i}s · ${c.k}` : ""} />
+            title={c ? `t-${59 - i}s · ${c.k}` : ""} />
         ))}
       </div>
       <div className="radar-foot">

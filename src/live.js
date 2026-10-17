@@ -300,6 +300,17 @@
   let tpsSamples      = Array(30).fill(0);
   let turnStartTime   = null;
   let activityLog     = [];           // [{ts, toolName}], pruned to 60s
+  let activityDecayTimer = null;
+  function _tickActivityRadar() {
+    const cutoff = Date.now() - 60_000;
+    while (activityLog.length && activityLog[0].ts < cutoff) activityLog.shift();
+    state.activity = window.buildActivityFromLog(activityLog);
+    if (!activityLog.length && activityDecayTimer) {
+      clearInterval(activityDecayTimer);
+      activityDecayTimer = null;
+    }
+    notify();
+  }
   let lastSeq         = 0;   // highest journal seq processed for the active session — see _dispatchEnvelope
   let lastTurnOk      = true; // last assistant message_end was not error/aborted — a failed first exchange must not spend the one-shot
   let _replayBuffer   = null; // null = live dispatch; [] = buffering during a replay (see _switchToSession)
@@ -2669,9 +2680,10 @@
       _flushAskBubbles();
 
       activityLog.push({ ts: now, toolName: ev.toolName ?? "" });
-      const cutoff = now - 60_000;
-      while (activityLog.length && activityLog[0].ts < cutoff) activityLog.shift();
-      state.activity = window.buildActivityFromLog(activityLog);
+      _tickActivityRadar();
+      if (!activityDecayTimer) {
+        activityDecayTimer = setInterval(_tickActivityRadar, 2000);
+      }
       notify();
       return;
     }
