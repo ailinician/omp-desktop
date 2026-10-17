@@ -301,7 +301,7 @@ function SessionMinimap({ messages, hoveredIdx, onHover, onClick }) {
         {messages.map((m, i) => {
           if (window.OMP_TURN_STATUS.isHidden(m)) return null;
           let hue = "var(--fg-5)";
-          if      (m.kind === "user")      hue = "var(--fg-3)";
+          if      (m.kind === "user")      hue = "var(--magenta)";
           else if (m.kind === "assistant") hue = m.failure ? "var(--rose)" : "var(--accent)";
           else if (m.kind === "ask")       hue = "var(--amber)";
           else if (m.kind === "retry")     hue = TOOL_META.retry.color;
@@ -361,7 +361,7 @@ function SessionMinimap({ messages, hoveredIdx, onHover, onClick }) {
         })}
       </div>
       <div className="minimap-legend">
-        <span className="minimap-legend-item"><i style={{ background: "var(--fg-3)" }} />{_t("you")}</span>
+        <span className="minimap-legend-item"><i style={{ background: "var(--magenta)" }} />{_t("you")}</span>
         <span className="minimap-legend-item"><i style={{ background: "var(--accent)" }} />{_t("assistant")}</span>
         <span className="minimap-legend-item"><i style={{ background: "var(--amber)" }} />{_t("ask")}</span>
         <span className="minimap-legend-item"><i style={{ background: "var(--fg-4)" }} />{_t("tool")}</span>
