@@ -155,9 +155,9 @@ async fn off_ipc<T: Send + 'static>(
 }
 
 /// [`off_ipc`] against a shared `Arc<S>` — what every state-mutating command
-/// shares (`ProfileStore` and the keybindings `OverlayStore` alike): each one
-/// is a locked, fsync'd read-modify-write of its own JSON file (same
-/// rationale as `approval_rules_grant`).
+/// shares (`ProfileStore` and the keybindings `OverlayStore` alike): file-backed,
+/// each one is a locked, fsync'd read-modify-write of its own JSON file (same
+/// rationale as `approval_rules_grant`); memory-only, a short mutex hold.
 async fn with_blocking<S: Send + Sync + 'static, T: Send + 'static>(
     shared: &Arc<S>,
     f: impl FnOnce(&S) -> Result<T, String> + Send + 'static,

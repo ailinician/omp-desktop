@@ -82,8 +82,9 @@ impl RecentProjectsStore {
     /// `profile`'s recent folders, newest first, minus folders that no
     /// longer exist.
     ///
-    /// Unlocked: `write_atomic` never exposes a half-written file, and a
-    /// read racing a write only sees the previous list.
+    /// File-backed: unlocked, since `write_atomic` never exposes a
+    /// half-written file and a read racing a write only sees the previous
+    /// list. Memory-only: read under the list's mutex.
     pub fn list(&self, profile: &str) -> Vec<RecentProject> {
         match &self.backing {
             Backing::File { path, .. } => entries_for(json_store::read_or_default(path), profile),

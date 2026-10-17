@@ -104,9 +104,9 @@ impl OpenTabsStore {
     }
 
     /// The saved layout, checked against the file system (see
-    /// [`restorable`]). Unlocked for the same reason as
-    /// `RecentProjectsStore::list`: `write_atomic` never exposes a
-    /// half-written file.
+    /// [`restorable`]). File-backed: unlocked for the same reason as
+    /// `RecentProjectsStore::list` (`write_atomic` never exposes a
+    /// half-written file). Memory-only: read under the bytes' mutex.
     pub fn load(&self) -> Restore {
         restorable(match &self.backing {
             Backing::File { path, .. } => json_store::read_or_default(path),
