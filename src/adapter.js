@@ -193,6 +193,18 @@
       .filter(b => b?.type === "text" && typeof b.text === "string")
       .map(b => b.text).join("\n");
   }
+  // A read result's images ({type:"image", data, mimeType} next to a text
+  // note), when the model takes image input — omp sends none otherwise.
+  // A handful at most: the card keeps them for the transcript's lifetime.
+  const _MAX_CARD_IMAGES = 4;
+  // An image content block, in a tool result or a user turn.
+  const _isImageBlock = b => b?.type === "image" && typeof b.data === "string" && typeof b.mimeType === "string";
+  function _resultImages(result) {
+    return (Array.isArray(result?.content) ? result.content : [])
+      .filter(_isImageBlock)
+      .slice(0, _MAX_CARD_IMAGES)
+      .map(b => ({ type: "image", data: b.data, mimeType: b.mimeType }));
+  }
   // Cut the last occurrence of `notice`, with one newline on each side.
   // Mirrors omp's stripTrailingNotice (packages/tui/src/tools/output-meta.ts).
   function _stripNotice(text, notice) {
@@ -282,8 +294,10 @@
     return {
       kind: "tool", tool, title,
       target: String(target),
-      // One entry per file for the edit card's open-in-git-browser buttons.
+      // One entry per file for the edit and write cards' open-in-git-browser
+      // buttons.
       ...(tool === "edit" ? { targets: editPaths.length ? editPaths : (args.path ? [String(args.path)] : []) } : {}),
+      ...(tool === "write" ? { targets: args.path ? [String(args.path)] : [] } : {}),
       summary: "",
       status: "running",
       duration: null,
@@ -355,6 +369,13 @@
     }
     if (card.tool === "read") {
       extra.summary = details?.lines ? `${details.lines} lines` : card.summary;
+      const images = _resultImages(event.result);
+      if (images.length) extra.images = images;
+    }
+    // omp's write result: "Successfully wrote N bytes to <path>".
+    if (card.tool === "write") {
+      const bytes = _resultText(event.result).match(/\bwrote (\d+) bytes\b/)?.[1];
+      if (bytes) extra.bytes = Number(bytes);
     }
     if (card.tool === "task") {
       const progress = details?.progress ?? card.subagents ?? [];
@@ -447,7 +468,7 @@
   // which turns are pure-tool-result (dropped) vs. keep-worthy.
   function adaptUserContent(blocks) {
     const textBlocks = blocks.filter(b => b.type === "text");
-    const images = blocks.filter(b => b.type === "image" && typeof b.data === "string" && typeof b.mimeType === "string");
+    const images = blocks.filter(_isImageBlock);
     const text = textBlocks.map(b => b.text).join("\n").trim();
     return { text, images };
   }

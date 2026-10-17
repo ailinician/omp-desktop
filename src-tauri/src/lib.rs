@@ -29,6 +29,7 @@ mod open_tabs;
 mod private_fs;
 mod profiles;
 mod program_setting;
+mod project_file;
 mod recent_projects;
 mod redaction;
 mod saved_sessions;
@@ -884,6 +885,22 @@ async fn git_browser_commit_file(
     off_ipc(move || git_browser::commit_file(Path::new(&path), &sha, &rel_path)).await?
 }
 
+/// A file of the tab's project for the in-app preview — see
+/// `project_file::read`. The folder is the one `start_session` registered
+/// for the tab, never one sent by the webview. `async` + `spawn_blocking`:
+/// reads up to `project_file::MAX_IMAGE_BYTES` from disk.
+#[tauri::command]
+async fn project_file_read(
+    session_id: String,
+    path: String,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Result<project_file::FilePreview, String> {
+    let root = terminal
+        .folder(&session_id)
+        .ok_or_else(|| "this tab has no project folder".to_owned())?;
+    off_ipc(move || project_file::read(&root, &path)).await?
+}
+
 /// Stage a file's changes — see `workspace::accept`.
 ///
 /// Runs `async` + `spawn_blocking`: `workspace::accept` shells out to
@@ -1468,6 +1485,7 @@ pub fn run() {
             git_browser_log,
             git_browser_commit,
             git_browser_commit_file,
+            project_file_read,
             workspace_accept,
             workspace_reject,
             widgets_state,

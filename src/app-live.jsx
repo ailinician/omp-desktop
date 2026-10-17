@@ -19,7 +19,7 @@
 
 const {
   Icon, ChatView, Composer, CommandBridge, WindowChrome, TabBar, SubagentPane, ProjectSidebar, EmptyWorkspace,
-  StatusBar, AmbientRail, ConversationTree, PlanKanban, HistoryModal, GitBrowser, ApprovalRulesPanel, UsageStatsPanel, PromptHistoryModal, UpdateModal, useTweaks,
+  StatusBar, AmbientRail, ConversationTree, PlanKanban, HistoryModal, GitBrowser, FilePreview, ApprovalRulesPanel, UsageStatsPanel, PromptHistoryModal, UpdateModal, useTweaks,
   TweaksPanel, TweakSection, TweakRow, TweakRadio, TweakToggle, TweakColor, TweakSlider, TweakButton,
   useWidgets, WidgetCard, WidgetErrorCard, WidgetApprovalCard, WidgetBoundary,
   TWEAK_DEFAULTS, NULL_MODEL, EMPTY_PROJECT, DEFAULT_PROFILE_ID,
@@ -40,6 +40,7 @@ const { tweakKey: _widgetTweakKey } = window.OMP_WIDGETS;
 const { EMPTY: _EXT_EMPTY, cards: _extCards, toggles: _extToggles } = window.OMP_EXT_WIDGETS;
 const { entryOf: _TERM_entryOf } = window.OMP_TERMINAL;
 const { absolutePath: _gitAbsolutePath, finishedEdits: _gitFinishedEdits } = window.OMP_GIT_BROWSER;
+const { linkClick: _fpLinkClick } = window.OMP_FILE_PREVIEW;
 
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
@@ -53,6 +54,9 @@ function App() {
   // Git browser: null, or { path, project } — the file it opens on (null =
   // the first changed file) and the project that path belongs to.
   const [gitOpen,     setGitOpen]     = React.useState(null);
+  // The file preview (issue #39): `{ key, target }`, `key` the tab it was
+  // opened in — it shows only while that tab is active.
+  const [preview,     setPreview]     = React.useState(null);
   const [rulesOpen,   setRulesOpen]   = React.useState(false);
   const [statsOpen,   setStatsOpen]   = React.useState(false);
   const [promptHistoryOpen, setPromptHistoryOpen] = React.useState(false);
@@ -220,6 +224,11 @@ function App() {
     path => setGitOpen({ path: _gitAbsolutePath(gitProject, path), project: gitProject }),
     [gitProject]);
   const closeGit = React.useCallback(() => setGitOpen(null), []);
+  // A read card's path: the preview, bound to this tab.
+  const handlePreviewFile = React.useCallback(
+    target => setPreview({ key: planKey, target }), [planKey]);
+  const closePreview = React.useCallback(() => setPreview(null), []);
+  const previewToGit = React.useCallback(path => { setPreview(null); handleOpenFile(path); }, [handleOpenFile]);
   // The git browser refetches when this count rises; counted only while it
   // is open, and handed over as a number so streaming frames that finish no
   // edit leave the memoised browser alone.
@@ -275,6 +284,18 @@ function App() {
   const browser = useBrowser({
     bridge, activeSessionId: activeProject.id, sessionIds, open: side === "browser", setOpen: setBrowserOpen, tweaks: t, setTweak,
   });
+  // Clicks on links in the agent's markdown: a project file opens the
+  // preview (Ctrl/⌘-click: the git browser); anything else goes on to the
+  // browser panel's localhost handler. Without this a relative link would
+  // navigate the webview, which navigation_guard.rs silently blocks.
+  const browserLinkClick = browser.onChatClick;
+  const handleChatLinkClick = React.useCallback(e => {
+    const file = _fpLinkClick(e, gitProject);
+    if (!file) { browserLinkClick?.(e); return; }
+    e.preventDefault();
+    if (file.git) handleOpenFile(file.target.path);
+    else handlePreviewFile(file.target);
+  }, [browserLinkClick, gitProject, handleOpenFile, handlePreviewFile]);
   const stageRef = React.useRef(null);
   // A chip click scrolls the panel to the annotated element — but only
   // when the panel is open and still on the page the chip was picked from
@@ -710,9 +731,9 @@ function App() {
     reserve: side === "browser" && !browserFull ? _AL_BROWSER_MIN : 0,
   });
 
-  // Chat links go through the browser panel's routing (localhost links).
+  // Chat links: project files to the preview, localhost to the browser panel.
   return (
-    <_AL_MdLinkCtx.Provider value={browser.onChatClick}>
+    <_AL_MdLinkCtx.Provider value={handleChatLinkClick}>
       <div className="app-backdrop" />
       <div className="app">
         <div className={`window scanlines ${showSplit ? "is-split" : ""}`}>
@@ -785,6 +806,8 @@ function App() {
                     hasProjectPath={!!activeProject?.path}
                     onInspectSubagent={subagentUi.open}
                     onOpenFile={handleOpenFile}
+                    onPreviewFile={handlePreviewFile}
+                    projectRoot={gitProject}
                     foldModes={foldModes}
                     collapseAfter={t.collapseAfter}
                     collapseOverrides={tabCollapseOverrides}
@@ -962,6 +985,10 @@ function App() {
         <GitBrowser key={gitProject ?? ""} bridge={bridge}
           initialPath={gitOpen.project === gitProject ? gitOpen.path : null}
           onClose={closeGit} branch={activeProject.branch ?? null} edits={gitEdits} />
+      )}
+
+      {preview && preview.key === planKey && (
+        <FilePreview target={preview.target} onClose={closePreview} onOpenGit={previewToGit} />
       )}
 
       {rulesOpen && (

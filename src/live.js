@@ -3679,6 +3679,15 @@
       return _gitBrowserInvoke("git_browser_commit_file", { sha, relPath });
     },
 
+    /** A file of the active tab's project for the preview (issue #39):
+     *  `FilePreview` from src-tauri/src/project_file.rs, as `{ok, value |
+     *  error}`; null with no tab. Rust takes the folder from the tab, so only
+     *  the tab id and the path cross. `path` may be absolute inside it. */
+    readProjectFile(path) {
+      if (!activeSessionId) return Promise.resolve(null);
+      return _invokeResult("project_file_read", { sessionId: activeSessionId, path });
+    },
+
     /** Stage a file's changes (`git add`). */
     async workspaceAccept(relPath) {
       const path = _activeProjectPath();
