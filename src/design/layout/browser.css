@@ -161,18 +161,13 @@
 
 /* ── Stage slot: panel + resize handle ─────────────────────────────── */
 .stage.with-browser { grid-template-columns: minmax(0, 1fr) auto; }
-.window.is-split .stage.with-browser { grid-template-columns: minmax(0, 1fr) 320px auto; }
+.window.is-split .stage.with-browser { grid-template-columns: minmax(0, 1fr) var(--w-split, 320px) auto; }
 /* Full view: the panel is the only column. */
 .stage.with-browser.browser-full,
 .window.is-split .stage.with-browser.browser-full { grid-template-columns: minmax(0, 1fr); }
 .stage.browser-full > :not(.browser-dock) { display: none; }
 .browser-dock { position: relative; display: flex; min-width: 0; min-height: 0; }
 .browser-dock > .browser-panel { flex: 1; }
-.browser-resize {
-  position: absolute; top: 0; bottom: 0; left: -3px; z-index: 4;
-  width: 6px; cursor: col-resize; touch-action: none;
-}
-.browser-resize:hover, .browser-resize.dragging { background: color-mix(in oklab, var(--accent) 35%, transparent); }
 
 /* ── Composer: annotation chips ────────────────────────────────────── */
 /* `.paste-chip` / `.paste-chip-label` (composer.css) plus these deltas:

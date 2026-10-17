@@ -26,9 +26,10 @@ const {
   INTENT_FRAMING, APPROVAL_PROMPT,
   useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, useTerminal, TerminalPanels, TerminalTweaks, timeNow,
   useKeymap, useKeymapDispatch, ShortcutsModal, useBrowser, BrowserDock, BrowserTweaks, MarkdownLinkContext: _AL_MdLinkCtx,
+  usePaneWidths, ResizeHandle,
 } = window;
 const { routeSubmit: _routeSubmit } = window.OMP_SLASH;
-const { mergeIntoMessage: _mergeBrowserChips, browserCommand: _browserCommand } = window.OMP_BROWSER;
+const { mergeIntoMessage: _mergeBrowserChips, browserCommand: _browserCommand, MIN_WIDTH: _AL_BROWSER_MIN } = window.OMP_BROWSER;
 const { recentRows, groupKey, moveGroup, moveMember, shiftGroup } = window.OMP_PROJECT_NAV;
 const {
   entryOf, updateEntry, pruneEntries,
@@ -696,6 +697,19 @@ function App() {
   // empty state instead of a transcript and a composer with nowhere to send.
   const noTab = sessions.length === 0;
 
+  // Resizable columns beside the chat (#41): which are shown, and their
+  // widths as CSS variables on `.workspace`. Browser full view hides the
+  // chat and the split pane (layout/browser.css): only the sidebar is left.
+  const workspaceRef = React.useRef(null);
+  const browserFull = side === "browser" && browser.fullView;
+  const splitShown = showSplit && !browserFull;
+  const sideRail = side === "tree" ? "tree" : side !== "browser" && showRail ? "rail" : null;
+  const panes = usePaneWidths({
+    tweaks: t, setTweak, workspaceRef,
+    open: [showSidebar && "sidebar", splitShown && "split", sideRail].filter(Boolean),
+    reserve: side === "browser" && !browserFull ? _AL_BROWSER_MIN : 0,
+  });
+
   // Chat links go through the browser panel's routing (localhost links).
   return (
     <_AL_MdLinkCtx.Provider value={browser.onChatClick}>
@@ -733,7 +747,7 @@ function App() {
             onCheckUpdate={updater.check}
           />
 
-          <div className="workspace">
+          <div ref={workspaceRef} className="workspace" style={panes.style}>
             {showSidebar && (
               <ProjectSidebar
                 tabs={sessions}
@@ -751,7 +765,8 @@ function App() {
                 onReorder={handleReorder}
               />
             )}
-            <div ref={stageRef} className={`stage ${side === "browser" ? `with-browser${browser.fullView ? " browser-full" : ""}` : side === "tree" ? "with-tree" : showRail ? "with-rail" : ""}`}>
+            {showSidebar && <ResizeHandle className="at-sidebar" {...panes.handle("sidebar")} />}
+            <div ref={stageRef} className={`stage ${side === "browser" ? `with-browser${browserFull ? " browser-full" : ""}` : sideRail ? `with-${sideRail}` : ""}`}>
               <main className="session">
                 {noTab ? (
                   <EmptyWorkspace notes={workspaceNotes} />
@@ -817,6 +832,8 @@ function App() {
                 </>)}
               </main>
 
+              {splitShown && <ResizeHandle className="at-split" {...panes.handle("split")} />}
+              {sideRail && <ResizeHandle key={sideRail} className="at-side" {...panes.handle(sideRail)} />}
               {showSplit && (
                 <SubagentPane
                   state={subagents}
@@ -833,7 +850,7 @@ function App() {
               )}
 
               {side === "browser" ? (
-                <BrowserDock ui={browser} stageRef={stageRef} />
+                <BrowserDock ui={browser} stageRef={stageRef} room={panes.browserRoom} />
               ) : side === "tree" ? (
                 <ConversationTree
                   model={convTree.model} currentFile={convTree.currentFile} error={convTree.error}
@@ -1028,6 +1045,7 @@ function App() {
           />
           <TweakToggle label="project sidebar" value={t.sidebar ?? true}
             onChange={v => setTweak("sidebar", v)} />
+          <TweakButton label="reset column widths" secondary onClick={panes.reset} />
         </TweakSection>
         <TweakSection label="Chat">
           {/* Tool cards and thinking (#44, #43): modes in app/chat-collapse.js. */}

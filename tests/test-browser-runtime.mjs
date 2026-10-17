@@ -39,6 +39,7 @@ function loadHelpers(window) {
   runInNewContext(source("src/app/constants.js"), { window });
   runInNewContext(source("src/app/session-ui.js"), { window });
   runInNewContext(source("src/app/image-attach.js"), { window, atob, Uint8Array });
+  runInNewContext(source("src/app/layout-widths.js"), { window });
   runInNewContext(source("src/app/browser.js"), { window, URL });
 }
 
