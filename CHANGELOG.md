@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Typography on Windows: interface text now uses Segoe UI Variable (Segoe UI on Windows 10) and code uses Cascadia Mono, Cascadia Code or Consolas, instead of falling through the macOS-only fonts to Arial and Consolas. Chinese and Japanese characters still take Windows' fallback font for the display language.
 - Windows title-bar buttons (minimize, maximize, close) were coloured red, yellow and green by leftover prototype rules. They now use the theme's text colour, draw as line icons instead of text glyphs, and sit flush with no gaps or rounded corners.
+- Rail widgets: a plugin's script could be swapped between the approval check and the start of the run, and the swapped-in code then ran under the old approval. Runs now execute verified copies of the plugin's scripts, kept in the app's cache directory under the approved fingerprint, made from exactly the bytes that were checked and compared with the originals again before every run. Anything named by absolute path that loads files next to itself (a widget's `$(dirname "$0")/…` or relative `import`, a launcher like `npx.cmd`) no longer finds them; keep a widget in one file and start launchers by name. A native program named first in `command` (on Windows: a path ending in `.exe`), files over 8 MiB and folders still run from their own path (`docs/widgets.md`).
 
 ## [0.10.1] - 2026-10-16
 

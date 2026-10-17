@@ -1,4 +1,5 @@
-//! Run one widget plugin: argv from the validated config, context via env +
+//! Run one widget plugin: the argv the worker checked (the validated config
+//! with each hashed script replaced by its verified copy), context via env +
 //! stdin JSON, stdout capped and required to be JSON, wall-clock timeout,
 //! process tree killed on timeout, cap, or as soon as the plugin exits.
 //! Synchronous and blocking — the widget host calls it on a worker thread.
@@ -40,17 +41,19 @@ const ERR_TAIL_CHARS: usize = 300;
 /// How much of a non-JSON stdout the error shows.
 const NOT_JSON_PREVIEW_CHARS: usize = 120;
 
-/// Run `entry` with `ctx`. `on_spawn` receives the run's supervisor right
+/// Run `entry` as `argv` (its command, or the snapshot of it the approval
+/// check hashed) with `ctx`. `on_spawn` receives the run's supervisor right
 /// after spawn so another thread can `kill_tree()` it; the run itself still
 /// reaps the child and returns. The result is `Ok` only for a stdout that
 /// parses as JSON. All error text is redacted.
-pub fn run_plugin(
+pub fn run_plugin<A: AsRef<OsStr>>(
     entry: &PluginEntry,
+    argv: &[A],
     ctx: &PluginContext,
     on_spawn: impl FnOnce(&Arc<ProcessSupervisor>),
 ) -> Outcome {
     let start = Instant::now();
-    let result = run_inner(entry, ctx, on_spawn).and_then(require_json);
+    let result = run_inner(entry, argv, ctx, on_spawn).and_then(require_json);
     let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
     Outcome {
         result,
@@ -58,13 +61,14 @@ pub fn run_plugin(
     }
 }
 
-fn run_inner(
+fn run_inner<A: AsRef<OsStr>>(
     entry: &PluginEntry,
+    argv: &[A],
     ctx: &PluginContext,
     on_spawn: impl FnOnce(&Arc<ProcessSupervisor>),
 ) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_millis(entry.timeout_ms);
-    let mut child = spawn(entry, ctx)?;
+    let mut child = spawn(entry, argv, ctx)?;
     let supervisor = Arc::new(ProcessSupervisor::attach(&child));
     on_spawn(&supervisor);
 
@@ -114,8 +118,12 @@ fn run_inner(
     String::from_utf8(out).map_err(|_| "stdout is not UTF-8".to_string())
 }
 
-fn spawn(entry: &PluginEntry, ctx: &PluginContext) -> Result<Child, String> {
-    let Some((argv0, rest)) = entry.command.split_first() else {
+fn spawn<A: AsRef<OsStr>>(
+    entry: &PluginEntry,
+    argv: &[A],
+    ctx: &PluginContext,
+) -> Result<Child, String> {
+    let Some((argv0, rest)) = argv.split_first() else {
         return Err("command is empty".to_string());
     };
     // Never a shared temp dir: an interpreter that puts its cwd on the module
@@ -154,10 +162,30 @@ fn spawn(entry: &PluginEntry, ctx: &PluginContext) -> Result<Child, String> {
     }
     // Also hides the console window on Windows.
     ProcessSupervisor::prepare(&mut cmd);
+    // The configured name, which the user knows, not the copy's path.
+    let name = entry
+        .command
+        .first()
+        .map_or_else(|| argv0.as_ref().to_string_lossy(), Into::into);
     // The OS error names the cause; `NotFound` also means a missing shebang
     // interpreter or a vanished cwd, not only a missing program.
+    spawn_retrying_busy(&mut cmd).map_err(|e| format!("could not start {name}: {e}"))
+}
+
+/// `cmd.spawn()`, retried briefly on Linux's "text file busy": a script copy
+/// the worker just wrote can still be open for writing in a child another
+/// thread forked meanwhile, until that child's `exec` (rust-lang/rust#114554).
+fn spawn_retrying_busy(cmd: &mut Command) -> std::io::Result<Child> {
+    #[cfg(target_os = "linux")]
+    for _ in 0..4 {
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            spawned => return spawned,
+        }
+    }
     cmd.spawn()
-        .map_err(|e| format!("could not start {argv0}: {e}"))
 }
 
 /// `path` with every empty or relative entry removed.
@@ -258,8 +286,17 @@ mod tests {
         }
     }
 
+    /// Run `entry` as its configured command.
+    fn run_entry(
+        entry: &PluginEntry,
+        ctx: &PluginContext,
+        on_spawn: impl FnOnce(&Arc<ProcessSupervisor>),
+    ) -> Outcome {
+        run_plugin(entry, &entry.command, ctx, on_spawn)
+    }
+
     fn run(cmd: &[&str], timeout_ms: u64) -> Outcome {
-        run_plugin(&entry(cmd, timeout_ms), &ctx(), |_| {})
+        run_entry(&entry(cmd, timeout_ms), &ctx(), |_| {})
     }
 
     fn assert_timed_out(r: &Outcome, timeout_ms: u64) {
@@ -304,7 +341,7 @@ mod tests {
     #[test]
     fn on_spawn_supervisor_kills_the_run_from_another_thread() {
         let start = Instant::now();
-        let r = run_plugin(&entry(&["sh", "-c", "sleep 30"], 20_000), &ctx(), |sup| {
+        let r = run_entry(&entry(&["sh", "-c", "sleep 30"], 20_000), &ctx(), |sup| {
             let sup = Arc::clone(sup); // the killer thread outlives this callback
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(200));
@@ -420,7 +457,7 @@ mod tests {
         full.remote = "x".repeat(max);
         full.branch = "x".repeat(max);
         let start = Instant::now();
-        let r = run_plugin(&entry(&["sh", "-c", "sleep 30"], 1_000), &full, |_| {});
+        let r = run_entry(&entry(&["sh", "-c", "sleep 30"], 1_000), &full, |_| {});
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "must not block on stdin"
@@ -483,7 +520,7 @@ mod tests {
         };
         let mut c = ctx();
         c.project = String::new();
-        let r = run_plugin(
+        let r = run_entry(
             &entry(&["sh", "-c", "printf '\"%s\"' \"$PWD\""], 5_000),
             &c,
             |_| {},

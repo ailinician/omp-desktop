@@ -8,16 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::reap;
+use crate::private_fs::private_dirs;
 use crate::supervisor::pid_is_alive;
-
-/// A directory builder that creates `0700` directories (unix).
-pub fn private_dirs(recursive: bool) -> std::fs::DirBuilder {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(recursive);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder
-}
 
 /// Create `path` exclusively with `contents`, private to the user (unix
 /// `0600`). `O_EXCL` never follows a symlink nor reuses a file somebody else

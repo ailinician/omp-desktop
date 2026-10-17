@@ -22,6 +22,7 @@ mod model_usage;
 mod navigation_guard;
 mod omp_cli;
 mod open_tabs;
+mod private_fs;
 mod profiles;
 mod program_setting;
 mod recent_projects;
@@ -1289,10 +1290,16 @@ fn setup(app: &tauri::App) {
         config_dir.join("keybindings.json"),
     )));
     // Widget scheduler thread; it loads the config and approvals itself.
+    // Each run executes private copies of the plugin's scripts under
+    // <app_cache_dir>/widget-runs (user-owned, unlike a shared temp dir).
     app.manage(Arc::new(widgets::WidgetHost::for_app(
         app.handle().clone(), // the host emits `widgets://` events for the app's lifetime
         widget_config,
         widget_approvals,
+        app.path()
+            .app_cache_dir()
+            .ok()
+            .map(|dir| dir.join("widget-runs")),
     )));
     // Recently opened projects: <app_config_dir>/recent-projects.json.
     app.manage(Arc::new(recent_projects::RecentProjectsStore::new(
