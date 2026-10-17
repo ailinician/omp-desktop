@@ -43,6 +43,21 @@
     return out ?? map;
   }
 
+  /** Gives each tab in `freshIds` (just opened) the start entry `value`,
+   *  e.g. the `defaultSide` tweak for the side column. `value === idle`
+   *  stores nothing (the idle default already reads as it). Same
+   *  reference when nothing was added. */
+  function seedEntries(map, freshIds, idle, value) {
+    if (value === idle || value == null) return map;
+    let out = null;
+    for (const id of freshIds) {
+      if (!id || Object.hasOwn(map, id)) continue;
+      if (!out) out = { ...map };
+      out[id] = value;
+    }
+    return out ?? map;
+  }
+
   // ── Plan mode ────────────────────────────────────────────────────────
   // `mode`: the composer frames sends as plan feedback. `started`: the
   // first plan send already carried INTENT_FRAMING. `annotations`: block
@@ -118,8 +133,18 @@
   // `pasteCounter` keeps ids unique within one draft.
 
   const PASTE_TOKEN_RE = /\[paste #(\d+) \+\d+ lines?\]/g;
-  const PASTE_MAX_LINES = 5;
+  // Lines above which a paste collapses: the `pasteCollapseLines` tweak,
+  // clamped to what Settings offers; the char cap is fixed.
+  const PASTE_LINES_DEFAULT = 5;
+  const PASTE_LINES_MIN = 2;
+  const PASTE_LINES_MAX = 50;
   const PASTE_MAX_CHARS = 500;
+
+  function pasteLinesLimit(maxLines) {
+    const n = typeof maxLines === "number" ? Math.round(maxLines) : NaN;
+    if (!Number.isFinite(n)) return PASTE_LINES_DEFAULT;
+    return Math.min(PASTE_LINES_MAX, Math.max(PASTE_LINES_MIN, n));
+  }
 
   /** Clipboard text in the form a textarea value holds: the browser turns
    *  every CRLF/CR into LF on its own insert, so a collapsed paste must
@@ -138,8 +163,8 @@
     return lines;
   }
 
-  function shouldCollapsePaste(raw) {
-    return raw.length > PASTE_MAX_CHARS || pasteLineCount(raw) > PASTE_MAX_LINES;
+  function shouldCollapsePaste(raw, maxLines = PASTE_LINES_DEFAULT) {
+    return raw.length > PASTE_MAX_CHARS || pasteLineCount(raw) > pasteLinesLimit(maxLines);
   }
 
   // The two draft edits below return `{ patch, caret }`: `patch` holds
@@ -206,7 +231,7 @@
   }
 
   window.OMP_SESSION_UI = {
-    entryOf, updateEntry, pruneEntries,
+    entryOf, updateEntry, pruneEntries, seedEntries,
     PLAN_IDLE, togglePlan, enterPlan, approvePlan, annotatePlan, markPlanSent,
     DRAFT_IDLE, recallInDraft,
     normalizePaste, shouldCollapsePaste, collapsePaste, pastesIn, expandPastes, inlinePaste,

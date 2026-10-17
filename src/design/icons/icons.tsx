@@ -78,7 +78,7 @@ const PATHS: Record<IconName, { paths: string[]; dot: [number, number]; purpose:
   close: {
     paths: ["<path d=\"M3.5 3.5l9 9M12.5 3.5l-9 9\"/>"],
     dot: [12, 4],
-    purpose: "Dismiss. Close a tab, modal, command bridge, or tweaks panel.",
+    purpose: "Dismiss. Close a tab, modal, command bridge, or settings tab.",
   },
   check: {
     paths: ["<path d=\"M3 8l3 3 7-7\"/>"],

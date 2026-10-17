@@ -1,5 +1,5 @@
 // app/path-setting.js — the menu behind a Rust-owned program path setting
-// (Tweaks → Terminal's shell, Tweaks → Browser's Chromium; the button and
+// (Settings → Terminal's shell, Settings → Browser's Chromium; the button and
 // menu are design/path-setting.jsx). Pure: the feature modules map their
 // Rust settings onto `menu` (OMP_TERMINAL.shellMenu, OMP_BROWSER.pathMenu).
 //   programName(path, fallback)   `/bin/zsh` → `zsh`, `C:\…\msedge.exe` → `msedge`

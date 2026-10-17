@@ -10,7 +10,9 @@
 
 const { Icon: _SAC_Icon } = window;
 
-function SubagentControls({ agentId, running, onSteer, onStop }) {
+// `submitKey` ("enter" | "ctrl+enter", the tweak): the message box's send
+// chord (constants.js isSubmitKey); the other chord is a newline.
+function SubagentControls({ agentId, running, onSteer, onStop, submitKey = "enter" }) {
   const [draft, setDraft] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const [stopPhase, setStopPhase] = React.useState(null); // null | "confirm" | "stopping"
@@ -78,7 +80,7 @@ function SubagentControls({ agentId, running, onSteer, onStop }) {
         placeholder="Message this agent…" aria-label={`message ${agentId}`}
         onChange={e => { setDraft(e.target.value); setNote(null); }}
         onKeyDown={e => {
-          if (running && window.isSubmitEnter(e) && !e.shiftKey) { e.preventDefault(); send(); }
+          if (running && window.isSubmitKey(e, submitKey)) { e.preventDefault(); send(); }
         }} />
       {note && <div className={`sa-ctl-note${note.err ? " err" : ""}`}>{note.text}</div>}
       {!running && !sending && <div className="sa-ctl-note">The agent is no longer running; this text was not sent.</div>}

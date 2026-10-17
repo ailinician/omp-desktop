@@ -1,6 +1,6 @@
 # Collapsible tool cards and thinking (#44, #43)
 
-Code: `src/app/chat-collapse.js` (rules, `window.OMP_COLLAPSE`), `src/design/ui/collapse-toggle.jsx` (control), `chat/tool-card.jsx` / `chat/assistant-bubble.jsx` (rendering), `chat/chat-view.jsx` (wiring), `app-live.jsx` (per-tab toggles, Collapse all / Expand all, Tweaks → Chat). Tests: `tests/test-chat-collapse.mjs`, `tests/test-tool-output.mjs` (`isError`).
+Code: `src/app/chat-collapse.js` (rules, `window.OMP_COLLAPSE`), `src/design/ui/collapse-toggle.jsx` (control), `chat/tool-card.jsx` / `chat/assistant-bubble.jsx` (rendering), `chat/chat-view.jsx` (wiring), `app-live.jsx` (per-tab toggles, Collapse all / Expand all), Settings → Chat (`app/settings-schema.js`; `docs/architecture/settings.md`). Tests: `tests/test-chat-collapse.mjs`, `tests/test-tool-output.mjs` (`isError`).
 
 ## Blocks
 
@@ -16,7 +16,7 @@ A *block* is a tool card's body or an assistant reply's thinking. `bodyLines(msg
 
 ## Rule
 
-`collapseStates(messages, { thinking, tool, after, overrides, horizonId, hidden })` → `_id → collapsed` for every block with a toggle. Thinking and tool cards each follow their own mode (tweaks *thinking* / *tool output*, keys `foldThinking` / `foldTools`):
+`collapseStates(messages, { thinking, tool, after, overrides, horizonId, hidden })` → `_id → collapsed` for every block with a toggle. Thinking and tool cards each follow their own mode (Settings → Chat *Thinking* / *Tool output*, tweak keys `foldThinking` / `foldTools`):
 
 - **auto** (default): everything starts expanded. A long block collapses once `after` newer blocks (tweak *collapse after*, 1–30, default 5) follow it; a running tool card or a streaming reply never collapses on its own. Blocks of both kinds count as newer, whatever their own mode.
 - **open**: never collapses on its own.

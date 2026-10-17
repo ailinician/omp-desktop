@@ -146,7 +146,7 @@ const SaTranscript = React.memo(function SaTranscript({ transcript, onRefresh })
 
 /** Keyed by agent id in SubagentPane, so tab/copied state start fresh per agent.
  *  `callId` is the main-chat task call (the root agent's, for nested agents). */
-function SubagentInspector({ agent, callId, now, level, transcript, onBack, onLoadTranscript, onJumpToCall, onSteer, onStop }) {
+function SubagentInspector({ agent, callId, now, level, transcript, onBack, onLoadTranscript, onJumpToCall, onSteer, onStop, submitKey = "enter" }) {
   const [tab, setTab] = React.useState("activity");
   const p = agent.progress;
   // Which footer copy button just succeeded — copyText resolves true/false.
@@ -192,7 +192,7 @@ function SubagentInspector({ agent, callId, now, level, transcript, onBack, onLo
         {tab === "output" && <SaOutput agent={agent} level={level} />}
         {tab === "transcript" && <SaTranscript transcript={transcript} onRefresh={() => onLoadTranscript(agent.id)} />}
       </div>
-      <_SAI_Controls agentId={agent.id} running={agent.status === "running"} onSteer={onSteer} onStop={onStop} />
+      <_SAI_Controls agentId={agent.id} running={agent.status === "running"} onSteer={onSteer} onStop={onStop} submitKey={submitKey} />
       <div className="sa-insp-foot">
         {callId && (
           <button className="btn ghost outlined" onClick={() => onJumpToCall(callId)}>

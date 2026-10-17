@@ -96,7 +96,7 @@ pub fn default_shell() -> PathBuf {
 /// The shell's environment on top of the app's own: terminal type, the
 /// desktop markers, the extended `PATH` (see `child_path`), on unix `SHELL`
 /// = the program actually started (`portable-pty` would pass the app's
-/// `$SHELL`, so tmux or vim's `:sh` inside a fish set under Tweaks would
+/// `$SHELL`, so tmux or vim's `:sh` inside a fish set under Settings would
 /// start zsh), and on macOS a fallback locale.
 pub fn apply_env(cmd: &mut CommandBuilder, program: &Path, session_id: &str) {
     cmd.env("TERM", "xterm-256color");

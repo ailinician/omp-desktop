@@ -5,7 +5,7 @@
 //
 // This file has no dependencies and must load before any Babel file that
 // references OMP_KEYMAP (currently: composer.jsx, use-keymap.jsx, and
-// shortcuts-modal.jsx). See index.html script-order comment.
+// settings/shortcuts-editor.jsx). See index.html script-order comment.
 (function () {
   "use strict";
 
@@ -39,6 +39,7 @@
     { id: "desktop.commands.open",   label: "Command bridge",          group: "View",    scope: "global",   defaultKeys: ["ctrl+k", "super+k"] },
     { id: "desktop.history.open",    label: "Session history",         group: "View",    scope: "global",   defaultKeys: ["ctrl+h", "super+h"] },
     { id: "desktop.shortcuts.open",  label: "Keyboard shortcuts",      group: "View",    scope: "global",   defaultKeys: ["ctrl+/", "super+/"] },
+    { id: "desktop.settings.open",   label: "Open settings",           group: "View",    scope: "global",   defaultKeys: ["ctrl+,", "super+,"] },
     { id: "desktop.sidebar.toggle",  label: "Toggle project sidebar",  group: "View",    scope: "global",   defaultKeys: ["ctrl+b", "super+b"] },
     { id: "desktop.browser.toggle",  label: "Toggle browser panel",    group: "View",    scope: "global",   defaultKeys: ["ctrl+shift+b", "shift+super+b"], fromGuest: true },
     { id: "desktop.tab.new",         label: "New tab",                 group: "Tabs",    scope: "global",   defaultKeys: ["ctrl+t", "super+t"] },
@@ -402,7 +403,7 @@
   }
 
   // Platform never changes at runtime — compute once rather than re-probing
-  // `navigator` on every `formatChord` call (the Shortcuts modal formats
+  // `navigator` on every `formatChord` call (the Shortcuts editor formats
   // every visible chord on every render and filter keystroke).
   const IS_MAC = detectMac();
 

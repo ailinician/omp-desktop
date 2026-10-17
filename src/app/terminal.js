@@ -155,7 +155,7 @@
   const shellLabel = (path) => window.OMP_PATH_SETTING.programName(path, "shell");
 
   /**
-   * Tweaks → Terminal's shell button and menu for Rust's `TerminalSettings`
+   * Settings → Terminal's shell button and menu for Rust's `TerminalSettings`
    * (`{ shell, defaultShell, shells }`): `OMP_PATH_SETTING.menu`'s
    * `{ label, rows }`. `label` names the shell new terminals run (the stored
    * one, else the default); the first row is `default` (`hint` the default

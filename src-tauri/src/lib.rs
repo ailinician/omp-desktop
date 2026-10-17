@@ -51,8 +51,9 @@ use external_open::OpenProjectState;
 use git_watcher::GitWatcherState;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State, Url};
+use tauri::{AppHandle, Emitter, Manager, State, Url};
 
 /// Write a JSON command to a specific session's omp stdin.
 #[tauri::command]
@@ -489,7 +490,7 @@ async fn terminal_set_shell(
 /// cancelled. The path comes from the OS dialog, never from the webview.
 /// Callback-based `pick_file` for the reason `open_project` gives. Parented
 /// to the calling window, which makes it modal on Windows and macOS (the
-/// Tweaks panel cannot change under a pick, no second dialog); rfd's GTK3
+/// Settings page cannot change under a pick, no second dialog); rfd's GTK3
 /// backend ignores the parent, so on Linux the window stays usable.
 #[tauri::command]
 async fn terminal_pick_shell(
@@ -1227,6 +1228,32 @@ pub(crate) fn kill_child_processes(app: &AppHandle) {
     }
 }
 
+/// "Ask before closing a busy tab" (#37, Settings → Session): whether a
+/// user's request to close the main window (or quit) must first be
+/// confirmed in the webview. The webview arms it only while the setting is
+/// on and a tab is busy (`live.js` `_syncCloseGuard`), so with nothing to
+/// lose the window closes the normal way; armed, [`handle_run_event`]
+/// holds the close and emits [`CLOSE_REQUESTED_EVENT`], and the webview
+/// disarms the guard before it closes the window itself, so the exit then
+/// takes the usual path through [`kill_child_processes`].
+#[derive(Default)]
+struct CloseGuard(AtomicBool);
+
+/// Payload-free: tells the webview a close was held for its confirmation.
+const CLOSE_REQUESTED_EVENT: &str = "window://close-requested";
+
+/// Arm (`true`) or disarm the [`CloseGuard`].
+#[tauri::command]
+fn set_close_guard(armed: bool, guard: State<'_, CloseGuard>) {
+    guard.0.store(armed, Ordering::SeqCst);
+}
+
+/// Whether a close of window `label` is held for the webview to confirm:
+/// only the main window's, and only while the webview armed the guard.
+fn holds_close(label: &str, armed: bool) -> bool {
+    armed && label == "main"
+}
+
 /// The per-user folder the persistent stores live in, from Tauri's
 /// `app_config_dir()`. `None` when it can't be resolved or is relative:
 /// every store then keeps its state in memory for the app run. There is no
@@ -1411,6 +1438,21 @@ fn single_instance_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     })
 }
 
+/// The plugins after the single-instance one, and the app-wide state the
+/// commands read. Split out of [`run`], whose command list alone nears
+/// the function-length lint.
+fn with_plugins_and_state(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    builder
+        .plugin(navigation_guard::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(AgentBridge::new())
+        .manage(GitWatcherState::new())
+        .manage(OpenProjectState::new())
+        .manage(updater::UpdaterState::default())
+        .manage(CloseGuard::default())
+}
+
 /// Run the Tauri application. Panics if the runtime fails to initialise.
 ///
 /// # Panics
@@ -1425,14 +1467,7 @@ pub fn run() {
     // an `unused_mut` warning (and so a lint-gate error) on macOS.
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     let builder = builder.plugin(single_instance_plugin());
-    let app = builder
-        .plugin(navigation_guard::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AgentBridge::new())
-        .manage(GitWatcherState::new())
-        .manage(OpenProjectState::new())
-        .manage(updater::UpdaterState::default())
+    let app = with_plugins_and_state(builder)
         .invoke_handler(tauri::generate_handler![
             send_command,
             start_session,
@@ -1514,6 +1549,7 @@ pub fn run() {
             model_usage_list,
             app_update_check,
             app_update_install,
+            set_close_guard,
         ])
         .setup(|app| {
             setup(app);
@@ -1527,8 +1563,29 @@ pub fn run() {
 
 /// Handle lifecycle and platform file-open events from the Tauri run loop.
 fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
-    if matches!(event, tauri::RunEvent::Exit) {
-        kill_child_processes(app);
+    match &event {
+        tauri::RunEvent::Exit => kill_child_processes(app),
+        // The OS close (title-bar menu, Alt+F4, taskbar) of a window the
+        // [`CloseGuard`] holds: the webview confirms, then closes it itself.
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } if holds_close(label, app.state::<CloseGuard>().0.load(Ordering::SeqCst)) => {
+            api.prevent_close();
+            announce_held_close(app);
+        }
+        // A quit that is not a window close (macOS Cmd+Q). `code: None` is
+        // a user's request; the updater's restart and `exit` carry a code.
+        // The last window closing also lands here with `None`, but only
+        // after the guard let that close through, i.e. while disarmed.
+        tauri::RunEvent::ExitRequested {
+            code: None, api, ..
+        } if app.state::<CloseGuard>().0.load(Ordering::SeqCst) => {
+            api.prevent_exit();
+            announce_held_close(app);
+        }
+        _ => {}
     }
     // macOS' "Open with" for a folder (see `Info.plist`) arrives as a
     // run-loop event, on launch *and* while already running — the one
@@ -1540,9 +1597,16 @@ fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
     }
 }
 
+/// Ask the webview to confirm a close [`handle_run_event`] held.
+fn announce_held_close(app: &AppHandle) {
+    if let Err(e) = app.emit(CLOSE_REQUESTED_EVENT, ()) {
+        eprintln!("[omp-desktop] failed to forward the window close for confirmation: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{config_dir, StartSessionArgs};
+    use super::{config_dir, holds_close, StartSessionArgs};
     use std::path::PathBuf;
 
     #[test]
@@ -1564,6 +1628,15 @@ mod tests {
             config_dir::<&str>(Ok(PathBuf::from("omp-desktop-config"))),
             None
         );
+    }
+
+    /// The guard holds only the main window's close, and only while armed:
+    /// with it disarmed (setting off, or no busy tab) closing never waits.
+    #[test]
+    fn only_an_armed_guard_holds_the_main_windows_close() {
+        assert!(holds_close("main", true));
+        assert!(!holds_close("main", false));
+        assert!(!holds_close("other", true));
     }
 
     /// The exact payload `live.js::_spawnSession` sends. Tauri hands the

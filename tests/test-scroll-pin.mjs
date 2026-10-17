@@ -100,4 +100,33 @@ check("shouldRepin: transcript reset to empty re-pins (/new, profile switch)", (
   assert.equal(P.shouldRepin(1, []), true);
 });
 
+// ── afterOutput (followOutput tweak, #37) ─────────────────────────────────
+
+const far  = { scrollTop: 0,   scrollHeight: 2000, clientHeight: 500 };
+const near = { scrollTop: 1490, scrollHeight: 2000, clientHeight: 500 };
+
+check("afterOutput: follow on keeps a pinned view on the newest line", () => {
+  assert.deepEqual(P.afterOutput({ pinned: true, follow: true, repin: false }, far), { pinned: true, stick: true });
+});
+
+check("afterOutput: follow on leaves an unpinned reader alone", () => {
+  assert.deepEqual(P.afterOutput({ pinned: false, follow: true, repin: false }, far), { pinned: false, stick: false });
+});
+
+check("afterOutput: follow off never scrolls; output past the bottom unpins (Jump to latest shows)", () => {
+  assert.deepEqual(P.afterOutput({ pinned: true, follow: false, repin: false }, far), { pinned: false, stick: false });
+});
+
+check("afterOutput: follow off, output still within the slack keeps the pinned state", () => {
+  assert.deepEqual(P.afterOutput({ pinned: true, follow: false, repin: false }, near), { pinned: true, stick: false });
+});
+
+check("afterOutput: a repin (own prompt, reset, first render) scrolls to the latest either way", () => {
+  for (const follow of [true, false]) {
+    for (const pinned of [true, false]) {
+      assert.deepEqual(P.afterOutput({ pinned, follow, repin: true }, far), { pinned: true, stick: true });
+    }
+  }
+});
+
 console.log(`scroll-pin: ${passed} checks passed`);

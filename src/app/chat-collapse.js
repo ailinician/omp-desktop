@@ -1,6 +1,6 @@
 // Collapsible tool cards and thinking blocks in the chat (#44, #43).
 //
-// Thinking and tool output each have a mode (Tweaks → Chat):
+// Thinking and tool output each have a mode (Settings → Chat):
 // - "auto": every block starts expanded; once `after` newer collapsible
 //   blocks have followed it, a long block collapses on its own to a few
 //   lines of preview; a short one never does.
@@ -28,7 +28,7 @@
   const MIN_AFTER = 1;
   const MAX_AFTER = 30;
 
-  /** Per-kind modes, in the order Tweaks lists them. */
+  /** Per-kind modes, in the order Settings lists them. */
   const MODES = Object.freeze(["auto", "open", "folded"]);
 
   /** A tab with no toggles yet. Shared, so a render without one compares equal. */

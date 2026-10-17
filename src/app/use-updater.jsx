@@ -66,6 +66,10 @@ function useUpdater({ bridge, autoCheck, skipped, setTweak }) {
     setOpen(false);
   }, [setTweak]);
 
+  // Settings → Session → Version: forget the skipped release, so the pill
+  // offers it again.
+  const clearSkipped = React.useCallback(() => setTweak("skippedUpdate", null), [setTweak]);
+
   const openRelease = React.useCallback(async () => {
     const url = stateRef.current.update?.releaseUrl;
     if (!url || !bridge) return;
@@ -85,6 +89,7 @@ function useUpdater({ bridge, autoCheck, skipped, setTweak }) {
     check,
     install,
     skip,
+    clearSkipped,
     openRelease,
   };
 }

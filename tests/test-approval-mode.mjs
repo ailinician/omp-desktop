@@ -2,7 +2,7 @@
 // Regression script for src/app/approval-mode.js — omp's tool approval
 // mode chosen in the desktop (#57): which mode a tab's folder resolves to,
 // the status-bar cell, which open tabs a change restarts now or once idle,
-// and the approvals panel's project row.
+// and the mode editor's project rows.
 // Run: node tests/test-approval-mode.mjs
 
 import assert from "node:assert/strict";
@@ -144,20 +144,28 @@ check("restartPlan: no sessions → empty plan", () => {
   assert.deepEqual(M.restartPlan(view, undefined), { now: [], later: [] });
 });
 
-// ── projectRow ────────────────────────────────────────────────────────────
+// ── projectRows ───────────────────────────────────────────────────────────
 
-check("projectRow: a folder with an override shows it", () => {
-  assert.deepEqual(M.projectRow(view, P), { present: true, value: "yolo" });
+check("projectRows: the active folder with an override shows it", () => {
+  assert.deepEqual(M.projectRows(view, P), [{ path: P, value: "yolo", active: true }]);
 });
 
-check("projectRow: a folder without an override selects the literal 'default'", () => {
-  assert.deepEqual(M.projectRow(view, Q), { present: true, value: "default" });
-  assert.deepEqual(M.projectRow(null, Q), { present: true, value: "default" });
+check("projectRows: an active folder without an override selects the literal 'default', overrides follow", () => {
+  assert.deepEqual(M.projectRows(view, Q), [
+    { path: Q, value: "default", active: true },
+    { path: P, value: "yolo", active: false },
+  ]);
+  assert.deepEqual(M.projectRows(null, Q), [{ path: Q, value: "default", active: true }]);
 });
 
-check("projectRow: no folder hides the row", () => {
-  assert.equal(M.projectRow(view, null).present, false);
-  assert.equal(M.projectRow(view, "").present, false);
+check("projectRows: no folder lists only the overrides, by path, skipping unknown modes", () => {
+  const many = { default: "write", projects: { "/b": "always-ask", "/a": "yolo", "/c": "Write" } };
+  assert.deepEqual(M.projectRows(many, null), [
+    { path: "/a", value: "yolo", active: false },
+    { path: "/b", value: "always-ask", active: false },
+  ]);
+  assert.deepEqual(M.projectRows(view, ""), [{ path: P, value: "yolo", active: false }]);
+  assert.deepEqual(M.projectRows(null, null), []);
 });
 
 console.log(`approval-mode: ${passed} checks passed`);

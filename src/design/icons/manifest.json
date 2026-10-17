@@ -71,7 +71,7 @@
     {
       "name": "close",
       "category": "actions",
-      "purpose": "Dismiss. Close a tab, modal, command bridge, or tweaks panel.",
+      "purpose": "Dismiss. Close a tab, modal, command bridge, or settings tab.",
       "accentDot": {
         "cx": 12,
         "cy": 4

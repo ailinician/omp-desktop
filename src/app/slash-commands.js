@@ -23,7 +23,8 @@
   // no-op, not something this change touches. `branch` and `tree` both open
   // the conversation-tree pane. A local name shadows the RPC command of the
   // same name/alias (desktop UI wins), so omp's terminal `/branch` and
-  // `/tree` pickers never run from the desktop, nor does omp's
+  // `/tree` pickers never run from the desktop, nor does omp's TUI
+  // `/settings` menu (the desktop's opens the Settings page), nor omp's
   // `/browser [headless|visible]` (its browser tool's mode switch: the
   // desktop's `/browser` opens the panel instead, and answers those two
   // arguments with a note — OMP_BROWSER.browserCommand).
@@ -43,7 +44,7 @@
     { name: "browser",   hint: "open the browser panel; /browser <url> loads a page", icon: "◍", group: "View"    },
     { name: "export",    hint: "export this session to HTML",                  icon: "⇪", group: "View"    },
     { name: "shortcuts", hint: "view and rebind keyboard shortcuts",           icon: "⌘", group: "View"    },
-    { name: "tweaks",    hint: "open the Tweaks panel (look, layout, chat)",   icon: "⚙", group: "View"    },
+    { name: "settings",  hint: "open settings",                                icon: "⚙", group: "View"    },
     { name: "collapse-all", hint: "collapse every tool card and thinking block in this tab", icon: "▴", group: "View" },
     { name: "expand-all",   hint: "expand every tool card and thinking block in this tab",   icon: "▾", group: "View" },
     { name: "check-updates", hint: "check for OMP Desktop updates",            icon: "↑", group: "View"    },

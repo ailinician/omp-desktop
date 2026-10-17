@@ -6,9 +6,10 @@
      - which mode a tab's folder resolves to (`effectiveFor`),
      - what the status-bar cell shows (`statusCell`),
      - which open tabs a change restarts now / once idle (`restartPlan`),
-     - the panel's "this project" segment (`projectRow`).
+     - the project rows of the mode editor (`projectRows`).
    live.js runs the restarts (`_applyApprovalModes`, `_respawnSession`);
-   the approvals panel and the status bar render from these.
+   the mode editor (approvals panel and Settings → Approvals) and the
+   status bar render from these.
    Details: docs/architecture/approval-mode.md.
    ═════════════════════════════════════════════════════════════════════ */
 (function () {
@@ -79,14 +80,22 @@
     return { now, later };
   }
 
-  /** The "this project" row: shown only for a tab with a folder; `value`
-   *  is the override or the literal `"default"` (the segment that removes it). */
-  function projectRow(view, path) {
-    const own = path ? view?.projects?.[path] : undefined;
-    return { present: !!path, value: isMode(own) ? own : "default" };
+  /** The mode editor's project rows: the active tab's folder first (when
+   *  there is one, override or not), then every other project with an
+   *  override, by path. `value` is the override or the literal `"default"`
+   *  (the segment that removes it); `active` marks the tab's folder. */
+  function projectRows(view, activePath) {
+    const rows = [];
+    const own = activePath ? view?.projects?.[activePath] : undefined;
+    if (activePath) rows.push({ path: activePath, value: isMode(own) ? own : "default", active: true });
+    const others = Object.entries(view?.projects ?? {})
+      .filter(([path, mode]) => path !== activePath && isMode(mode))
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    for (const [path, mode] of others) rows.push({ path, value: mode, active: false });
+    return rows;
   }
 
   window.OMP_APPROVAL_MODE = Object.freeze({
-    MODES, DEFAULT_MODE, isMode, labelOf, effectiveFor, statusCell, restartPlan, projectRow,
+    MODES, DEFAULT_MODE, isMode, labelOf, effectiveFor, statusCell, restartPlan, projectRows,
   });
 })();

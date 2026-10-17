@@ -12,7 +12,7 @@
 //   clampWidth(px, stageWidth)      panel width bounds (MIN_WIDTH .. maxWidth)
 //   maxWidth(stageWidth)            the widest the panel goes
 //   popoverTop(rect, pageH, popH, margin)  annotate popover's top, view fraction
-//   pathMenu(settings)              Tweaks → Browser's Chromium menu rows
+//   pathMenu(settings)              Settings → Browser's Chromium menu rows
 // Which keys the page gives back to the app is OMP_KEYMAP.guestShouldBypass
 // (shared with the terminal). Whether the panel follows the agent's page is
 // decided in Rust (the view holds the user's tab choice for 5 s), so there is
@@ -325,7 +325,7 @@
   const browserName = (path) => window.OMP_PATH_SETTING.programName(path, "browser");
 
   /**
-   * Tweaks → Browser's Chromium button and menu for Rust's `BrowserSettings`
+   * Settings → Browser's Chromium button and menu for Rust's `BrowserSettings`
    * (`{ path, automatic, installed, error }`, null before it loaded):
    * `OMP_PATH_SETTING.menu`'s `{ label, rows }`. `label` names what the
    * panel launches (the stored path, else what auto-detection finds); the

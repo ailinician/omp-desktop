@@ -44,7 +44,7 @@ function PromptHistoryModal({ open, entries, onClose, onPick }) {
   // isn't a reliable guard once the composer's own streaming-end
   // refocus effect can run while this is still open, so intercept
   // before the event ever reaches the composer's onKeyDown — same
-  // pattern as shortcuts-modal.jsx's chord recorder. Modified keys are
+  // pattern as settings/shortcuts-editor.jsx's chord recorder. Modified keys are
   // let through untouched so Ctrl+Up still reaches the keymap toggle.
   React.useEffect(() => {
     if (!open) return;

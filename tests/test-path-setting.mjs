@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Regression script for src/app/path-setting.js — the menu behind a
-// Rust-owned program path setting (Tweaks: terminal shell, browser
+// Rust-owned program path setting (Settings: terminal shell, browser
 // Chromium). The feature mappings over it are covered in test-terminal.mjs
 // (`shellMenu`) and test-browser.mjs (`pathMenu`).
 

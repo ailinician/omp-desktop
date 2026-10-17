@@ -92,6 +92,7 @@ function TabBar({
   projects, activeId, onSelect, onClose, onRename, onNew, onHistory, onNewInProject, onReorder,
   sidebarOpen, onToggleSidebar,
   profiles = [], appVersion, updateVersion, onUpdate, onCheckUpdate,
+  settings, onSelectSettings, onCloseSettings,
 }) {
   // Tabs can run under different profiles, so a tab whose profile is not the
   // built-in one is labelled with it — otherwise two tabs on the same folder
@@ -164,6 +165,26 @@ function TabBar({
           </div>
         );
       })}
+      {/* The Settings app tab (#37): pinned after the projects, never
+          dragged; `changed` counts settings off their default. */}
+      {settings?.open && (
+        <div className={`tab app-tab ${settings.active ? "active" : ""}`}
+          title={`settings (${hintFor("desktop.settings.open", "Ctrl+,")})`}
+          onClick={e => (e.button === 1 ? onCloseSettings?.() : onSelectSettings?.())}
+          onMouseDown={e => { if (e.button === 1) e.preventDefault(); }}
+          onAuxClick={e => { if (e.button === 1) { e.preventDefault(); onCloseSettings?.(); } }}>
+          <span className="tab-bar-mark" style={{ background: settings.active ? "var(--fg-3)" : "transparent" }} />
+          <Icon name="cog" size={12} />
+          <span className="tab-name">Settings</span>
+          {settings.changed > 0 && (
+            <span className="tab-count" title={`${settings.changed} changed from default`}>{settings.changed}</span>
+          )}
+          <button className="tab-close" title={`close (${hintFor("desktop.tab.close", "Ctrl+W")})`}
+            onClick={e => { e.stopPropagation(); onCloseSettings?.(); }}>
+            <Icon name="close" size={9} />
+          </button>
+        </div>
+      )}
       <button className="tab-add" title="open project" onClick={onNew}>
         <Icon name="plus" size={11} />
       </button>
@@ -190,7 +211,7 @@ function TabBar({
 // pills below the prompt box show (and change) both. It spans the window
 // under the workspace; the st-ctx meter, st-cost and st-tps cells (each
 // with its separator) drop out when the window is narrow (layout/rail.css).
-function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRules, approvalMode, onStats, onTree, onTerminal, terminalOpen, onBrowser, browserOpen = false, autosave, onAutosave }) {
+function StatusBar({ ctx, todoDone, todoTotal, onTodo, onSettings, settingsActive = false, onChanges, onRules, approvalMode, onStats, onTree, onTerminal, terminalOpen, onBrowser, browserOpen = false }) {
   return (
     <div className="status">
       <span className="status-cell"><span className="dot live" /> connected</span>
@@ -210,13 +231,6 @@ function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRu
       <button className="status-cell btn ghost" onClick={onTodo} style={{ height: 20, padding: "0 6px" }}>
         <Icon name="plan" size={11} color="var(--accent)" />
         <span style={{ color: "var(--accent)" }}>todo {todoDone}/{todoTotal}</span>
-      </button>
-      <span className="status-sep">·</span>
-      <button className="status-cell btn ghost" onClick={() => onAutosave?.(!autosave)}
-        style={{ height: 20, padding: "0 6px" }} title="toggle autosave">
-        <span className="mono" style={{ color: autosave ? "var(--fg-3)" : "var(--fg-5)" }}>
-          autosave {autosave ? "on" : "off"}
-        </span>
       </button>
       <span className="status-sep">·</span>
       <button className="status-cell btn ghost" onClick={onChanges} title="git browser" style={{ height: 20, padding: "0 6px" }}>
@@ -245,8 +259,10 @@ function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRu
         <Icon name="terminal" size={11} color={terminalOpen ? "var(--accent)" : "var(--fg-3)"} />
       </button>
       <span className="status-sep">·</span>
-      <button className="status-cell btn ghost" onClick={onTweaks} title="tweaks" style={{ height: 20, padding: "0 6px" }}>
-        <Icon name="cog" size={11} color="var(--fg-3)" />
+      <button className={`status-cell btn ghost ${settingsActive ? "on" : ""}`} onClick={onSettings}
+        title={`settings (${hintFor("desktop.settings.open", "Ctrl+,")})`}
+        aria-pressed={settingsActive} style={{ height: 20, padding: "0 6px" }}>
+        <Icon name="cog" size={11} color={settingsActive ? "var(--accent)" : "var(--fg-3)"} />
       </button>
     </div>
   );
@@ -372,7 +388,7 @@ function SessionMinimap({ messages, hoveredIdx, onHover, onClick }) {
 
 // ── Right rail: ambient peripherals stacked ──────────────────────────
 // `show`: { context, radar, subagents, minimap } — false hides that card
-// (Tweaks → Rail, keys showContext/showRadar/showSubagents/showMinimap);
+// (Settings → Rail, keys showContext/showRadar/showSubagents/showMinimap);
 // `children` (widget plugin cards) sit between subagents and the minimap.
 function AmbientRail({
   ctx, activity, messages, microcopy, onClose, sparklineValues, hoveredMsgIdx, onMinimapHover, onMinimapClick,

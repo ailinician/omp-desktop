@@ -1,0 +1,90 @@
+/* settings-rows.css — the custom rows of the Settings page
+   (design/settings/rows-*.jsx, shortcuts-editor.jsx, path-setting.jsx's
+   PathPicker). The page, row frame and shared controls are settings.css. */
+
+/* ── Picker: a button naming the value and its drop-down (PathPicker) ── */
+.st-pick { position: relative; flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: 320px; }
+.st-sel {
+  display: inline-flex; align-items: center; gap: 10px; max-width: 100%;
+  padding: 6px 10px 6px 12px; border-radius: 9px;
+  border: 1px solid var(--line-bright); background: var(--bg-input); color: var(--fg);
+  font-family: var(--font-mono); font-size: var(--d-text-sm);
+}
+.st-sel:hover { background: var(--bg-hover); }
+.st-sel:disabled { opacity: 0.5; pointer-events: none; }
+.st-sel:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.st-sel-v { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 5; min-width: 260px;
+  display: flex; flex-direction: column; gap: 1px; padding: 4px;
+  border: 1px solid var(--line-bright); border-radius: 10px; background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+}
+/* The group clips its rows' corners; an open menu must show past it. */
+.st-grp:has(.st-menu) { overflow: visible; }
+.st-menu-item {
+  appearance: none; border: 0; background: transparent; color: var(--fg-2); font: inherit;
+  display: flex; align-items: center; gap: 10px; min-width: 0;
+  padding: 7px 10px; border-radius: 6px; text-align: left;
+}
+.st-menu-item:hover { background: var(--bg-hover); color: var(--fg); }
+.st-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.st-menu-item[aria-checked="true"] { color: var(--fg); }
+.st-menu-mark { width: 12px; flex: none; display: inline-flex; }
+.st-menu-name { flex: none; font-family: var(--font-mono); }
+.st-menu-hint { margin-left: auto; padding-left: 12px; color: var(--fg-4); font-family: var(--font-mono); font-size: var(--d-text-xs); }
+.st-menu-sep { height: 1px; margin: 4px 0; background: var(--line); }
+/* Why Rust refused the path, or why the stored one is invalid. */
+.st-path-error { color: var(--rose); font-size: var(--d-text-xs); overflow-wrap: anywhere; text-align: right; }
+
+/* ── Layout → Column widths ─────────────────────────────────────────── */
+.st-widths { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+.st-width { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-input); }
+.st-width small { display: block; color: var(--fg-4); font-size: var(--d-text-xs); }
+.st-width b { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-weight: 500; font-size: var(--d-text-sm); color: var(--fg-2); }
+.st-width b i { font-style: normal; color: var(--fg-4); }
+.st-width-def { color: var(--fg-4); }
+
+/* ── Misc rows ──────────────────────────────────────────────────────── */
+.st-path-text { min-width: 0; }
+.st-btns { display: flex; gap: 8px; flex: none; }
+.st-row-error { padding: 0 16px 10px; color: var(--rose); font-size: var(--d-text-xs); overflow-wrap: anywhere; }
+.st-linkrow .st-btn svg { color: currentColor; }
+
+/* ── Approvals → the mode editor (approval-mode-section.jsx) ───────── */
+.st-row .mode-sect { padding: 0; border-bottom: 0; }
+
+/* ── Shortcuts editor ───────────────────────────────────────────────── */
+.st-kb { display: flex; flex-direction: column; }
+.st-kb-top { padding: 10px 16px; border-bottom: 1px solid var(--line); }
+.st-kb-filter {
+  width: 100%; padding: 6px 10px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--bg-input); color: var(--fg);
+  font-size: var(--d-text-sm);
+}
+.st-kb-banner { padding: 8px 16px; color: var(--amber); font-size: var(--d-text-xs); border-bottom: 1px solid var(--line); }
+.st-kb-path { color: var(--fg-2); overflow-wrap: anywhere; }
+.st-kb-dim { color: var(--fg-4); }
+.st-kb-empty { padding: 14px 16px; color: var(--fg-4); font-size: var(--d-text-sm); }
+.st-kb-group-name {
+  padding: 12px 16px 4px; color: var(--fg-4);
+  font-size: var(--d-text-xs); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+}
+.st-kb-ctl { display: flex; align-items: center; gap: 10px; flex: none; }
+.st-chords { display: flex; gap: 6px; align-items: center; flex: none; }
+.st-chords .st-kbd { font-size: var(--d-text-xs); padding: 2px 8px; }
+.st-kb-unbound { color: var(--fg-4); font-size: var(--d-text-xs); }
+.st-kb-recording { color: var(--amber); font-size: var(--d-text-xs); }
+.st-srcchip {
+  flex: none; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--line-bright); color: var(--fg-3);
+  font-family: var(--font-mono); font-size: var(--d-text-xs);
+}
+.st-srcchip.desktop { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, transparent); }
+.st-srcchip.omp { color: var(--lilac); border-color: color-mix(in oklab, var(--lilac) 45%, transparent); }
+.st-kb-actions { display: flex; gap: 2px; flex: none; }
+.st-kb-warn { padding: 0 16px 8px; color: var(--amber); font-size: var(--d-text-xs); }
+.st-kb-foot {
+  display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 10px 16px;
+  border-top: 1px solid var(--line); color: var(--fg-4); font-size: var(--d-text-xs);
+}

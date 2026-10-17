@@ -53,14 +53,14 @@
   <!-- App constants. Dependency-free IIFE, loaded before the design
        components: profile-menu.jsx, chrome.jsx and thinking-menu.jsx
        destructure DEFAULT_PROFILE_ID / THINKING_LEVELS at top level,
-       composer.jsx and chat/ask-*.jsx call its isSubmitEnter helper,
+       composer.jsx and chat/ask-*.jsx call its isSubmitEnter / isSubmitKey helpers,
        app/extension-widgets.js and app/browser.js its truncateText, and
        app-live.jsx destructures the rest. -->
   <script src="app/constants.js"></script>
   <!-- Keymap registry + chord algebra, and guestShouldBypass (which keys a
        focused guest — terminal, browser panel — leaves to the app).
        Dependency-free IIFE; must load before any Babel file (composer.jsx,
-       use-keymap.jsx, shortcuts-modal.jsx). -->
+       use-keymap.jsx, settings/shortcuts-editor.jsx). -->
   <script src="app/keymap.js"></script>
 
   <!-- Mention-parsing helpers. Dependency-free IIFE; composer.jsx
@@ -147,6 +147,10 @@
        app/use-goal-mode.jsx and app-live.jsx destructure
        window.OMP_SESSION_UI at top level, so it must load before them. -->
   <script src="app/session-ui.js"></script>
+  <!-- Accent tokens (#37): the soft/glow/deep shades derived from a picked
+       accent. Dependency-free IIFE; app/use-bridge-snapshot.jsx's
+       useThemeEffect calls window.OMP_ACCENT at effect time. -->
+  <script src="app/accent.js"></script>
 
   <!-- Steer / follow-up queue strip: pure helpers over omp's queue
        snapshot. IIFE; its refusal note calls window.OMP_MARKDOWN
@@ -202,7 +206,7 @@
        level, so it must load before both. Calls window.truncateText
        (app/constants.js) at call time. -->
   <script src="app/extension-widgets.js"></script>
-  <!-- Program path setting menu (Tweaks: terminal shell, browser
+  <!-- Program path setting menu (Settings: terminal shell, browser
        Chromium): programName and the menu rows. Dependency-free IIFE
        (OMP_PROJECT_NAV at call time); app/terminal.js and app/browser.js
        call it at call time. -->
@@ -241,12 +245,12 @@
 
   <!-- Browser panel pure helpers (address normalisation, annotation text and
        merge into the outgoing message, page coordinates, CDP key events,
-       per-session chips, width clamp, Tweaks chromium menu). Reads
+       per-session chips, width clamp, Settings chromium menu). Reads
        OMP_IMAGES.MAX_ATTACHMENTS and OMP_LAYOUT_WIDTHS.CHAT_MIN at load
        time (image-attach.js, layout-widths.js above), and
        OMP_MARKDOWN.fenceCode, truncateText, OMP_SESSION_UI and
        OMP_PATH_SETTING at call time; precedes
-       app/use-browser.jsx, design/browser-tweaks.jsx and app-live.jsx. -->
+       app/use-browser.jsx, design/settings/rows-programs.jsx and app-live.jsx. -->
   <script src="app/browser.js"></script>
   <!-- DOM side of the panel: paints the screencast on the canvas, forwards
        input (createScreen).
@@ -254,12 +258,17 @@
        call time; app/use-browser.jsx destructures
        window.OMP_BROWSER_SCREEN. -->
   <script src="app/browser-screen.js"></script>
+  <!-- Settings page (#37): the sections and rows (search, modified, reset,
+       clamp) and the Settings app tab's open/active/section state.
+       IIFEs; bounds and fold modes are read late-bound (OMP_COLLAPSE,
+       OMP_PROMPT_HISTORY, OMP_KEYMAP). design/settings/*.jsx and
+       app-live.jsx read window.OMP_SETTINGS / OMP_SETTINGS_TAB. -->
+  <script src="app/settings-schema.js"></script>
+  <script src="app/settings-tab.js"></script>
 
-  <!-- Design components (unchanged — from src/design/ copy) -->
-  <script src="design/tweaks/style.js"></script>
+  <!-- Tweak storage (localStorage `omp-desktop:tweaks`): useTweaks and the
+       OMP_TWEAKS_STORE reader live.js uses at its top-level init. IIFE. -->
   <script src="design/tweaks/use-tweaks.js"></script>
-  <script type="text/babel" src="design/tweaks/panel.jsx"></script>
-  <script type="text/babel" src="design/tweaks/controls.jsx"></script>
   <!-- Outside-click / Escape dismissal shared by the dropdown menus
        (profile-menu.jsx, tab-group-chip.jsx, thinking-menu.jsx,
        path-setting.jsx's PathPicker). -->
@@ -380,8 +389,11 @@
   <script type="text/babel" src="design/usage-stats-panel.jsx"></script>
   <script type="text/babel" src="design/history-modal.jsx"></script>
   <script type="text/babel" src="design/prompt-history-modal.jsx"></script>
-  <script type="text/babel" src="design/shortcuts-modal.jsx"></script>
   <script type="text/babel" src="design/update-modal.jsx"></script>
+  <!-- "Close a working tab / quit?" (#37, confirmBusyClose); destructures
+       window.Icon at top level. app-live.jsx renders it from live.js's
+       closeConfirm snapshot field. -->
+  <script type="text/babel" src="design/confirm-close.jsx"></script>
   <!-- Conversation tree pane: rows (formatters, graph, meter) → detail
        footer → pane; the detail and the pane destructure the earlier
        files' window exports at top level, so keep this order. -->
@@ -392,20 +404,24 @@
        window.Icon and window.OMP_TERMINAL (app/terminal.js, above) at top
        level. -->
   <script type="text/babel" src="design/terminal-panel.jsx"></script>
-  <!-- A Tweaks program path setting: usePathSetting + PathPicker (button
-       and menu); destructures window.TweakRow (tweaks/, above) and
-       window.Icon (ui/icons.jsx, above) at top level. Precedes both
-       settings below. -->
+  <!-- A program path setting (terminal shell, browser Chromium):
+       usePathSetting + PathPicker (button and menu); destructures
+       window.Icon (ui/icons.jsx, above) at top level. -->
   <script type="text/babel" src="design/path-setting.jsx"></script>
-  <!-- Tweaks → Terminal section (with its shell-setting state);
-       destructures window.TweakSection, window.TweakRow,
-       window.TweakToggle (tweaks/, above) and window.usePathSetting /
-       window.PathPicker (path-setting.jsx, just above) at top level. -->
-  <script type="text/babel" src="design/terminal-tweaks.jsx"></script>
-  <!-- Tweaks → Browser's Chromium row; destructures window.usePathSetting
-       and window.PathPicker (path-setting.jsx, above) at top level and
-       reads window.OMP_BROWSER (app/browser.js) at render time. -->
-  <script type="text/babel" src="design/browser-tweaks.jsx"></script>
+  <!-- Settings page (#37). controls.jsx (row frame + controls, destructures
+       window.Icon) first; the rows-*.jsx renderers and shortcuts-editor.jsx
+       (destructures window.OMP_KEYMAP) register window.OMP_SETTINGS_ROWS and
+       read the controls, PathPicker, ApprovalModeSection and the app/*
+       helpers at render time; page.jsx destructures the controls at top
+       level. app-live.jsx destructures window.SettingsPage. -->
+  <script type="text/babel" src="design/settings/controls.jsx"></script>
+  <script type="text/babel" src="design/settings/rows-layout.jsx"></script>
+  <script type="text/babel" src="design/settings/rows-programs.jsx"></script>
+  <script type="text/babel" src="design/settings/rows-agent.jsx"></script>
+  <script type="text/babel" src="design/settings/rows-session.jsx"></script>
+  <script type="text/babel" src="design/settings/rows-approvals.jsx"></script>
+  <script type="text/babel" src="design/settings/shortcuts-editor.jsx"></script>
+  <script type="text/babel" src="design/settings/page.jsx"></script>
 
   <!-- Live data layer (must load before app-live.jsx) -->
   <script src="model-names.js"></script>
@@ -414,6 +430,10 @@
        calls window.OMP_TURN_STATUS and live.js reads it at its top-level
        init, so it must load before both. -->
   <script src="app/turn-status.js"></script>
+  <!-- Session behaviours (#37): reopen tabs, busy-close confirmation,
+       auto-naming, auto-compaction / retry. IIFE (OMP_TURN_STATUS at call
+       time); live.js reads window.OMP_SESSION_PREFS at its top-level init. -->
+  <script src="app/session-prefs.js"></script>
   <!-- get_messages merge over a tab's live transcript. Dependency-free IIFE;
        adapter.js calls window.OMP_TRANSCRIPT.tsOf inside adaptAgentMessages
        and live.js destructures it at its top-level init, so it must load
