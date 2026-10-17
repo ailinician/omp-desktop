@@ -94,7 +94,7 @@
   background: var(--line-soft);
   transition: background 240ms var(--ease-out);
 }
-.radar-cell.on { animation: drift 2.4s var(--ease-out) infinite; box-shadow: 0 0 4px currentColor; }
+.radar-cell.on { box-shadow: 0 0 4px currentColor; }
 .radar-foot {
   display: flex; justify-content: space-between;
   font-size: var(--d-text-xs);
@@ -139,9 +139,7 @@
   z-index: 2;
   opacity: 1 !important;
 }
-.minimap-cell.live {
-  animation: pulseDot 1.8s ease-in-out infinite;
-}
+.minimap-cell.live { box-shadow: 0 0 4px var(--accent-glow); }
 
 .minimap-legend {
   display: flex;
