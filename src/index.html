@@ -282,6 +282,10 @@
        browser-dock.jsx and app/use-pane-widths.jsx call window.useEdgeDrag
        at render time. -->
   <script src="design/ui/use-edge-drag.js"></script>
+  <!-- A modal inside #root takes focus on open and returns it on close:
+       prompt-history-modal.jsx, update-modal.jsx and confirm-close.jsx
+       call window.useModalFocus at render time. -->
+  <script src="design/ui/use-modal-focus.js"></script>
   <!-- The column resize line (#41); destructures
        window.OMP_LAYOUT_WIDTHS at top level; browser-dock.jsx and
        app-live.jsx destructure ResizeHandle at top level. -->

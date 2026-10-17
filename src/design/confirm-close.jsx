@@ -20,11 +20,8 @@ function ConfirmCloseDialog({ confirm, onAnswer }) {
   const panelRef = React.useRef(null);
   const keepRef = React.useRef(null);
 
-  React.useEffect(() => {
-    const restore = document.activeElement;
-    requestAnimationFrame(() => keepRef.current?.focus());
-    return () => { restore?.focus?.(); };
-  }, []);
+  // "keep" takes focus; it goes back where it was on close.
+  window.useModalFocus(keepRef);
 
   // Capture-phase guard: while the dialog is open no key reaches the
   // composer or the window keymap (Ctrl+W behind it would close a tab).
