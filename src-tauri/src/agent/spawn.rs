@@ -1,5 +1,5 @@
 use crate::approval_mode::ApprovalMode;
-use crate::child_path::trusted_child_path;
+use crate::child_path::{child_path_dirs, join_dirs};
 use crate::program_setting::is_executable_file;
 use std::ffi::{OsStr, OsString};
 #[cfg(windows)]
@@ -28,27 +28,28 @@ const OMP_FILE: &str = if cfg!(windows) { "omp.exe" } else { "omp" };
 /// Located once per run as an absolute path and spawned by that path, never
 /// by a bare name: a session starts in the project folder, and a bare `omp`
 /// would be looked up through any empty or relative PATH entry *there*, so
-/// a project could ship its own `omp`. The PATH is
-/// [`trusted_child_path`] — the same absolute folders the lookup searched,
-/// and what omp inherits, so a `#!/usr/bin/env` interpreter (an npm-installed
-/// omp) isn't resolved inside the project either.
+/// a project could ship its own `omp`. The PATH is the same absolute
+/// folders the lookup searched ([`child_path_dirs`], i.e. the
+/// [`crate::child_path::trusted_child_path`]), and what omp inherits, so a
+/// `#!/usr/bin/env` interpreter (an npm-installed omp) isn't resolved inside
+/// the project either.
 struct Omp {
     binary: PathBuf,
-    path: Option<OsString>,
+    path: OsString,
 }
 
 impl Omp {
     fn locate() -> Result<Self, String> {
-        let path = trusted_child_path();
-        let binary = path
-            .as_deref()
-            .and_then(|path| find_program(path, OMP_FILE, is_executable_file))
-            .ok_or_else(|| {
-                "omp was not found in any absolute PATH folder (relative entries are ignored). \
-                 Make sure omp is installed and on PATH."
-                    .to_string()
-            })?;
-        Ok(Self { binary, path })
+        let dirs = child_path_dirs();
+        let binary = find_program(&dirs, OMP_FILE, is_executable_file).ok_or_else(|| {
+            "omp was not found in any absolute PATH folder (relative entries are ignored). \
+             Make sure omp is installed and on PATH."
+                .to_string()
+        })?;
+        Ok(Self {
+            binary,
+            path: join_dirs(&dirs),
+        })
     }
 
     /// A `Command` for this binary with every cross-cutting concern a run of
@@ -69,9 +70,7 @@ impl Omp {
     fn command(&self) -> Command {
         let mut cmd = Command::new(&self.binary);
         cmd.stdin(Stdio::null());
-        if let Some(path) = &self.path {
-            cmd.env("PATH", path);
-        }
+        cmd.env("PATH", &self.path);
         sanitize_child_env(&mut cmd);
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -89,17 +88,13 @@ impl Omp {
     }
 }
 
-/// The first `name` that `is_executable` accepts in an absolute folder of
-/// `path`, in PATH order. Empty and relative entries are skipped here too,
-/// not only by [`trusted_child_path`]: they would resolve against the
-/// working directory.
+/// The first `name` that `is_executable` accepts in `dirs`, in order.
 fn find_program(
-    path: &OsStr,
+    dirs: &[PathBuf],
     name: &str,
     is_executable: impl Fn(&Path) -> bool,
 ) -> Option<PathBuf> {
-    std::env::split_paths(path)
-        .filter(|dir| dir.is_absolute())
+    dirs.iter()
         .map(|dir| dir.join(name))
         .find(|candidate| is_executable(candidate))
 }
@@ -401,23 +396,6 @@ mod tests {
     use crate::test_support::{executable, TempDir};
     use std::path::Path;
 
-    /// The issue's attack: a project folder holding an executable `omp`,
-    /// reached through an empty or relative PATH entry once the session's
-    /// cwd is that folder. Only the absolute folder's binary may be found,
-    /// even when the relative entries come first.
-    #[test]
-    fn find_program_skips_empty_and_relative_path_entries() {
-        let trusted = if cfg!(windows) {
-            r"C:\tools"
-        } else {
-            "/opt/omp"
-        };
-        let path = std::env::join_paths([".", "", "bin", trusted]).unwrap();
-        // Accepts any candidate, so only `find_program` decides.
-        let found = find_program(&path, "omp", |_| true);
-        assert_eq!(found, Some(Path::new(trusted).join("omp")));
-    }
-
     #[test]
     fn find_program_takes_the_first_absolute_folder_holding_it() {
         let dir = TempDir::new("spawn", "find-program");
@@ -425,13 +403,13 @@ mod tests {
         std::fs::create_dir_all(&none).unwrap();
         let found = executable(&first.join("omp-test"), "");
         executable(&second.join("omp-test"), "");
-        let path = std::env::join_paths([&none, &first, &second]).unwrap();
+        let dirs = [none, first, second];
         assert_eq!(
-            find_program(&path, "omp-test", is_executable_file),
+            find_program(&dirs, "omp-test", is_executable_file),
             Some(found)
         );
         assert_eq!(
-            find_program(none.as_os_str(), "omp-test", is_executable_file),
+            find_program(&dirs[..1], "omp-test", is_executable_file),
             None
         );
     }

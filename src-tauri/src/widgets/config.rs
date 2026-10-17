@@ -352,6 +352,24 @@ fn validate(
     })
 }
 
+/// A test plugin `probe` running `command`: enabled, tab-scoped, on
+/// `activate`, with a 10 s timeout.
+#[cfg(test)]
+pub fn test_entry(command: &[&str]) -> PluginEntry {
+    PluginEntry {
+        id: "probe".to_owned(),
+        title: "Probe".to_owned(),
+        command: command.iter().map(|s| (*s).to_owned()).collect(),
+        match_path: None,
+        match_remote: None,
+        triggers: vec![Trigger::Activate],
+        timeout_ms: 10_000,
+        interval_ms: None,
+        enabled: true,
+        scope: Scope::Tab,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
