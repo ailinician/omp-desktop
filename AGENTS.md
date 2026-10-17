@@ -20,6 +20,7 @@ Feature internals (RPC frames, state machines, measured omp behaviour) live in `
 |`subagents.md`|subagent manager|`app/subagents.js`, `design/subagents/`|
 |`conversation-tree.md`|conversation tree + prompt-cache model, branch/fork|`conversation_tree/`, `app/conversation-tree*.js`|
 |`git-browser.md`|git browser: files tree, full-file inline diff, commit graph, browse a commit|`src-tauri/src/git_browser/`, `app/git-browser.js`, `app/use-git-browser.jsx`, `design/git/`|
+|`file-preview.md`|file preview of read-card paths and agent file links, read-card image thumbnails, write-card paths to the git browser|`project_file.rs`, `app/file-preview.js`, `design/chat/file-preview.jsx`, `design/chat/tool-card.jsx`|
 |`goal-mode.md`|goal mode, auto-continue|`app/goal.js`, `goal_config.rs`|
 |`updater.md`|in-app updates, release signing|`updater.rs`, `app/updater.js`|
 |`external-open.md`|"Open with OMP Desktop" on macOS/Windows/Linux|`external_open.rs`, `src-tauri/packaging/`|
@@ -69,6 +70,7 @@ Regression files are mostly named after the `src/app/<name>.js` module they cove
 |`src-tauri/src/{profiles,open_tabs,recent_projects}.rs`|JSON stores in `<app config>/` (via `json_store.rs`: atomic write, snapshot/rollback; `config_file.rs` `ConfigFile`: the store's file, or its bytes in memory when there is no config folder — open tabs, recent projects, keybinding overlay)|
 |`src-tauri/src/{git,git_watcher,workspace,files}.rs`|branch/HEAD info, `.git/HEAD` watcher, `workspace.rs` = path validation + stage/discard (`workspace_accept`/`workspace_reject`) via the `git` binary, `@`-mention paths|
 |`src-tauri/src/git_browser/`|git browser reads via gix (`git_browser_*` commands): `status.rs` (status merge, file tree), `file.rs` (full-file inline diff, caps), `log.rs` (commit walk, refs, ahead/behind), `graph.rs` (lane layout), `commit.rs` (files a commit touched)|
+|`src-tauri/src/project_file.rs`|`project_file_read`: one file of the tab's project for the preview (folder from the tab registry, never the webview; symlink-escape refusal; text/image caps; base64 images)|
 |`src-tauri/src/{omp_cli,stats,goal_config}.rs`|one-shot `omp <subcommand>` runs (Usage panel, goal auto-continue)|
 |`src-tauri/src/{approval,model_usage,updater,external_open,child_path,navigation_guard}.rs`|tool-approval rules, model MRU, updater, OS folder opens, child PATH, webview navigation guard|
 |`src-tauri/src/approval_mode.rs`|tool approval mode store (`approval-mode.json`: default + per-project override), `resolve` for `start_session`, `approval_mode_*` commands|

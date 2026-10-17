@@ -1,0 +1,83 @@
+/* File preview (chat/file-preview.jsx, issue #39) and the previewable paths
+   and thumbnails in read cards (chat/tool-card.jsx). ──────────────────── */
+
+/* A read card's path opens the preview as a .diff-path button (git.css).
+   Outside the project: shown, not previewable. */
+.fp-path-outside { color: var(--fg-3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A read result's images (omp sends them when the model takes images). */
+.tool-images { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 12px 10px; }
+.tool-images .user-image { max-height: 120px; max-width: 220px; }
+
+.fp-scrim {
+  position: fixed; inset: 0;
+  z-index: 200;
+  display: grid; place-items: center;
+  background: color-mix(in oklab, var(--bg-app) 78%, transparent);
+  backdrop-filter: blur(10px);
+  outline: none;
+  animation: lbScrimIn 200ms var(--ease-out);
+}
+.fp-panel {
+  width: min(1100px, 88vw); height: min(800px, 86vh);
+  display: flex; flex-direction: column;
+  background: var(--bg-surface);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--r-3);
+  box-shadow: var(--shadow-window);
+  overflow: hidden;
+  animation: fpIn 220ms var(--ease-out);
+}
+@keyframes fpIn { from { opacity: 0; transform: translateY(8px) scale(0.985); } }
+
+.fp-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--d-text-sm);
+}
+.fp-crumb { color: var(--fg-3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-crumb b { color: var(--fg); font-weight: 500; }
+.fp-head .chip { white-space: nowrap; }
+.fp-spacer { flex: 1; }
+.fp-head .btn { white-space: nowrap; }
+.fp-copy { position: static; opacity: 1; }
+
+.fp-body { flex: 1; min-height: 0; overflow: auto; background: var(--bg-input); }
+/* The code keeps a dark surface in every theme, as chat code blocks do
+   (platform.css .code-block): highlight-theme.css's colours are dark-theme
+   colours. `.fp-body` stays themed for the states and images. Sized to the
+   longest line so the surface follows a horizontal scroll. */
+.fp-lines.hljs {
+  background: #1a1d23;
+  min-height: 100%; min-width: 100%; width: max-content; box-sizing: border-box;
+  padding: 8px 0 24px; font-size: var(--d-text-sm); line-height: 1.6;
+}
+.fp-line { display: grid; grid-template-columns: 56px 1fr; white-space: pre; }
+.fp-ln { text-align: right; padding-right: 14px; color: #5c6370; user-select: none; }
+.fp-code { padding-right: 16px; }
+.fp-line.is-read { background: color-mix(in oklab, var(--accent) 7%, transparent); }
+.fp-line.is-read .fp-ln { color: var(--accent); box-shadow: inset -2px 0 0 color-mix(in oklab, var(--accent) 60%, transparent); }
+.fp-line.is-target { background: color-mix(in oklab, var(--amber) 14%, transparent); }
+.fp-line.is-target .fp-ln { color: var(--amber); }
+
+.fp-state { height: 100%; display: grid; place-items: center; text-align: center; padding: 24px; }
+.fp-state-title { color: var(--fg); font-size: var(--d-text); }
+.fp-state-sub { margin-top: 4px; color: var(--fg-4); font-size: var(--d-text-sm); max-width: 520px; overflow-wrap: anywhere; }
+
+.fp-img-wrap {
+  height: 100%;
+  display: grid; place-items: center;
+  /* Checkerboard: a transparent image's edges stay visible. */
+  background: repeating-conic-gradient(var(--bg-surface) 0 25%, var(--bg-input) 0 50%) 0 0 / 16px 16px;
+}
+.fp-img-wrap img {
+  max-width: 94%; max-height: 94%;
+  border-radius: 8px;
+  border: 1px solid var(--line-bright);
+  box-shadow: var(--shadow-pop);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fp-scrim, .fp-panel { animation: none; }
+}

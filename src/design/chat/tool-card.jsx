@@ -1,10 +1,12 @@
 /* chat/tool-card.jsx — Linear/Raycast-style card for one tool call,
    plus ScrubbableDiff (shown for `edit` tools with a parsed diff). */
 
-const { Icon: _TC_Icon, TOOL_META: _TC_TOOL_META, EvalCell: _TC_EvalCell, CopyButton: _TC_Copy, CopyHost: _TC_CopyHost, CollapseToggle: _TC_Collapse } = window;
+const { Icon: _TC_Icon, TOOL_META: _TC_TOOL_META, EvalCell: _TC_EvalCell, CopyButton: _TC_Copy, CopyHost: _TC_CopyHost, CollapseToggle: _TC_Collapse, ImageThumbs: _TC_Thumbs } = window;
 const { bashPreview: _TC_bashPreview } = window.OMP_COLLAPSE;
+const { readTarget: _TC_readTarget, inProject: _TC_inProject } = window.OMP_FILE_PREVIEW;
+const { formatBytes: _TC_size } = window.OMP_UPDATER;
 
-// One open-in-git-browser button per file the edit touched; a card whose
+// One open-in-git-browser button per file an edit (or a write) touched; a card whose
 // paths are not known yet (a running edit in a mode the start frame does
 // not name files for) shows none.
 function DiffPaths({ msg, onOpenFile }) {
@@ -18,6 +20,29 @@ function DiffPaths({ msg, onOpenFile }) {
         </React.Fragment>
       ))}
     </span>
+  );
+}
+
+// A read card's target and summary, the path opening the file preview
+// (issue #39) when it is a project file; plus the images omp returned for
+// it, opening the image viewer.
+function _TC_ReadBody({ msg, projectRoot, onPreviewFile }) {
+  const target = _TC_readTarget(msg.target);
+  // A tab without a folder has no project to read from (Rust refuses it).
+  const previewable = !!(onPreviewFile && projectRoot && target && _TC_inProject(target.path, projectRoot));
+  return (
+    <React.Fragment>
+      <div className="tool-foot mono">
+        <span style={{ color: "var(--fg-3)" }}>↳</span>
+        {previewable ? (
+          <button type="button" className="diff-path" onClick={() => onPreviewFile(target)} title="Preview the file">{msg.target}</button>
+        ) : (
+          <span className="fp-path-outside" title={target ? "Outside the project: no preview" : undefined}>{msg.target}</span>
+        )}
+        {msg.summary && <span style={{ color: "var(--fg-4)" }}>· {msg.summary}</span>}
+      </div>
+      <_TC_Thumbs images={msg.images} className="tool-images" alt="image the agent read" />
+    </React.Fragment>
   );
 }
 
@@ -168,7 +193,7 @@ function TaskPanel({ subagents, onInspect }) {
 // `collapsed`: true/false when the body has a toggle, undefined when it is
 // too short to collapse (app/chat-collapse.js). Collapsed, the body keeps a
 // few lines in view: bash its last ones, everything else its first.
-function ToolCard({ msg, idx, highlighted, onInspectSubagent, onOpenFile, collapsed, onToggleCollapse }) {
+function ToolCard({ msg, idx, highlighted, onInspectSubagent, onOpenFile, onPreviewFile, projectRoot, collapsed, onToggleCollapse }) {
   const meta    = _TC_TOOL_META[msg.tool] || { color: "var(--fg-3)", icon: "circle", label: msg.tool };
   const running = msg.status === "running";
   const bashLines = collapsed && msg.output ? _TC_bashPreview(msg.output) : msg.output;
@@ -215,11 +240,13 @@ function ToolCard({ msg, idx, highlighted, onInspectSubagent, onOpenFile, collap
             </div>
           )}
 
-          {msg.tool === "read" && (
+          {msg.tool === "read" && <_TC_ReadBody msg={msg} projectRoot={projectRoot} onPreviewFile={onPreviewFile} />}
+
+          {msg.tool === "write" && msg.targets?.length > 0 && (
             <div className="tool-foot mono">
               <span style={{ color: "var(--fg-3)" }}>↳</span>
-              <span style={{ color: "var(--fg-2)" }}>{msg.target}</span>
-              <span style={{ color: "var(--fg-4)" }}>· {msg.summary}</span>
+              <DiffPaths msg={msg} onOpenFile={onOpenFile} />
+              {msg.bytes != null && <span style={{ color: "var(--fg-4)" }}>· {_TC_size(msg.bytes)}</span>}
             </div>
           )}
 

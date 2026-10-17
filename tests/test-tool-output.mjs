@@ -135,4 +135,30 @@ check("a finished multi-file edit lists every perFileResults path; one without d
   assert.deepEqual(arr(kept.targets), ["src/c.ts"]);
 });
 
+// Read and write cards (issue #39): a read result's image blocks (omp sends
+// `[{type:"text"}, {type:"image", data, mimeType}]` when the model takes
+// images) become thumbnails; a write card names its file for the git browser.
+check("a read card keeps its result's images, at most four, and nothing else", () => {
+  const read = buildToolStartCard({ toolName: "read", toolCallId: "r1", args: { path: "shot.png" } }, "12:00");
+  const img = (n) => ({ type: "image", data: `AAA${n}`, mimeType: "image/png" });
+  const done = finalizeToolCard(read, { result: { content: [
+    { type: "text", text: "Read image file [image/png]" }, img(1), { type: "image", data: 7 }, img(2), img(3), img(4), img(5),
+  ], details: {} } });
+  assert.deepEqual(arr(done.images).map((i) => i.data), ["AAA1", "AAA2", "AAA3", "AAA4"]);
+  assert.equal(done.images[0].mimeType, "image/png");
+  const text = finalizeToolCard(read, { result: { content: [{ type: "text", text: "1|a" }], details: { lines: 1 } } });
+  assert.equal(text.images, undefined);
+  assert.equal(text.summary, "1 lines");
+});
+
+check("a write card names its file and takes the size from omp's result text", () => {
+  const write = buildToolStartCard({ toolName: "write", toolCallId: "w1", args: { path: "tests/x.mjs", content: "x" } }, "12:00");
+  assert.deepEqual(arr(write.targets), ["tests/x.mjs"]);
+  const done = finalizeToolCard(write, { result: { content: [{ type: "text", text: "Successfully wrote 1946 bytes to tests/x.mjs" }], details: {} } });
+  assert.equal(done.bytes, 1946);
+  assert.deepEqual(arr(done.targets), ["tests/x.mjs"]);
+  const failed = finalizeToolCard(write, { result: { content: [{ type: "text", text: "EACCES" }] }, isError: true });
+  assert.equal(failed.bytes, undefined);
+});
+
 console.log(`tool-output: ${passed} checks passed`);

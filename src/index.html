@@ -124,6 +124,14 @@
        load before all of them. -->
   <script src="app/project-nav.js"></script>
 
+  <!-- File preview (issue #39): which file and lines a read card or a chat
+       link points at, project confinement, highlighted lines. IIFE that
+       destructures window.OMP_MARKDOWN (app/marked-setup.js) and
+       window.OMP_PROJECT_NAV (above) at load; design/chat/tool-card.jsx,
+       design/chat/file-preview.jsx and app-live.jsx destructure
+       window.OMP_FILE_PREVIEW at top level, so this must load before them. -->
+  <script src="app/file-preview.js"></script>
+
   <!-- Drag-to-reorder geometry (#40): the drop slot under the pointer.
        Dependency-free IIFE; design/ui/use-drag-reorder.js destructures
        window.OMP_DRAG_REORDER at load, so it must load before it. -->
@@ -285,8 +293,13 @@
        useMarkdownClick at top level. -->
   <script type="text/babel" src="design/ui/markdown.jsx"></script>
   <script type="text/babel" src="design/ui/plan-annotations.jsx"></script>
-  <!-- user-bubble.jsx destructures window.ImageLightbox at top level. -->
+  <!-- Also ImageThumbs and useModalLayer; user-bubble.jsx, tool-card.jsx
+       and file-preview.jsx destructure them at top level. -->
   <script type="text/babel" src="design/chat/image-lightbox.jsx"></script>
+  <!-- File preview modal (#39); destructures window.Icon, window.CopyButton
+       and window.useModalLayer (above). app-live.jsx destructures
+       window.FilePreview. -->
+  <script type="text/babel" src="design/chat/file-preview.jsx"></script>
   <script type="text/babel" src="design/chat/user-bubble.jsx"></script>
   <script type="text/babel" src="design/chat/eval-cell.jsx"></script>
   <script type="text/babel" src="design/chat/assistant-bubble.jsx"></script>

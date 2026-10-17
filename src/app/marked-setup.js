@@ -32,7 +32,19 @@
     const fence = '`'.repeat(Math.max(3, longest + 1));
     return fence + lang + '\n' + text + '\n' + fence;
   }
-  window.OMP_MARKDOWN = { fenceCode };
+  // A file path `new URL` reads as a scheme: a Windows drive path (`C:/x.rs`,
+  // a slash after the letter) or a bare file with a line (`main.rs:12`,
+  // `main.rs:12-20`, `main.rs:12:5`). Neither shape can name a script
+  // scheme. The `link` renderer below keeps such hrefs as anchors for the
+  // file preview, and app/file-preview.js's `linkTarget` parses them;
+  // defined before the guard below so that file needs neither library.
+  const DRIVE_PATH = /^[a-z]:[/\\]/i;
+  const BARE_FILE_LINE = /^\w[\w.-]*\.[a-z0-9]+:\d+(?:[-:]\d+)?$/i;
+  function isSchemeLikeFilePath(href) {
+    const s = String(href ?? '');
+    return DRIVE_PATH.test(s) || BARE_FILE_LINE.test(s);
+  }
+  window.OMP_MARKDOWN = { fenceCode, isSchemeLikeFilePath };
 
   if (!window.marked || !window.hljs) return;
   // Since marked 15, renderers get raw token fields: `href`, `title`,
@@ -123,7 +135,10 @@
         let scheme = null;
         try { scheme = new URL(url, 'https://omp-desktop.invalid/').protocol; }
         catch (_) { /* leave scheme null - falls through to plain text */ }
-        if (scheme !== 'http:' && scheme !== 'https:' && scheme !== 'mailto:') {
+        // A file path that only looks like a scheme stays a link for the
+        // file preview (app-live.jsx), which claims the click; unclaimed,
+        // navigation_guard.rs blocks it like any non-web scheme.
+        if (scheme !== 'http:' && scheme !== 'https:' && scheme !== 'mailto:' && !isSchemeLikeFilePath(url)) {
           return inner;
         }
         let safeHref;

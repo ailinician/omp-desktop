@@ -25,7 +25,7 @@ mod log;
 mod status;
 
 pub use commit::{commit, commit_file, CommitView};
-pub use file::{file, FileView};
+pub use file::{file, is_binary, FileView};
 pub use log::{log, LogView};
 pub use status::{status, StatusView};
 
@@ -118,7 +118,7 @@ fn fail<E: std::fmt::Display>(what: &'static str) -> impl FnOnce(E) -> String {
 /// lies inside the work dir: its parent is canonicalised as far as it exists
 /// ([`crate::workspace::weakly_canonicalize`], so a symlinked project folder
 /// still matches) and the remainder validated the same way.
-fn project_relative(work_dir: &Path, rel_path: &str) -> Result<String, String> {
+pub fn project_relative(work_dir: &Path, rel_path: &str) -> Result<String, String> {
     let given = Path::new(rel_path);
     if !given.is_absolute() {
         return crate::workspace::validate_relative_path(work_dir, rel_path).map(|(_, rel)| rel);
