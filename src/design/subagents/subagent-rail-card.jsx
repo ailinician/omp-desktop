@@ -20,13 +20,13 @@ function SubagentRailCard({ agents, paneOpen, onOpen, onTogglePane }) {
 
   return (
     <div className="rail-card glass">
-      <div className="rail-card-head" style={{ cursor: "pointer", userSelect: "none" }} onClick={() => setCollapsed(c => !c)} title={collapsed ? "Expand subagents" : "Collapse subagents"}>
+      <div className="rail-card-head" style={{ cursor: "pointer", userSelect: "none" }} onClick={() => setCollapsed(c => !c)} title={collapsed ? _t("Expand subagents") : _t("Collapse subagents")}>
         <_SAR_Icon name="agent" size={11} color="var(--cyan)" />
-        <span className="mono" style={{ color: "var(--fg-2)" }}>subagents</span>
+        <span className="mono" style={{ color: "var(--fg-2)" }}>{_t("subagents")}</span>
         {t.live > 0 ? (
-          <span className="chip accent mono" style={{ marginLeft: "auto" }}><span className="dot live" /> {t.live} live</span>
+          <span className="chip accent mono" style={{ marginLeft: "auto" }}><span className="dot live" /> {t.live} {_t("live")}</span>
         ) : (
-          <span className="chip muted mono" style={{ marginLeft: "auto" }}>{t.total ? `${t.total} ran` : "idle"}</span>
+          <span className="chip muted mono" style={{ marginLeft: "auto" }}>{t.total ? `${t.total} ${_t("ran")}` : _t("idle")}</span>
         )}
         <_SAR_Icon name={collapsed ? "chevR" : "chev"} size={10} color="var(--fg-4)" />
       </div>
@@ -34,14 +34,14 @@ function SubagentRailCard({ agents, paneOpen, onOpen, onTogglePane }) {
       {!collapsed && (
         <>
           {t.total === 0 ? (
-            <div className="sa-empty">Agents spawned by <span className="mono">task</span> calls show up here, live.</div>
+            <div className="sa-empty">{_t("Agents spawned by ")}<span className="mono">task</span>{_t(" calls show up here, live.")}</div>
           ) : (
             <>
               <div className="sa-rail-stats mono">
                 <span><b>{window.formatTokens(t.tokens)}</b> tok</span>
                 <span><b>{_SAR.fmtCost(t.cost)}</b></span>
-                <span><b>{t.tools}</b> tools</span>
-                {t.failed > 0 && <span style={{ color: "var(--rose)" }}>{t.failed} failed</span>}
+                <span><b>{t.tools}</b> {_t("tools")}</span>
+                {t.failed > 0 && <span style={{ color: "var(--rose)" }}>{t.failed} {_t("failed")}</span>}
               </div>
               <div className="sa-rail-list">
                 {rows.map(a => (
@@ -63,11 +63,11 @@ function SubagentRailCard({ agents, paneOpen, onOpen, onTogglePane }) {
                   </button>
                 ))}
               </div>
-              {hidden > 0 && <div className="sa-rail-more mono">+{hidden} more</div>}
+              {hidden > 0 && <div className="sa-rail-more mono">+{hidden} {_t("more")}</div>}
             </>
           )}
           <button className="btn ghost outlined sa-rail-open" onClick={onTogglePane}>
-            <_SAR_Icon name="split" size={11} /> {paneOpen ? "hide manager" : "open manager"}
+            <_SAR_Icon name="split" size={11} /> {paneOpen ? _t("hide manager") : _t("open manager")}
           </button>
         </>
       )}

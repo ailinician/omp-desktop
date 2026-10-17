@@ -553,9 +553,9 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
       {planMode && (
         <div className="plan-strip">
           <Icon name="plan" size={12} color="var(--amber)" />
-          <span style={{ color: "var(--amber)" }}>plan mode</span>
-          <span style={{ color: "var(--fg-3)" }}>· I'll draft before I write</span>
-          <button className="btn ghost" onClick={onTogglePlan} style={{ marginLeft: "auto", height: 22 }}>exit</button>
+          <span style={{ color: "var(--amber)" }}>{_t("plan mode")}</span>
+          <span style={{ color: "var(--fg-3)" }}>· {_t("I'll draft before I write")}</span>
+          <button className="btn ghost" onClick={onTogglePlan} style={{ marginLeft: "auto", height: 22 }}>{_t("exit")}</button>
         </div>
       )}
       {/* Goal mode (goal-strip.jsx): built by app-live.jsx, keyed by tab. */}
@@ -606,8 +606,8 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
         <div className="attach-strip">
           {attachments.map(a => (
             <div className="attach-chip" key={a.id}>
-              <img className="attach-thumb" src={a.src} alt={a.name || "attached image"} />
-              <button className="attach-remove" title="remove" onClick={() => removeAttachment(a.id)}>
+              <img className="attach-thumb" src={a.src} alt={a.name || _t("attached image")} />
+              <button className="attach-remove" title={_t("remove")} onClick={() => removeAttachment(a.id)}>
                 <Icon name="close" size={9} />
               </button>
             </div>
@@ -619,7 +619,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
       <PasteStrip key={sessionId} pastes={collapsed} onExpand={expandPaste} />
 
       <div className="composer-row">
-        <button className="btn icon ghost" title="attach image" onClick={() => fileInputRef.current?.click()}>
+        <button className="btn icon ghost" title={_t("attach image")} onClick={() => fileInputRef.current?.click()}>
           <Icon name="image" size={13} />
         </button>
         <input
@@ -630,7 +630,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
           style={{ display: "none" }}
           onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
         />
-        <button className="btn icon ghost" title="dictate">
+        <button className="btn icon ghost" title={_t("dictate")}>
           <Icon name="voice" size={13} />
         </button>
         <div className="composer-input">
@@ -639,12 +639,12 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
             rows="1"
             placeholder={
               goalMode && !isStreaming
-                ? "describe the goal — the agent works toward it until it calls it done…"
+                ? _t("describe the goal — the agent works toward it until it calls it done…")
                 : planMode && !isStreaming
-                ? (microcopy?.planTip ?? "describe what to build, or give feedback on the plan…")
+                ? _t(microcopy?.planTip ?? "describe what to build, or give feedback on the plan…")
                 : isStreaming
-                  ? (microcopy?.streamingTip ?? `Press ${abortHint || "Esc"} to interrupt — your cursor is in the room.`)
-                  : (microcopy?.paletteTip ?? `type / to give orders${bridgeHint ? ` · ${bridgeHint} opens the bridge` : ""}`)
+                  ? (microcopy?.streamingTip ?? `${_t("Press ")}${abortHint || "Esc"}${_t(" to interrupt — your cursor is in the room.")}`)
+                  : (microcopy?.paletteTip ?? `${_t("type / to give orders")}${bridgeHint ? ` · ${bridgeHint}${_t(" opens the bridge")}` : ""}`)
             }
             value={text}
             onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart); }}
@@ -658,7 +658,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
             aria-activedescendant={showMention ? `mention-row-${mentionActiveIdx}` : undefined}
           />
         </div>
-        <button className="btn outlined" title={bridgeHint ? `open command bridge (${bridgeHint})` : "open command bridge"} onClick={onOpenCmd}>
+        <button className="btn outlined" title={bridgeHint ? `${_t("open command bridge")} (${bridgeHint})` : _t("open command bridge")} onClick={onOpenCmd}>
           <Icon name="command" size={11} />
           {bridgeKeyHint && <span className="kbd" style={{ marginLeft: 2 }}>{bridgeKeyHint}</span>}
         </button>
@@ -667,11 +667,11 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
             {steerable && (
               <button className={`btn outlined${goalMode ? " goal-resume" : ""}`} onClick={send} disabled={pendingImages > 0}
                 style={goalMode ? undefined : { color: "var(--amber)", borderColor: "color-mix(in oklab, var(--amber) 40%, var(--line))" }}>
-                <Icon name={goalMode ? "goal" : "arrow"} size={10} color={goalMode ? "var(--lilac)" : "var(--amber)"} /> {goalMode ? "start goal" : "steer"}
+                <Icon name={goalMode ? "goal" : "arrow"} size={10} color={goalMode ? "var(--lilac)" : "var(--amber)"} /> {goalMode ? _t("start goal") : _t("steer")}
               </button>
             )}
             <button className="btn danger" onClick={onAbort}>
-              <Icon name="stop" size={10} /> abort {abortHint && <span className="kbd">{abortHint}</span>}
+              <Icon name="stop" size={10} /> {_t("abort")} {abortHint && <span className="kbd">{abortHint}</span>}
             </button>
           </>
         ) : (
@@ -679,16 +679,16 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
             {planMode && (
               <button className="btn outlined" onClick={onApprove}
                 style={{ color: "var(--amber)", borderColor: "color-mix(in oklab, var(--amber) 40%, var(--line))" }}>
-                <Icon name="play" size={10} color="var(--amber)" /> approve
+                <Icon name="play" size={10} color="var(--amber)" /> {_t("approve")}
               </button>
             )}
             <button className={`btn primary${goalMode ? " goal-start" : ""}`} onClick={send}
               disabled={!sendable || pendingImages > 0}>
               {goalMode
-                ? "start goal"
+                ? _t("start goal")
                 : planMode
-                ? `send feedback${annotationCount > 0 ? ` · ${annotationCount} comment${annotationCount !== 1 ? "s" : ""}` : ""}`
-                : "send"}
+                ? `${_t("send feedback")}${annotationCount > 0 ? ` · ${annotationCount} ${_t(annotationCount !== 1 ? "comments" : "comment")}` : ""}`
+                : _t("send")}
               {" "}<Icon name="arrow" size={11} />
             </button>
           </>
@@ -706,29 +706,29 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
         <button className={`composer-pill ${planMode ? "on" : ""}`} onClick={onTogglePlan}
           disabled={!!planBlocked && !planMode} title={planBlocked && !planMode ? planBlocked : undefined}>
           <Icon name="plan" size={11} color={planMode ? "var(--amber)" : "var(--fg-3)"} />
-          <span style={{ color: planMode ? "var(--amber)" : "var(--fg-2)" }}>plan mode</span>
+          <span style={{ color: planMode ? "var(--amber)" : "var(--fg-2)" }}>{_t("plan mode")}</span>
         </button>
         <button className={`composer-pill goal-pill${goalMode ? " on" : ""}`} onClick={onToggleGoal}
           disabled={!!goalBlocked && !goalMode}
-          title={goalBlocked && !goalMode ? goalBlocked : "goal mode: your next message becomes a goal the agent works toward"}>
+          title={goalBlocked && !goalMode ? goalBlocked : _t("goal mode: your next message becomes a goal the agent works toward")}>
           <Icon name="goal" size={11} color={goalMode ? "var(--lilac)" : "var(--fg-3)"} />
-          <span style={{ color: goalMode ? "var(--lilac)" : "var(--fg-2)" }}>goal</span>
+          <span style={{ color: goalMode ? "var(--lilac)" : "var(--fg-2)" }}>{_t("goal")}</span>
         </button>
         <div style={{ flex: 1 }} />
         {backgroundWork && (
-          <span className="composer-bg-note" title="omp reports background work (an async bash, task or eval job) whose result will wake the agent">
+          <span className="composer-bg-note" title={_t("omp reports background work (an async bash, task or eval job) whose result will wake the agent")}>
             <TabRunDot state="background" />
-            background job running · the agent resumes when it finishes
+            {_t("background job running · the agent resumes when it finishes")}
           </span>
         )}
         <span className="mono" style={{ color: "var(--fg-4)", fontSize: "var(--d-text-xs)" }}>
           {[
             ...(isStreaming && steerable
-              ? [goalMode ? `${enterKey} start goal` : `${enterKey} steer`]
-              : [goalMode ? `${enterKey} start goal` : `${enterKey} send`, `${newlineKey} newline`]),
+              ? [goalMode ? `${enterKey} ${_t("start goal")}` : `${enterKey} ${_t("steer")}`]
+              : [goalMode ? `${enterKey} ${_t("start goal")}` : `${enterKey} ${_t("send")}`, `${newlineKey} ${_t("newline")}`]),
             // Dropped entirely when unbound rather than showing a keyless
             // "abort" segment that advertises a shortcut that isn't there.
-            ...(abortHint ? [`${abortHint} abort`] : []),
+            ...(abortHint ? [`${abortHint} ${_t("abort")}`] : []),
           ].join(" · ")}
         </span>
       </div>
@@ -817,27 +817,27 @@ function CommandBridge({ open, onClose, onPick, onPickModel, currentModelId, pro
       <div className="bridge-scrim" onClick={onClose}>
         <div className="bridge slide-in" onClick={(e) => e.stopPropagation()}>
           <div className="bridge-input-row">
-            <button className="btn icon ghost" title="back"
+            <button className="btn icon ghost" title={_t("back")}
               onClick={() => { setView("commands"); setQ(""); }}
               style={{ marginRight: 4 }}>
               <Icon name="chevR" size={12} color="var(--fg-3)"
                 style={{ transform: "rotate(180deg)", display: "block" }} />
             </button>
             <input ref={inputRef} className="bridge-input mono"
-              placeholder="filter models…" value={q}
+              placeholder={_t("filter models…")} value={q}
               onChange={(e) => setQ(e.target.value)} />
             <span className="kbd">esc</span>
           </div>
           <div className="bridge-body">
             {recentHits.length > 0 && (
               <div className="bridge-group">
-                <div className="bridge-group-head mono">recently used</div>
+                <div className="bridge-group-head mono">{_t("recently used")}</div>
                 {recentHits.map((m) => modelRow(m, "recent"))}
               </div>
             )}
             <div className="bridge-group">
               <div className="bridge-group-head mono" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                all models
+                {_t("all models")}
                 <span style={{ color: "var(--fg-4)" }}>
                   tauri:{window.__TAURI__ ? "✓" : "✗"}
                   · connected:{window.OMP_BRIDGE?.isConnected ? "✓" : "✗"}
@@ -845,17 +845,17 @@ function CommandBridge({ open, onClose, onPick, onPickModel, currentModelId, pro
                 </span>
                 <button className="btn ghost" style={{ marginLeft: "auto", height: 18, fontSize: "var(--d-text-xs)", padding: "0 6px" }}
                   onClick={() => window.OMP_BRIDGE?.refreshModels()}>
-                  refresh
+                  {_t("refresh")}
                 </button>
               </div>
               {modelHits.map((m) => modelRow(m, "all"))}
-              {modelHits.length === 0 && <div className="bridge-empty">no models found</div>}
+              {modelHits.length === 0 && <div className="bridge-empty">{_t("no models found")}</div>}
             </div>
           </div>
           <div className="bridge-foot mono">
-            <span className="kbd">↑↓</span> navigate
-            <span className="kbd">↵</span> switch
-            <span className="kbd">esc</span> back
+            <span className="kbd">↑↓</span> {_t("navigate")}
+            <span className="kbd">↵</span> {_t("switch")}
+            <span className="kbd">esc</span> {_t("back")}
           </div>
         </div>
       </div>
@@ -868,25 +868,25 @@ function CommandBridge({ open, onClose, onPick, onPickModel, currentModelId, pro
       <div className="bridge-scrim" onClick={onClose}>
         <div className="bridge slide-in" onClick={(e) => e.stopPropagation()}>
           <div className="bridge-input-row">
-            <button className="btn icon ghost" title="back"
+            <button className="btn icon ghost" title={_t("back")}
               onClick={() => { setView("commands"); setQ(""); }}
               style={{ marginRight: 4 }}>
               <Icon name="chevR" size={12} color="var(--fg-3)"
                 style={{ transform: "rotate(180deg)", display: "block" }} />
             </button>
             <span className="bridge-input mono" style={{ cursor: "default", lineHeight: "normal" }}>
-              login
+              {_t("login")}
             </span>
             <span className="kbd">esc</span>
           </div>
           <div className="bridge-body">
             <div className="bridge-group">
-              <div className="bridge-group-head mono">select provider</div>
+              <div className="bridge-group-head mono">{_t("select provider")}</div>
               {loginProviders === null && (
-                <div className="bridge-empty" style={{ padding: "16px 32px" }}>loading providers…</div>
+                <div className="bridge-empty" style={{ padding: "16px 32px" }}>{_t("loading providers…")}</div>
               )}
               {loginProviders !== null && loginProviders.length === 0 && (
-                <div className="bridge-empty">no providers available</div>
+                <div className="bridge-empty">{_t("no providers available")}</div>
               )}
               {loginProviders !== null && loginProviders.map((p) => (
                 <button key={p.id}
@@ -902,15 +902,15 @@ function CommandBridge({ open, onClose, onPick, onPickModel, currentModelId, pro
                   </span>
                   <span className="mono" style={{ color: "var(--fg-4)" }}>{p.id}</span>
                   <span className="chip muted" style={{ marginLeft: "auto" }}>
-                    {p.authenticated ? "logged in" : p.available ? "available" : "unavailable"}
+                    {p.authenticated ? _t("logged in") : p.available ? _t("available") : _t("unavailable")}
                   </span>
                 </button>
               ))}
             </div>
           </div>
           <div className="bridge-foot mono">
-            <span className="kbd">↵</span> authenticate
-            <span className="kbd">esc</span> back
+            <span className="kbd">↵</span> {_t("authenticate")}
+            <span className="kbd">esc</span> {_t("back")}
           </div>
         </div>
       </div>
@@ -930,7 +930,7 @@ function CommandBridge({ open, onClose, onPick, onPickModel, currentModelId, pro
         <div className="bridge-input-row">
           <Icon name="command" size={14} color="var(--accent)" />
           <input ref={inputRef} className="bridge-input mono"
-            placeholder="cross the bridge — type to filter…" value={q}
+            placeholder={_t("cross the bridge — type to filter…")} value={q}
             onChange={(e) => setQ(e.target.value)} />
           <span className="kbd">esc</span>
         </div>
@@ -966,14 +966,14 @@ function CommandBridge({ open, onClose, onPick, onPickModel, currentModelId, pro
             </div>
           ))}
           {cmdHits.length === 0 && (
-            <div className="bridge-empty">no luck — try `plan`, `branch`, `model`…</div>
+            <div className="bridge-empty">{_t("no luck — try `plan`, `branch`, `model`…")}</div>
           )}
         </div>
         <div className="bridge-foot mono">
-          <span className="kbd">↑↓</span> navigate
-          <span className="kbd">↵</span> run
-          <span className="kbd">esc</span> close
-          <span style={{ marginLeft: "auto", color: "var(--fg-4)" }}>{window.OMP_DATA.microcopy.paletteTip}</span>
+          <span className="kbd">↑↓</span> {_t("navigate")}
+          <span className="kbd">↵</span> {_t("run")}
+          <span className="kbd">esc</span> {_t("close")}
+          <span style={{ marginLeft: "auto", color: "var(--fg-4)" }}>{_t(window.OMP_DATA.microcopy.paletteTip)}</span>
         </div>
       </div>
     </div>

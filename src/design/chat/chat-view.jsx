@@ -12,6 +12,8 @@ const { collapseStates: _CV_collapseStates, PREVIEW_LINES: _CV_PREVIEW_LINES } =
 // Lines a collapsed block keeps in view, for chat.css; one object, so a
 // streaming frame does not diff a fresh style.
 const _CV_PAD_STYLE = { "--collapse-lines": _CV_PREVIEW_LINES };
+var _t = (en) => (window.OMP_LANG === "en" ? en : (window.OMP_ZH_DICT?.[en] ?? en));
+
 
 // ── Per-bubble memo wrappers ────────────────────────────────────────────────
 // Primary streaming-perf win: only the live tail (new object ref per
@@ -53,20 +55,20 @@ const CompactRow = React.memo(function CompactRow({ msg }) {
             borderColor: `color-mix(in oklab, ${COLOR} 30%, var(--line))`,
           }}>compact</span>
           <span className="tool-title">
-            {pending ? "compacting context\u2026"
-              : error   ? "compaction failed"
-              : (msg.shortSummary || "context compacted")}
+            {pending ? _t("compacting context…")
+              : error   ? _t("compaction failed")
+              : (msg.shortSummary || _t("context compacted"))}
           </span>
           <div className="tool-card-spacer" />
           {pending && (
             <span className="chip accent" style={{ animation: "pulseDot 1.4s infinite" }}>
-              <span className="dot live" />{" "}running
+              <span className="dot live" />{" "}{_t("running")}
             </span>
           )}
           {!pending && !error && msg.tokensBefore != null && (
-            <span className="chip muted mono">{tok} before</span>
+            <span className="chip muted mono">{tok} {_t("before")}</span>
           )}
-          {error && <span className="chip" style={{ color: "var(--rose)" }}>failed</span>}
+          {error && <span className="chip" style={{ color: "var(--rose)" }}>{_t("failed")}</span>}
           {hasBody && <_CV_Icon name={open ? "chev" : "chevR"} size={10} color="var(--fg-4)" />}
         </div>
         {open && hasBody && (
@@ -101,7 +103,7 @@ const JobRow = React.memo(function JobRow({ msg, idx, highlighted }) {
             borderColor: `color-mix(in oklab, ${color} 30%, var(--line))`,
           }}>{label}</span>
           <span className="tool-title" title={msg.label ?? undefined}>
-            {msg.jobId} finished
+            {msg.jobId} {_t("finished")}
             {msg.label && <span className="job-label"> · {msg.label}</span>}
           </span>
           <div className="tool-card-spacer" />
@@ -356,7 +358,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
                   className={`turn-dot-btn${isCurrent ? " is-current" : ""}${isHot ? " is-hot" : ""}${isAdj ? " is-adj" : ""}`}
                   onMouseEnter={(e) => onEnterDot(k, e)}
                   onClick={() => jumpToTurn(k)}
-                  aria-label={`Jump to prompt #${t.turnNum}`}
+                  aria-label={`${_t("Jump to prompt #")}${t.turnNum}`}
                 >
                   <span className="turn-dot" />
                 </button>
@@ -381,7 +383,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
                         #{item.turnNum}{offset === 0 ? ` / ${userTurns.length}` : ""}
                       </span>
                       {item.time && <span className="turn-card-time mono">{item.time}</span>}
-                      {offset === 0 && <span className="turn-card-hint">点击定位</span>}
+                      {offset === 0 && <span className="turn-card-hint">{_t("点击定位")}</span>}
                     </div>
                     <div className="turn-card-text">{item.text}</div>
                   </div>
@@ -394,7 +396,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
       {showJump && (
         <button type="button" className="chat-jump-latest" onClick={jumpToLatest}>
           <_CV_Icon name="chev" size={12} />
-          Jump to latest
+          {_t("Jump to latest")}
         </button>
       )}
     </div>

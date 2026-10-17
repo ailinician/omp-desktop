@@ -22,7 +22,7 @@ function _TT_ShellPicker({ bridge }) {
   const { settings, error, save, pick } = _TT_useSetting(bridge, _TT_SHELL);
   const { label, rows } = window.OMP_TERMINAL.shellMenu(settings);
   return (
-    <_TT_Picker name="shell" label={label} rows={rows} disabled={!settings} error={error}
+    <_TT_Picker name={_t("shell")} label={label} rows={rows} disabled={!settings} error={error}
       title={settings ? (settings.shell || `default: ${settings.defaultShell}`) : undefined}
       save={save} pick={pick} />
   );
@@ -31,10 +31,10 @@ function _TT_ShellPicker({ bridge }) {
 /** `height` is the shared panel height (useTerminal's `height`). */
 function TerminalTweaks({ bridge, height, autoOpen, onAutoOpen }) {
   return (
-    <_TT_Section label="Terminal">
+    <_TT_Section label={_t("Terminal")}>
       <_TT_ShellPicker bridge={bridge} />
-      <_TT_Toggle label="open with new tab" value={autoOpen} onChange={onAutoOpen} />
-      <_TT_Row label="height" value={`${height} px`} />
+      <_TT_Toggle label={_t("open with new tab")} value={autoOpen} onChange={onAutoOpen} />
+      <_TT_Row label={_t("height")} value={`${height} px`} />
     </_TT_Section>
   );
 }

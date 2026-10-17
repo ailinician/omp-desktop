@@ -42,6 +42,7 @@ const { absolutePath: _gitAbsolutePath, finishedEdits: _gitFinishedEdits } = win
 
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  window.OMP_LANG     = t.lang ?? "zh";
   const data          = window.OMP_DATA;
   const bridge        = window.OMP_BRIDGE;
 
@@ -986,91 +987,100 @@ function App() {
         <UpdateModal updater={updater} busyTabs={window.OMP_UPDATER.busyTabCount(sessions)} />
       )}
 
-      <TweaksPanel title="Tweaks" noDeckControls>
-        <TweakSection label="Look">
-          <TweakRadio label="theme" value={t.theme}
+      <TweaksPanel title={_t("Tweaks")} noDeckControls>
+        <TweakSection label={_t("Look")}>
+          <TweakRadio label={_t("language")} value={t.lang ?? "zh"}
             options={[
-              { label: "aurora",   value: "aurora"   },
-              { label: "phosphor", value: "phosphor" },
-              { label: "daylight", value: "daylight" },
+              { label: "中文", value: "zh" },
+              { label: "EN", value: "en" },
+            ]}
+            onChange={v => setTweak("lang", v)}
+          />
+          <TweakRadio label={_t("theme")} value={t.theme}
+            options={[
+              { label: _t("aurora"),   value: "aurora"   },
+              { label: _t("phosphor"), value: "phosphor" },
+              { label: _t("daylight"), value: "daylight" },
             ]}
             onChange={v => setTweak({ theme: v, accent:
               v === "aurora"   ? "#8AF0C8" :
               v === "phosphor" ? "#C4FF3F" : "#1F8A5B"
             })}
           />
-          <TweakRadio label="density" value={t.density}
+          <TweakRadio label={_t("density")} value={t.density}
             options={[
-              { label: "cozy",    value: "cozy"    },
-              { label: "compact", value: "compact" },
-              { label: "dense",   value: "dense"   },
+              { label: _t("cozy"),    value: "cozy"    },
+              { label: _t("compact"), value: "compact" },
+              { label: _t("dense"),   value: "dense"   },
             ]}
             onChange={v => setTweak("density", v)}
           />
-          <TweakColor label="accent" value={t.accent}
+          <TweakColor label={_t("accent")} value={t.accent}
             options={["#8AF0C8", "#6EE7FF", "#FF7AC6", "#FFC56E", "#B59BFF", "#C4FF3F"]}
             onChange={v => setTweak("accent", v)}
           />
-          <TweakToggle label="mono chat font" value={t.monoChat}
+          <TweakToggle label={_t("mono chat font")} value={t.monoChat}
             onChange={v => setTweak("monoChat", v)} />
-          <TweakSlider label="font size" value={t.fontSize ?? 100}
+          <TweakSlider label={_t("font size")} value={t.fontSize ?? 100}
             min={75} max={150} step={5} unit="%"
             onChange={v => setTweak("fontSize", v)} />
         </TweakSection>
-        <TweakSection label="Layout">
-          <TweakRadio label="layout" value={t.layout}
+        <TweakSection label={_t("Layout")}>
+          <TweakRadio label={_t("layout")} value={t.layout}
             options={[
-              { label: "rail",  value: "rail"  },
-              { label: "split", value: "split" },
-              { label: "focus", value: "focus" },
+              { label: _t("rail"),  value: "rail"  },
+              { label: _t("split"), value: "split" },
+              { label: _t("focus"), value: "focus" },
             ]}
             onChange={v => setTweak("layout", v)}
           />
-          <TweakToggle label="project sidebar" value={t.sidebar ?? true}
+          <TweakToggle label={_t("project sidebar")} value={t.sidebar ?? true}
             onChange={v => setTweak("sidebar", v)} />
         </TweakSection>
-        <TweakSection label="Chat">
+        <TweakSection label={_t("Chat")}>
           {/* Tool cards and thinking (#44, #43): modes in app/chat-collapse.js. */}
-          <TweakRadio label="thinking" value={foldModes.thinking} options={window.OMP_COLLAPSE.MODES}
+          <TweakRadio label={_t("thinking")} value={foldModes.thinking}
+            options={window.OMP_COLLAPSE.MODES.map(m => ({ label: _t(m), value: m }))}
             onChange={v => setTweak("foldThinking", v)} />
-          <TweakRadio label="tool output" value={foldModes.tool} options={window.OMP_COLLAPSE.MODES}
+          <TweakRadio label={_t("tool output")} value={foldModes.tool}
+            options={window.OMP_COLLAPSE.MODES.map(m => ({ label: _t(m), value: m }))}
             onChange={v => setTweak("foldTools", v)} />
           {Object.values(foldModes).includes("auto") && (
-            <TweakSlider label="collapse after" value={window.OMP_COLLAPSE.clampAfter(t.collapseAfter)}
-              min={window.OMP_COLLAPSE.MIN_AFTER} max={window.OMP_COLLAPSE.MAX_AFTER} step={1} unit=" newer"
+            <TweakSlider label={_t("collapse after")} value={window.OMP_COLLAPSE.clampAfter(t.collapseAfter)}
+              min={window.OMP_COLLAPSE.MIN_AFTER} max={window.OMP_COLLAPSE.MAX_AFTER} step={1} unit={` ${_t("newer")}`}
               onChange={v => setTweak("collapseAfter", v)} />
           )}
         </TweakSection>
-        <TweakSection label="Rail">
-          <TweakToggle label="context gauge" value={t.showContext ?? true} onChange={v => setTweak("showContext", v)} />
-          <TweakToggle label="agent radar" value={t.showRadar ?? true} onChange={v => setTweak("showRadar", v)} />
-          <TweakToggle label="subagents" value={t.showSubagents ?? true} onChange={v => setTweak("showSubagents", v)} />
-          <TweakToggle label="minimap" value={t.showMinimap ?? true} onChange={v => setTweak("showMinimap", v)} />
+        <TweakSection label={_t("Rail")}>
+          <TweakToggle label={_t("context gauge")} value={t.showContext ?? true} onChange={v => setTweak("showContext", v)} />
+          <TweakToggle label={_t("agent radar")} value={t.showRadar ?? true} onChange={v => setTweak("showRadar", v)} />
+          <TweakToggle label={_t("subagents")} value={t.showSubagents ?? true} onChange={v => setTweak("showSubagents", v)} />
+          <TweakToggle label={_t("minimap")} value={t.showMinimap ?? true} onChange={v => setTweak("showMinimap", v)} />
           {widgets.togglePlugins.map(p => (
-            <TweakToggle key={p.id} label={`widget: ${p.title}`} value={t[_widgetTweakKey(p.id)] ?? true}
+            <TweakToggle key={p.id} label={`${_t("widget")}: ${p.title}`} value={t[_widgetTweakKey(p.id)] ?? true}
               onChange={v => setTweak(_widgetTweakKey(p.id), v)} />
           ))}
           {extToggles.map(r => (
-            <TweakToggle key={r.tweak} label={r.label} value={t[r.tweak] ?? true}
+            <TweakToggle key={r.tweak} label={_t(r.label)} value={t[r.tweak] ?? true}
               onChange={v => setTweak(r.tweak, v)} />
           ))}
-          <TweakRow label="plugins">
-            <div className="twk-path">{widgets.configPath ?? "unavailable"}</div>
-            <TweakButton label="reload widgets" secondary onClick={widgets.reload} />
+          <TweakRow label={_t("plugins")}>
+            <div className="twk-path">{widgets.configPath ?? _t("unavailable")}</div>
+            <TweakButton label={_t("reload widgets")} secondary onClick={widgets.reload} />
           </TweakRow>
         </TweakSection>
         <TerminalTweaks bridge={bridge} height={terminal.height} autoOpen={t.terminalAutoOpen ?? false}
           onAutoOpen={v => setTweak("terminalAutoOpen", v)} />
-        <TweakSection label="Browser">
+        <TweakSection label={_t("Browser")}>
           <BrowserTweaks bridge={bridge} />
-          <TweakToggle label="open localhost links in panel" value={t.browserLocalhostInPanel ?? true}
+          <TweakToggle label={_t("open localhost links in panel")} value={t.browserLocalhostInPanel ?? true}
             onChange={v => setTweak("browserLocalhostInPanel", v)} />
         </TweakSection>
-        <TweakSection label="Session">
-          <TweakSlider label="prompt history" value={t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT}
-            min={window.OMP_PROMPT_HISTORY.MIN_LIMIT} max={window.OMP_PROMPT_HISTORY.MAX_LIMIT} step={10} unit=" prompts"
+        <TweakSection label={_t("Session")}>
+          <TweakSlider label={_t("prompt history")} value={t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT}
+            min={window.OMP_PROMPT_HISTORY.MIN_LIMIT} max={window.OMP_PROMPT_HISTORY.MAX_LIMIT} step={10} unit={` ${_t("prompts")}`}
             onChange={v => setTweak("promptHistoryLimit", v)} />
-          <TweakToggle label="check for updates" value={t.updateCheck ?? true}
+          <TweakToggle label={_t("check for updates")} value={t.updateCheck ?? true}
             onChange={v => setTweak("updateCheck", v)} />
         </TweakSection>
       </TweaksPanel>

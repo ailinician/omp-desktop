@@ -64,20 +64,20 @@ function WindowChrome({
 
       <div className="chrome-right">
         <button className="btn ghost outlined" onClick={onCmd}>
-          <Icon name="command" size={11} /> bridge{" "}
+          <Icon name="command" size={11} /> {_t("bridge")}{" "}
           <span className="kbd">{hintFor("desktop.commands.open", IS_WIN ? "^K" : "⌘K")}</span>
         </button>
 
         {/* Windows controls — right side, hidden on macOS/Linux */}
         {IS_WIN && (
           <div className="win-controls">
-            <button className="win-ctrl win-min" title="Minimize">
+            <button className="win-ctrl win-min" title={_t("Minimize")}>
               <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1 5.5h8" stroke="currentColor" strokeWidth="1" /></svg>
             </button>
-            <button className="win-ctrl win-max" title="Maximize / Restore">
+            <button className="win-ctrl win-max" title={_t("Maximize / Restore")}>
               <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
             </button>
-            <button className="win-ctrl win-close" title="Close">
+            <button className="win-ctrl win-close" title={_t("Close")}>
               <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" strokeWidth="1.1" /></svg>
             </button>
           </div>
@@ -107,7 +107,7 @@ function TabBar({
   return (
     <div className="tabs" onPointerDown={reorder.onPointerDown}>
       <button className={`tab-add ${sidebarOpen ? "on" : ""}`}
-        title={`project sidebar (${hintFor("desktop.sidebar.toggle", "Ctrl+B")})`}
+        title={`${_t("project sidebar")} (${hintFor("desktop.sidebar.toggle", "Ctrl+B")})`}
         aria-pressed={!!sidebarOpen}
         onClick={onToggleSidebar}>
         <Icon name="sidebar" size={11} />
@@ -155,29 +155,29 @@ function TabBar({
                 onCommit={name => onRename(p.id, name)}
                 onClose={() => setRenaming(null)} />
             ) : (
-              <TabLabel tab={p} className="tab-name" title={`${p.name}\ndouble-click to rename`} />
+              <TabLabel tab={p} className="tab-name" title={`${p.name}\n${_t("double-click to rename")}`} />
             )}
             {profile && (
-              <span className="chip muted tab-profile" title={`profile: ${profile}`}>{profile}</span>
+              <span className="chip muted tab-profile" title={`${_t("profile")}: ${profile}`}>{profile}</span>
             )}
             <button className="tab-close" onClick={e => { e.stopPropagation(); onClose?.(p.id); }}><Icon name="close" size={9} /></button>
           </div>
         );
       })}
-      <button className="tab-add" title="open project" onClick={onNew}>
+      <button className="tab-add" title={_t("open project")} onClick={onNew}>
         <Icon name="plus" size={11} />
       </button>
-      <button className="tab-add" title={`conversation history (${hintFor("desktop.history.open", "Ctrl+H")})`} onClick={onHistory}>
+      <button className="tab-add" title={`${_t("conversation history")} (${hintFor("desktop.history.open", "Ctrl+H")})`} onClick={onHistory}>
         <Icon name="clock" size={11} />
       </button>
       <div style={{ flex: 1 }} />
       <div className="tabs-right mono">
         {updateVersion && (
-          <button className="btn outlined update-pill" onClick={onUpdate} title={`OMP Desktop v${updateVersion} is available`}>
+          <button className="btn outlined update-pill" onClick={onUpdate} title={`OMP Desktop v${updateVersion} ${_t("is available")}`}>
             <Icon name="arrowUp" size={9} />v{updateVersion}
           </button>
         )}
-        <button className="btn ghost app-version" onClick={onCheckUpdate} title="check for updates">
+        <button className="btn ghost app-version" onClick={onCheckUpdate} title={_t("check for updates")}>
           {appVersion ? `v${appVersion}` : "—"}
         </button>
       </div>
@@ -193,7 +193,7 @@ function TabBar({
 function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRules, approvalMode, onStats, onTree, onTerminal, terminalOpen, onBrowser, browserOpen = false, autosave, onAutosave }) {
   return (
     <div className="status">
-      <span className="status-cell"><span className="dot live" /> connected</span>
+      <span className="status-cell"><span className="dot live" /> {_t("connected")}</span>
       <span className="status-sep">·</span>
       <span className="status-cell st-ctx mono">
         <span style={{ color: "var(--fg-3)" }}>{ctx.label}</span>
@@ -203,49 +203,49 @@ function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRu
         <span className="st-ctx-pct" style={{ color: "var(--fg-4)" }}>{(+ctx.pct).toFixed(1)}%</span>
       </span>
       <span className="status-sep st-cost">·</span>
-      <span className="status-cell st-cost mono"><span style={{ color: "var(--fg-3)" }}>cost</span> {ctx.cost}</span>
+      <span className="status-cell st-cost mono"><span style={{ color: "var(--fg-3)" }}>{_t("cost")}</span> {ctx.cost}</span>
       <span className="status-sep st-tps">·</span>
       <span className="status-cell st-tps mono"><span style={{ color: "var(--fg-3)" }}>{ctx.tokensPerSec}</span> t/s</span>
       <div className="status-gap" />
       <button className="status-cell btn ghost" onClick={onTodo} style={{ height: 20, padding: "0 6px" }}>
         <Icon name="plan" size={11} color="var(--accent)" />
-        <span style={{ color: "var(--accent)" }}>todo {todoDone}/{todoTotal}</span>
+        <span style={{ color: "var(--accent)" }}>{_t("todo")} {todoDone}/{todoTotal}</span>
       </button>
       <span className="status-sep">·</span>
       <button className="status-cell btn ghost" onClick={() => onAutosave?.(!autosave)}
-        style={{ height: 20, padding: "0 6px" }} title="toggle autosave">
+        style={{ height: 20, padding: "0 6px" }} title={_t("toggle autosave")}>
         <span className="mono" style={{ color: autosave ? "var(--fg-3)" : "var(--fg-5)" }}>
-          autosave {autosave ? "on" : "off"}
+          {_t("autosave")} {autosave ? _t("on") : _t("off")}
         </span>
       </button>
       <span className="status-sep">·</span>
-      <button className="status-cell btn ghost" onClick={onChanges} title="git browser" style={{ height: 20, padding: "0 6px" }}>
+      <button className="status-cell btn ghost" onClick={onChanges} title={_t("git browser")} style={{ height: 20, padding: "0 6px" }}>
         <Icon name="diff2" size={11} color="var(--fg-3)" />
       </button>
       <span className="status-sep">·</span>
-      <button className="status-cell btn ghost" onClick={onTree} title="conversation tree (prompt-cache status)" style={{ height: 20, padding: "0 6px" }}>
+      <button className="status-cell btn ghost" onClick={onTree} title={_t("conversation tree (prompt-cache status)")} style={{ height: 20, padding: "0 6px" }}>
         <Icon name="branch" size={11} color="var(--fg-3)" />
       </button>
       <span className="status-sep">·</span>
       <button className="status-cell btn ghost" onClick={onBrowser} aria-pressed={browserOpen}
-        title={`browser panel (${hintFor("desktop.browser.toggle", "Ctrl+Shift+B")})`}
+        title={`${_t("browser panel")} (${hintFor("desktop.browser.toggle", "Ctrl+Shift+B")})`}
         style={{ height: 20, padding: "0 6px" }}>
         <Icon name="web" size={11} color={browserOpen ? "var(--accent)" : "var(--fg-3)"} />
       </button>
       <span className="status-sep">·</span>
       <ApprovalModeCell cell={approvalMode} onClick={onRules} />
       <span className="status-sep">·</span>
-      <button className="status-cell btn ghost" onClick={onStats} title="usage statistics" style={{ height: 20, padding: "0 6px" }}>
+      <button className="status-cell btn ghost" onClick={onStats} title={_t("usage statistics")} style={{ height: 20, padding: "0 6px" }}>
         <Icon name="cost" size={11} color="var(--fg-3)" />
       </button>
       <span className="status-sep">·</span>
       <button className={`status-cell btn ghost ${terminalOpen ? "on" : ""}`} onClick={onTerminal}
-        title={`terminal (${hintFor("desktop.terminal.toggle", "Ctrl+`")})`}
+        title={`${_t("terminal")} (${hintFor("desktop.terminal.toggle", "Ctrl+`")})`}
         aria-pressed={!!terminalOpen} style={{ height: 20, padding: "0 6px" }}>
         <Icon name="terminal" size={11} color={terminalOpen ? "var(--accent)" : "var(--fg-3)"} />
       </button>
       <span className="status-sep">·</span>
-      <button className="status-cell btn ghost" onClick={onTweaks} title="tweaks" style={{ height: 20, padding: "0 6px" }}>
+      <button className="status-cell btn ghost" onClick={onTweaks} title={_t("tweaks")} style={{ height: 20, padding: "0 6px" }}>
         <Icon name="cog" size={11} color="var(--fg-3)" />
       </button>
     </div>
@@ -260,7 +260,7 @@ function ApprovalModeCell({ cell, onClick }) {
   const targetColor = cell?.warn ? "var(--amber)" : "var(--fg-3)";
   return (
     <button className="status-cell btn ghost" onClick={onClick}
-      title={cell?.pending ? `approvals — switches to ${cell.target} when the agent finishes its turn` : "approvals"}
+      title={cell?.pending ? `${_t("approvals")} — ${_t("switches to")} ${cell.target}` : _t("approvals")}
       style={{ height: 20, padding: "0 6px" }}>
       <Icon name={cell?.warn ? "warn" : "check"} size={11} color={targetColor} />
       {cell && (cell.pending
@@ -294,7 +294,7 @@ function SessionMinimap({ messages, hoveredIdx, onHover, onClick }) {
     <div className="minimap">
       <div className="minimap-head">
         <Icon name="minimap" size={11} color="var(--fg-3)" />
-        <span className="mono" style={{ color: "var(--fg-3)" }}>session</span>
+        <span className="mono" style={{ color: "var(--fg-3)" }}>{_t("session")}</span>
         <span className="mono" style={{ marginLeft: "auto", color: "var(--fg-4)" }}>{shown}</span>
       </div>
       <div className="minimap-grid">
@@ -322,28 +322,28 @@ function SessionMinimap({ messages, hoveredIdx, onHover, onClick }) {
           // so they get tool-specific info instead of a token chip.
           let title;
           if (m.kind === "assistant" && m.failure) {
-            title = `request failed${m.failure.httpStatus != null ? ` · HTTP ${m.failure.httpStatus}` : ""}${m.time ? " · " + m.time : ""}`;
+            title = `${_t("request failed")}${m.failure.httpStatus != null ? ` · HTTP ${m.failure.httpStatus}` : ""}${m.time ? " · " + m.time : ""}`;
           } else if (m.kind === "assistant") {
             const tok  = m.tokens ? `${m.tokens.toLocaleString()} tok` : "—";
             const inOut = (m.tokensIn != null || m.tokensOut != null)
               ? ` (${(m.tokensIn ?? 0).toLocaleString()} in · ${(m.tokensOut ?? 0).toLocaleString()} out)`
               : "";
-            title = `assistant · ${tok}${inOut}${m.time ? " · " + m.time : ""}`;
+            title = `${_t("assistant")} · ${tok}${inOut}${m.time ? " · " + m.time : ""}`;
           } else if (m.kind === "tool") {
             const dur = m.duration ? ` · ${(m.duration / 1000).toFixed(1)}s` : "";
-            const status = m.status === "running" ? " · running" : (m.status === "ok" ? "" : ` · ${m.status}`);
-            title = `${m.tool ?? "tool"}${m.title ? " " + m.title : ""}${dur}${status}`;
+            const status = m.status === "running" ? ` · ${_t("running")}` : (m.status === "ok" ? "" : ` · ${m.status}`);
+            title = `${m.tool ?? _t("tool")}${m.title ? " " + m.title : ""}${dur}${status}`;
           } else if (m.kind === "user") {
             const preview = m.text ? ` · ${m.text.slice(0, 80)}${m.text.length > 80 ? "…" : ""}` : "";
-            title = `you${preview}`;
+            title = `${_t("you")}${preview}`;
           } else if (m.kind === "job") {
-            title = `${m.jobId} finished${m.label ? " · " + m.label : ""}`;
+            title = `${m.jobId} ${_t("finished")}${m.label ? " · " + m.label : ""}`;
           } else if (m.kind === "retry") {
-            title = `retrying · attempt ${m.attempt}${m.maxAttempts ? " of " + m.maxAttempts : ""}`;
+            title = `${_t("retrying")} · ${_t("attempt")} ${m.attempt}${m.maxAttempts ? " of " + m.maxAttempts : ""}`;
           } else if (m.kind === "goal") {
             title = window.OMP_GOAL.rowView(m).title;
           } else if (m.kind === "approval") {
-            title = `auto-approved · ${m.tool || "tool"}`;
+            title = `${_t("auto-approved")} · ${m.tool || _t("tool")}`;
           } else {
             title = m.kind;
           }
@@ -361,10 +361,10 @@ function SessionMinimap({ messages, hoveredIdx, onHover, onClick }) {
         })}
       </div>
       <div className="minimap-legend">
-        <span className="minimap-legend-item"><i style={{ background: "var(--fg-3)" }} />you</span>
-        <span className="minimap-legend-item"><i style={{ background: "var(--accent)" }} />assistant</span>
-        <span className="minimap-legend-item"><i style={{ background: "var(--amber)" }} />ask</span>
-        <span className="minimap-legend-item"><i style={{ background: "var(--fg-4)" }} />tool</span>
+        <span className="minimap-legend-item"><i style={{ background: "var(--fg-3)" }} />{_t("you")}</span>
+        <span className="minimap-legend-item"><i style={{ background: "var(--accent)" }} />{_t("assistant")}</span>
+        <span className="minimap-legend-item"><i style={{ background: "var(--amber)" }} />{_t("ask")}</span>
+        <span className="minimap-legend-item"><i style={{ background: "var(--fg-4)" }} />{_t("tool")}</span>
       </div>
     </div>
   );
@@ -387,12 +387,12 @@ function AmbientRail({
   return (
     <aside className="rail">
       <div className="rail-head">
-        <span className="mono" style={{ color: "var(--fg-3)" }}>ambient</span>
+        <span className="mono" style={{ color: "var(--fg-3)" }}>{_t("ambient")}</span>
         <span className="rail-head-actions">
-          <button className="btn icon ghost" onClick={onOpenTree} title="conversation tree (prompt-cache status)">
+          <button className="btn icon ghost" onClick={onOpenTree} title={_t("conversation tree (prompt-cache status)")}>
             <Icon name="branch" size={10} />
           </button>
-          <button className="btn icon ghost" onClick={onClose} title="hide rail">
+          <button className="btn icon ghost" onClick={onClose} title={_t("hide rail")}>
             <Icon name="close" size={10} />
           </button>
         </span>
@@ -401,11 +401,11 @@ function AmbientRail({
       {(show.context ?? true) && (
         <div className="rail-card glass">
           <TokenGauge used={ctx.used} total={ctx.total} pct={ctx.pct}
-            label={ctx.label} sub={`cost ${ctx.cost} · ${ctx.tokensPerSec} t/s`} />
+            label={ctx.label} sub={`${_t("cost")} ${ctx.cost} · ${ctx.tokensPerSec} t/s`} />
           <div className="rail-spark">
             <Sparkline values={sparkVals} width={210} height={28} />
             <div className="rail-spark-foot mono">
-              <span style={{ color: "var(--fg-4)" }}>throughput</span>
+              <span style={{ color: "var(--fg-4)" }}>{_t("throughput")}</span>
               <span style={{ color: "var(--accent)" }}>{ctx.tokensPerSec} t/s</span>
             </div>
           </div>
@@ -416,8 +416,8 @@ function AmbientRail({
         <div className="rail-card glass">
           <div className="rail-card-head">
             <Icon name="radar" size={11} color="var(--accent)" />
-            <span className="mono" style={{ color: "var(--fg-2)" }}>agent radar</span>
-            <span className="chip muted mono" style={{ marginLeft: "auto" }}>last 60s</span>
+            <span className="mono" style={{ color: "var(--fg-2)" }}>{_t("agent radar")}</span>
+            <span className="chip muted mono" style={{ marginLeft: "auto" }}>{_t("last 60s")}</span>
           </div>
           <ActivityRadar activity={activity} tps={ctx.tokensPerSec} />
           <div className="legend">
@@ -440,7 +440,7 @@ function AmbientRail({
         <div className="rail-card glass" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 120 }}>
           <div className="rail-card-head">
             <Icon name="minimap" size={11} color="var(--fg-3)" />
-            <span className="mono" style={{ color: "var(--fg-2)" }}>minimap</span>
+            <span className="mono" style={{ color: "var(--fg-2)" }}>{_t("minimap")}</span>
           </div>
           <SessionMinimap messages={messages} hoveredIdx={hoveredMsgIdx} onHover={onMinimapHover} onClick={onMinimapClick} />
         </div>
