@@ -36,13 +36,16 @@ pub struct PluginContext {
 /// all-empty context without touching git: an empty path would otherwise be
 /// discovered as the app's own working directory, a foreign repository.
 ///
-/// The repository is discovered once. The remote URL never carries a
+/// The repository is discovered once, under the spawn gate (gix may run
+/// `git` to find its installation config). The remote URL never carries a
 /// password (`https://user:pw@host` → `https://user@host`): it reaches the
 /// plugin and the webview, which only need it for matching.
 pub fn session_ctx(project: Option<&Path>) -> SessionCtx {
     let Some(project) = project.filter(|p| !p.as_os_str().is_empty()) else {
         return SessionCtx::default();
     };
+    let _gate = crate::spawn_gate::shared();
+    #[allow(clippy::disallowed_methods)] // under the gate
     let Ok(repo) = gix::discover(project) else {
         return SessionCtx {
             project: project.to_string_lossy().into_owned(),

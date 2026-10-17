@@ -62,11 +62,12 @@ impl Omp {
     /// flash a console window.
     ///
     /// The `.stdin(Stdio::null())` default only matters for a
-    /// `.spawn()`-based caller: `Command::spawn()`/`.status()` default to
+    /// `spawn`-based caller: `spawn_gate::spawn`/`status` default to
     /// *inheriting* the parent's stdin, where a child that tries to read
     /// from it could block — concretely reachable under `tauri dev`, where
-    /// the parent's stdin is the terminal. [`omp_output`]'s `.output()` would
-    /// not inherit it anyway; [`spawn_omp`] overrides it with a pipe.
+    /// the parent's stdin is the terminal. [`omp_output`]'s
+    /// `spawn_gate::output` nulls it anyway; [`spawn_omp`] overrides it with
+    /// a pipe.
     fn command(&self) -> Command {
         let mut cmd = Command::new(&self.binary);
         cmd.stdin(Stdio::null());
@@ -81,9 +82,7 @@ impl Omp {
     /// regardless of exit status — each caller decides how to interpret a
     /// non-zero exit.
     fn output<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<std::process::Output, String> {
-        self.command()
-            .args(args)
-            .output()
+        crate::spawn_gate::output(self.command().args(args))
             .map_err(|e| format!("failed to run {}: {e}", self.binary.display()))
     }
 }
@@ -366,8 +365,7 @@ pub(super) fn spawn_omp(
     // Unix: must run before spawn() (installs the child as its own
     // process-group leader). Windows: only `CREATE_NO_WINDOW` again.
     crate::supervisor::ProcessSupervisor::prepare(&mut cmd);
-    let child = cmd
-        .spawn()
+    let child = crate::spawn_gate::spawn(&mut cmd)
         .map_err(|e| format!("failed to spawn {}: {e}", omp.binary.display()))?;
     let supervisor = crate::supervisor::ProcessSupervisor::attach(&child);
     Ok((child, supervisor))

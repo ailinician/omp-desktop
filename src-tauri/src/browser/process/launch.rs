@@ -95,11 +95,9 @@ impl Chromium {
         let pipes = attach(&mut cmd).map_err(|e| Failure::Fatal(format!("cdp pipe: {e}")))?;
         apply_child_path(&mut cmd);
         ProcessSupervisor::prepare(&mut cmd);
-        let spawned = cmd.spawn();
-        // Close our copies of Chromium's ends whatever happened: the pipes
-        // must end with the browser.
-        let (from_chromium, to_chromium) = pipes.spawned();
-        let mut child = spawned.map_err(|e| Failure::Binary(format!("cannot run: {e}")))?;
+        let (mut child, from_chromium, to_chromium) = pipes
+            .spawn(&mut cmd)
+            .map_err(|e| Failure::Binary(format!("cannot run: {e}")))?;
         let supervisor = ProcessSupervisor::attach(&child);
         let mut pid_path = profile.as_os_str().to_os_string();
         pid_path.push(".pid");
@@ -113,9 +111,11 @@ impl Chromium {
                     .map_err(|e| Failure::Fatal(format!("cdp pipe reader: {e}")))
             });
         // The end of Chromium's stderr closes the broker: the process tree
-        // is gone even if the pipe never reports its end (on Windows another
-        // process can inherit the pipe's ends). Weak: the drain thread must
-        // not keep the connection alive.
+        // is gone even if the pipe never reports its end (a process started
+        // outside the spawn gate could hold a copy of Chromium's ends; std
+        // makes a child's stdio ends inheritable only within its own spawn,
+        // under its own lock, so no other std spawn holds stderr). Weak: the
+        // drain thread must not keep the connection alive.
         let watched = broker.as_ref().ok().map(Arc::downgrade);
         let stderr = child.stderr.take().map(|stderr| {
             StderrTail::drain(stderr, move || {
@@ -128,9 +128,6 @@ impl Chromium {
         let started = broker.and_then(|broker| match wait_for_browser(&mut child, &broker) {
             Ok(()) => Ok(broker),
             Err(failure) => {
-                // Here, before the kill: a pipe thread holding the broker
-                // for a moment would otherwise close it on that thread,
-                // which cannot cancel the other's blocked I/O.
                 broker.close();
                 Err(failure)
             }

@@ -68,7 +68,7 @@ pub struct FileView {
 /// `git_browser_file(path, rel_path)`: the work-tree file against its
 /// `HEAD` blob — the rename source's blob for a renamed file.
 pub fn file(path: &Path, rel_path: &str) -> Result<FileView, String> {
-    let (mut repo, work_dir) = open(path)?;
+    let (_gate, mut repo, work_dir) = open(path)?;
     // `core.safecrlf=true` makes the filter pipeline refuse a file whose line
     // endings would not survive a round trip; `git diff` downgrades that to a
     // warning when it reads a file to show it, and so does this view.

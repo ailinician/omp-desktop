@@ -3,6 +3,9 @@
 // invoke payload. Suppress the related pedantic lints at module scope so
 // command signatures stay idiomatic for the Tauri API.
 #![allow(clippy::needless_pass_by_value)]
+// `clippy.toml` routes every spawn through `spawn_gate`; the suites start
+// their helper processes (`git`, `sh`, stand-in browsers) directly.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 mod agent;
 mod approval;
@@ -28,6 +31,7 @@ mod program_setting;
 mod recent_projects;
 mod redaction;
 mod saved_sessions;
+mod spawn_gate;
 mod stats;
 mod supervisor;
 mod terminal;

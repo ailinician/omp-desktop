@@ -64,7 +64,7 @@ pub struct LogView {
 
 /// `git_browser_log(path)`.
 pub fn log(path: &Path) -> Result<LogView, String> {
-    let (mut repo, _) = open(path)?;
+    let (_gate, mut repo, _) = open(path)?;
     // Each row's commit is read again after the walk decoded it; the cache
     // (off by default) makes that second read a hit.
     repo.object_cache_size_if_unset(4 * 1024 * 1024);

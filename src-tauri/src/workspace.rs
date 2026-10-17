@@ -8,7 +8,7 @@
 //! [`crate::git`]); the git browser's reads resolve paths through them too.
 //!
 //! [`accept`] and [`reject`] shell out to the `git` binary, invoked with a
-//! fully static argv (never a shell string) via [`std::process::Command`]:
+//! fully static argv (never a shell string) via [`crate::spawn_gate`]:
 //! gix's index-writing/checkout support is far less mature than its read
 //! APIs, and `git add` / `git checkout` / `git reset` already implement
 //! safe, atomic index and worktree mutation.
@@ -201,9 +201,7 @@ const GIT_FILE: &str = if cfg!(windows) { "git.exe" } else { "git" };
 /// Run a `git` subcommand and return its stdout, mapping both a spawn
 /// failure and a non-zero exit into a `label`-prefixed error string.
 fn git_output(work_dir: &Path, args: &[&str], label: &str) -> Result<Vec<u8>, String> {
-    let output = git(work_dir)?
-        .args(args)
-        .output()
+    let output = crate::spawn_gate::output(git(work_dir)?.args(args))
         .map_err(|e| format!("failed to run git {label}: {e}"))?;
     if !output.status.success() {
         return Err(format!(
@@ -220,21 +218,25 @@ fn git_output(work_dir: &Path, args: &[&str], label: &str) -> Result<Vec<u8>, St
 /// failure — printing their stderr would surface spurious-looking
 /// "fatal:" lines for perfectly normal code paths.
 fn git_succeeds(work_dir: &Path, args: &[&str], label: &str) -> Result<bool, String> {
-    git(work_dir)?
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .map_err(|e| format!("failed to run git {label}: {e}"))
+    crate::spawn_gate::status(
+        git(work_dir)?
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .map(|status| status.success())
+    .map_err(|e| format!("failed to run git {label}: {e}"))
 }
 
 /// Discover the repository containing `path` with gix (same discovery
 /// pattern as [`crate::git::probe`]) and return it with its working-tree
 /// root — the root every project-relative path is resolved against —
 /// failing clearly for bare repositories or paths that aren't inside a git
-/// repository at all. Shared with [`crate::git_browser`].
+/// repository at all. Shared with [`crate::git_browser`]. Holds the spawn
+/// gate: gix may run `git` to find its installation config.
 pub fn discover(path: &Path) -> Result<(gix::Repository, PathBuf), String> {
+    let _gate = crate::spawn_gate::shared();
+    #[allow(clippy::disallowed_methods)] // under the gate
     let repo = gix::discover(path).map_err(|e| format!("not a git repository: {e}"))?;
     let work_dir = repo
         .workdir()

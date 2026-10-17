@@ -33,6 +33,8 @@ Reading a work-tree file through git's filter pipeline — status hashing a file
 
 Submodules are opened by gix from their own config, which `open` never sees, so status does not descend into them: a submodule is `Modified` when it has a different commit checked out (gix `Submodule::Given { ignore: Dirty }`), never for edits inside its work tree.
 
+The drivers that stay, and the `git` gix runs once to find its installation config, are children of the app: every command holds the spawn gate (`spawn_gate::shared`, the guard `open` returns) for as long as it reads, so none starts while a Chromium launch has its CDP pipe ends in reach of a child (`docs/architecture/browser.md`). A Chromium launch waits for the reads in flight; other spawns do not wait behind it.
+
 Stage and discard (`workspace_accept`/`workspace_reject`) run the `git` binary, which applies the repository's drivers like any `git add` / `git checkout`; they run only on the user's explicit action.
 
 ### Commands and payloads

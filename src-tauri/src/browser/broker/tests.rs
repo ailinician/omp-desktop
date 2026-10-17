@@ -1,5 +1,5 @@
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -219,29 +219,23 @@ fn a_broker_nobody_holds_ends_and_so_does_its_fake() {
     eventually(WAIT, || fake.is_finished().then_some(())).expect("the fake saw its pipe end");
 }
 
+/// Closing does not wait for the pipe threads: the reader leaves once
+/// Chromium's end goes (the browser exited) or at the next message, and
+/// drops our read end with it.
 #[test]
-fn close_wakes_a_blocked_reader_and_is_idempotent() {
-    let (_keep_writer, from_chromium) = {
+fn close_is_idempotent_and_the_reader_leaves_at_the_next_message() {
+    use std::io::Write;
+
+    let (mut chromium_writes, from_chromium) = {
         let (r, w) = std::io::pipe().unwrap();
         (w, r)
     };
     let (_keep_reader, to_chromium) = std::io::pipe().unwrap();
     let broker = Broker::start(from_chromium, to_chromium).unwrap();
-    std::thread::sleep(Duration::from_millis(50)); // the reader blocks
-    let reader_finished = || {
-        lock(&broker.threads)
-            .as_ref()
-            .is_some_and(|threads| threads.reader.is_finished())
-    };
-    assert!(!reader_finished(), "nothing to read: the reader waits");
-    let closing = Instant::now();
     broker.close();
     broker.close();
     assert!(!broker.is_alive());
-    // Unix: nothing to cancel, the pipe stays open; the reader leaves once
-    // it next reads. Windows: the blocked read is cancelled.
-    if cfg!(windows) {
-        let left = Duration::from_secs(1).saturating_sub(closing.elapsed());
-        eventually(left, || reader_finished().then_some(())).expect("reader woken within a second");
-    }
+    chromium_writes.write_all(b"{}\0").unwrap();
+    eventually(WAIT, || chromium_writes.write_all(b"{}\0").err())
+        .expect("the reader left and closed its end");
 }

@@ -161,20 +161,21 @@ fn spawn<A: AsRef<OsStr>>(
     spawn_retrying_busy(&mut cmd).map_err(|e| format!("could not start {name}: {e}"))
 }
 
-/// `cmd.spawn()`, retried briefly on Linux's "text file busy": a script copy
-/// the worker just wrote can still be open for writing in a child another
-/// thread forked meanwhile, until that child's `exec` (rust-lang/rust#114554).
+/// [`spawn_gate::spawn`](crate::spawn_gate::spawn), retried briefly on
+/// Linux's "text file busy": a script copy the worker just wrote can still be
+/// open for writing in a child another thread forked meanwhile, until that
+/// child's `exec` (rust-lang/rust#114554).
 fn spawn_retrying_busy(cmd: &mut Command) -> std::io::Result<Child> {
     #[cfg(target_os = "linux")]
     for _ in 0..4 {
-        match cmd.spawn() {
+        match crate::spawn_gate::spawn(cmd) {
             Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
                 std::thread::sleep(Duration::from_millis(25));
             }
             spawned => return spawned,
         }
     }
-    cmd.spawn()
+    crate::spawn_gate::spawn(cmd)
 }
 
 /// Context on stdin from a detached thread, which closes the pipe when done so

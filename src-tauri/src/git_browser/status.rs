@@ -195,7 +195,7 @@ fn listed<'a>(
 
 /// `git_browser_status(path)`.
 pub fn status(path: &Path) -> Result<StatusView, String> {
-    let (repo, work_dir) = open(path)?;
+    let (_gate, repo, work_dir) = open(path)?;
     let changes = changes(&repo)?;
     let index = repo
         .index_or_empty()
