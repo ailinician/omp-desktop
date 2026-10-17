@@ -157,7 +157,7 @@ async fn off_ipc<T: Send + 'static>(
 /// [`off_ipc`] against a shared `Arc<S>` — what every state-mutating command
 /// shares (`ProfileStore` and the keybindings `OverlayStore` alike): each one
 /// is a locked, fsync'd read-modify-write of its own JSON file (same
-/// rationale as `approval_rules_grant`).
+/// rationale as `approval_approve_and_grant`).
 async fn with_blocking<S: Send + Sync + 'static, T: Send + 'static>(
     shared: &Arc<S>,
     f: impl FnOnce(&S) -> Result<T, String> + Send + 'static,
@@ -623,7 +623,7 @@ fn extension_ui_state(
 /// List tool-approval rules currently in effect for a session/project pair.
 ///
 /// Runs `async` + `spawn_blocking` for the same reason as
-/// `approval_rules_grant` — see its doc comment: `RuleBook::list` performs
+/// `approval_approve_and_grant` — see its doc comment: `RuleBook::list` performs
 /// a `Path::canonicalize()` syscall via `project_key()`, plus on a cold
 /// cache a `std::fs::read` and potentially a full snapshot-ring directory
 /// scan, while holding a mutex.
@@ -637,30 +637,33 @@ async fn approval_rules_list(
     off_ipc(move || rule_book.list(&session_id, project_root.as_deref().map(Path::new))).await
 }
 
-/// Grant standing approval for the tool of the open approval prompt
-/// `request_id` of `session_id`. `scope` is `"session"` or `"project"`
-/// (the latter needs a process started in a folder); anything else is a
-/// stable error. The tool and the project come from the prompt the
-/// session's process forwarded (`AgentBridge::grant_approval`), never from
-/// the webview, so a grant cannot outgrow the prompt the user is answering:
-/// a prompt with no open match in that process is refused.
+/// Answer the open approval prompt `request_id` of `session_id` with
+/// "Approve" and grant standing approval for its tool, in one call. `scope`
+/// is `"session"` or `"project"` (the latter needs a process started in a
+/// folder); anything else is a stable error. The tool and the project come
+/// from the prompt the session's process forwarded, and the answer goes to
+/// that same process (`AgentBridge::approve_and_grant`), never from the
+/// webview: a prompt with no open match in that process is refused with
+/// nothing answered or saved, and a rule is saved only once the answer was
+/// written. A rejection means nothing reached omp (the prompt still waits);
+/// `Some(reason)` means the prompt was approved but the rule was not saved.
 ///
 /// Runs `async` + `spawn_blocking`: a project grant's `RuleBook::grant`
 /// performs a locked file read-modify-write with up to several blocking
 /// retry sleeps, which can stall the webview if run on Tauri's main command
 /// thread.
 #[tauri::command]
-async fn approval_rules_grant(
+async fn approval_approve_and_grant(
     session_id: String,
     request_id: String,
     scope: String,
     app: AppHandle,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let scope = parse_rule_scope(&scope)?;
     off_ipc(move || {
         let rule_book = app.state::<Arc<RuleBook>>();
         app.state::<AgentBridge>()
-            .grant_approval(&rule_book, &session_id, &request_id, scope)
+            .approve_and_grant(&rule_book, &session_id, &request_id, scope)
     })
     .await?
 }
@@ -668,7 +671,7 @@ async fn approval_rules_grant(
 /// Revoke a previously granted rule. No-op (not an error) if it wasn't granted.
 ///
 /// Runs `async` + `spawn_blocking` for the same reason as
-/// `approval_rules_grant` — see its doc comment.
+/// `approval_approve_and_grant` — see its doc comment.
 #[tauri::command]
 async fn approval_rules_revoke(
     session_id: String,
@@ -1432,7 +1435,7 @@ pub fn run() {
             list_saved_sessions,
             conversation_tree,
             approval_rules_list,
-            approval_rules_grant,
+            approval_approve_and_grant,
             approval_rules_revoke,
             approval_mode_get,
             approval_mode_set_default,
