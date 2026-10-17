@@ -24,7 +24,6 @@ pub(super) mod fake;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -33,9 +32,11 @@ use serde_json::{json, Value};
 
 pub use outbox::Recv;
 use outbox::{Outbox, Refused};
-use route::{error_reply, inner_session, ClientId, Head, Inbound, Routes};
+use route::{error_reply, ClientId, Inbound, Routes};
 
 use super::lock;
+use super::waiters::{Reply, Waiter, Waiters};
+use super::wire::{inner_session, Envelope};
 
 /// Longest message read from Chromium. Its own receive limit is 100 MiB; a
 /// full-page screenshot of a long page comes close.
@@ -47,14 +48,17 @@ const MAX_MESSAGE: u64 = 256 << 20;
 /// the broker writes in.
 pub const MAX_COMMAND: usize = (100 << 20) - (64 << 10);
 
-/// Capacity the reader's buffer keeps between messages; one huge message
-/// does not pin its size for good.
+/// How much the reader takes from the pipe at a time.
+const READ_CHUNK: usize = 64 << 10;
+
+/// Capacity the reader's message buffer keeps between messages; one huge
+/// message does not pin its size for good.
 const READ_BUFFER_KEPT: usize = 1 << 20;
 
 /// How long attaching a client may take.
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
 
-type Waiters = Mutex<HashMap<u64, Sender<Result<Value, String>>>>;
+const CLOSED: &str = "browser connection closed";
 
 #[derive(Default)]
 struct State {
@@ -103,7 +107,7 @@ impl Broker {
             ),
             to_chromium: Arc::clone(&queue),
             state: Mutex::new(State::default()),
-            waiters: Mutex::new(HashMap::new()),
+            waiters: Waiters::new(CLOSED),
             next_id: AtomicU64::new(1),
             alive: AtomicBool::new(true),
             threads: Mutex::new(None),
@@ -111,7 +115,12 @@ impl Broker {
         let reading = Arc::downgrade(&broker);
         let reader = thread::Builder::new()
             .name("browser-cdp-pipe".into())
-            .spawn(move || Self::read_loop(&reading, BufReader::new(from_chromium)))?;
+            .spawn(move || {
+                Self::read_loop(
+                    &reading,
+                    BufReader::with_capacity(READ_CHUNK, from_chromium),
+                );
+            })?;
         let writing = Arc::downgrade(&broker);
         let writer = thread::Builder::new()
             .name("browser-cdp-write".into())
@@ -136,7 +145,7 @@ impl Broker {
 
     /// A command on the broker's own root session (discovery, attaching
     /// clients), waiting up to `timeout` for its result.
-    pub fn call(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+    pub fn call(&self, method: &str, params: Value, timeout: Duration) -> Reply {
         self.request(method, params)?
             .wait(timeout)
             .unwrap_or_else(|| Err(format!("{method}: timed out")))
@@ -156,8 +165,7 @@ impl Broker {
         attach: Option<(ClientId, Arc<Outbox>)>,
     ) -> Result<Pending<'_>, String> {
         let id = self.next_id();
-        let (tx, rx) = mpsc::channel();
-        lock(&self.waiters).insert(id, tx);
+        let waiter = self.waiters.register(id);
         let attaching = attach.is_some();
         if let Some(client) = attach {
             lock(&self.state).attaching.insert(id, client);
@@ -167,12 +175,12 @@ impl Broker {
             broker: self,
             id,
             attaching,
-            rx,
+            waiter,
         };
-        // `close` clears `alive` before it fails the waiters: either it sees
-        // this entry or we see the flag.
+        // Registered first: `close` clears `alive` before it fails the
+        // waiters (see `Waiters::register`).
         if !self.is_alive() {
-            return Err("browser connection closed".into());
+            return Err(CLOSED.into());
         }
         let message = json!({ "id": id, "method": method, "params": params }).to_string();
         self.enqueue(message)?;
@@ -217,7 +225,7 @@ impl Broker {
             return Err("attach reply has no sessionId".into());
         }
         if !self.is_alive() {
-            return Err("browser connection closed".into());
+            return Err(CLOSED.into());
         }
         Ok(client)
     }
@@ -246,7 +254,7 @@ impl Broker {
     fn enqueue(&self, message: String) -> Result<(), String> {
         self.to_chromium.offer(message).map_err(|refused| {
             let why = match refused {
-                Refused::Closed => "browser connection closed",
+                Refused::Closed => CLOSED,
                 Refused::Full => "browser pipe: too much waiting to be sent",
             };
             why.to_owned()
@@ -260,8 +268,7 @@ impl Broker {
         if !self.alive.swap(false, Ordering::SeqCst) {
             return;
         }
-        // Dropping the senders wakes every waiting `call`.
-        lock(&self.waiters).clear();
+        self.waiters.fail_all();
         let outboxes: Vec<_> = {
             let mut state = lock(&self.state);
             state.attaching.clear();
@@ -301,9 +308,11 @@ impl Broker {
             if !live.is_alive() {
                 return;
             }
-            match String::from_utf8(std::mem::take(&mut buf)) {
-                Ok(text) => live.route(text),
-                Err(not_text) => buf = not_text.into_bytes(),
+            // Copied out at its own size: the buffer stays for the next
+            // message, and a queued message holds no spare capacity that its
+            // outbox's byte cap would not count.
+            if let Ok(text) = std::str::from_utf8(&buf) {
+                live.route(text.to_owned());
             }
         }
         if let Some(live) = broker.upgrade() {
@@ -313,10 +322,10 @@ impl Broker {
 
     fn write_loop(broker: &Weak<Self>, queue: &Outbox, mut to: impl Write) {
         while let Some(message) = queue.next_until_closed() {
-            let written = to
-                .write_all(message.as_bytes())
-                .and_then(|()| to.write_all(b"\0"))
-                .and_then(|()| to.flush());
+            // Terminated in place: one write per message on the unbuffered pipe.
+            let mut message = message.into_bytes();
+            message.push(0);
+            let written = to.write_all(&message).and_then(|()| to.flush());
             if written.is_err() {
                 if let Some(live) = broker.upgrade() {
                     live.close();
@@ -340,34 +349,30 @@ impl Broker {
                     self.remove(client);
                 }
             }
-            Inbound::Root => self.root_message(state, &text),
+            Inbound::Root(head) => self.root_message(state, &head, &text),
             Inbound::Drop => {}
         }
     }
 
-    /// A reply to the broker's own call, or an event of its root session.
-    fn root_message(&self, mut state: MutexGuard<'_, State>, text: &str) {
-        let Some(head) = Head::parse(text) else {
-            return;
-        };
+    /// A reply to the broker's own call, or an event of its root session;
+    /// `head` is `text`'s envelope.
+    fn root_message(&self, mut state: MutexGuard<'_, State>, head: &Envelope<'_>, text: &str) {
         if let Some(id) = head.id {
-            if !state.attaching.is_empty() {
-                if let Some((client, outbox)) = state.attaching.remove(&id) {
-                    // An error reply has no `result`: the client is not
-                    // added. `close` drains the outboxes after clearing
-                    // `alive`, so it sees this one or we see the flag.
-                    if let Some(root) = inner_session(head.result).filter(|_| self.is_alive()) {
-                        state.routes.add_client(client, root);
-                        state.outboxes.insert(client, outbox);
-                    }
+            if let Some((client, outbox)) = state.attaching.remove(&id) {
+                // An error reply has no `result`: the client is not added.
+                // `close` drains the outboxes after clearing `alive`, so it
+                // sees this one or we see the flag.
+                if let Some(root) = inner_session(head.result).filter(|_| self.is_alive()) {
+                    state.routes.add_client(client, root);
+                    state.outboxes.insert(client, outbox);
                 }
             }
             drop(state);
-            let waiter = lock(&self.waiters).remove(&id);
-            if let Some(waiter) = waiter {
-                let _ = waiter.send(root_result(text));
+            // Valid JSON: its envelope was read.
+            if let Ok(reply) = serde_json::from_str(text) {
+                self.waiters.complete(id, reply);
             }
-        } else if head.method.as_deref() == Some("Target.detachedFromTarget") {
+        } else if head.method() == Some("Target.detachedFromTarget") {
             // A client's root went away (its page closed): so does the client.
             let client = inner_session(head.params)
                 .and_then(|session| state.routes.client_of_root(&session));
@@ -392,37 +397,24 @@ pub struct Pending<'a> {
     id: u64,
     /// Whether a client waits in `attaching` on its reply.
     attaching: bool,
-    rx: Receiver<Result<Value, String>>,
+    /// Forgets the command when dropped.
+    waiter: Waiter<'a>,
 }
 
 impl Pending<'_> {
     /// The command's result, or `None` when it has not come within
     /// `timeout` (wait again for more).
-    pub fn wait(&self, timeout: Duration) -> Option<Result<Value, String>> {
-        match self.rx.recv_timeout(timeout) {
-            Ok(result) => Some(result),
-            Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => Some(Err("browser connection closed".into())),
-        }
+    pub fn wait(&self, timeout: Duration) -> Option<Reply> {
+        self.waiter.wait(timeout)
     }
 }
 
 impl Drop for Pending<'_> {
     fn drop(&mut self) {
-        lock(&self.broker.waiters).remove(&self.id);
         if self.attaching {
             lock(&self.broker.state).attaching.remove(&self.id);
         }
     }
-}
-
-/// The result of a root reply, or its error message.
-fn root_result(text: &str) -> Result<Value, String> {
-    let mut reply: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    if let Some(error) = reply.get("error") {
-        return Err(error["message"].as_str().unwrap_or("cdp error").to_owned());
-    }
-    Ok(reply["result"].take())
 }
 
 /// One client's connection through the broker. Dropping it detaches the
@@ -441,14 +433,14 @@ impl BrokerClient {
     /// gone, or too much waits to be written to the pipe already.
     pub fn send(&self, text: &str) -> Result<(), String> {
         if self.outbox.is_closed() {
-            return Err("browser connection closed".into());
+            return Err(CLOSED.into());
         }
         if text.len() > MAX_COMMAND {
-            let head = Head::parse(text);
+            let head = Envelope::parse(text);
             let head = head.as_ref();
             self.outbox.push(error_reply(
                 head.and_then(|h| h.id),
-                head.and_then(|h| h.session.as_deref()),
+                head.and_then(Envelope::session),
                 -32600,
                 "Message is too long",
             ));

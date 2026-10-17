@@ -53,6 +53,12 @@ impl State {
         self.bytes += text.len();
         self.items.push_back(text);
     }
+
+    fn pop(&mut self) -> Option<String> {
+        let text = self.items.pop_front()?;
+        self.bytes -= text.len();
+        Some(text)
+    }
 }
 
 pub struct Outbox {
@@ -79,32 +85,31 @@ impl Outbox {
     /// Queue `text`. `false` when the outbox is closed, or was just closed
     /// (its backlog dropped) because `text` would overflow it.
     pub fn push(&self, text: String) -> bool {
-        let mut state = lock(&self.state);
-        if state.closed {
-            return false;
-        }
-        if !state.fits(text.len(), self.limit) {
-            state.closed = true;
-            state.items.clear();
-            state.bytes = 0;
-            drop(state);
-            self.ready.notify_all();
-            return false;
-        }
-        state.push(text);
-        drop(state);
-        self.ready.notify_one();
-        true
+        self.queue(text, true).is_ok()
     }
 
     /// Queue `text` unless the outbox is closed or `text` would overflow it;
     /// a refusal leaves the outbox as it was.
     pub fn offer(&self, text: String) -> Result<(), Refused> {
+        self.queue(text, false)
+    }
+
+    /// Queue `text`. One that would overflow is refused, and with `cut`
+    /// closes the outbox and drops its backlog, under the same lock that
+    /// found it too big.
+    fn queue(&self, text: String, cut: bool) -> Result<(), Refused> {
         let mut state = lock(&self.state);
         if state.closed {
             return Err(Refused::Closed);
         }
         if !state.fits(text.len(), self.limit) {
+            if cut {
+                state.closed = true;
+                state.items.clear();
+                state.bytes = 0;
+                drop(state);
+                self.ready.notify_all();
+            }
             return Err(Refused::Full);
         }
         state.push(text);
@@ -132,10 +137,7 @@ impl Outbox {
                 s.items.is_empty() && !s.closed
             })
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let next = state.items.pop_front();
-        if let Some(text) = &next {
-            state.bytes -= text.len();
-        }
+        let next = state.pop();
         let closed = state.closed;
         drop(state);
         match next {
@@ -153,16 +155,11 @@ impl Outbox {
             .ready
             .wait_while(lock(&self.state), |s| s.items.is_empty() && !s.closed)
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let text = if state.closed {
+        if state.closed {
             None
         } else {
-            state.items.pop_front()
-        };
-        if let Some(text) = &text {
-            state.bytes -= text.len();
+            state.pop()
         }
-        drop(state);
-        text
     }
 }
 

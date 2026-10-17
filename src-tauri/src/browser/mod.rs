@@ -16,6 +16,8 @@ pub mod commands;
 mod process;
 pub mod proxy;
 mod view;
+mod waiters;
+mod wire;
 
 #[cfg(test)]
 mod tests;
