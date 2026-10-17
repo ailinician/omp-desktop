@@ -24,9 +24,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use process::{
-    prepare_instance_dir, private_dirs, prune_dead, remove_dir_retrying, write_overlay, Chromium,
-};
+use crate::private_fs::private_dirs;
+use process::{prepare_instance_dir, prune_dead, remove_dir_retrying, write_overlay, Chromium};
 pub use process::{BrowserSettings, SettingsStore};
 use proxy::Proxy;
 

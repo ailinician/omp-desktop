@@ -114,6 +114,16 @@ The rail shows an approval card for each enabled plugin whose fingerprint is not
 
 Before **every** run, the desktop recomputes the fingerprint. If anything changed (the command in `widgets.json` after a reload, or the script file on disk), nothing is started. The card shows `plugin changed since it was approved — approve it again`, and the approval card comes back.
 
+The run executes exactly what that check read. Each file the fingerprint hashes is run from a verified copy in a private folder (`widget-runs/store/<fingerprint>/` in the app's cache directory), not from its original path. The first run after an approval copies each file while hashing it and keeps the copies only if they hash to the approved fingerprint. Later runs reuse those copies, but never on trust: while the originals are hashed again, each copy is compared with its original byte for byte, and the folder must hold nothing but the copies. A copy that differs or is missing, or anything else found in the folder, makes the desktop build it again. A script replaced between the check and the start therefore cannot run under the old approval. If the copies cannot be stored, the run uses its fresh ones once and deletes them afterwards. Copies of fingerprints that are no longer approved are deleted at the next start of the app.
+
+A copy keeps its file name, so an interpreter that goes by the extension (`.mjs`, `.ps1`) behaves the same, and on macOS and Linux a file executable by you stays executable by you. Its path stays the same from run to run, so tools that cache per script path (uv's environments for scripts with inline metadata) keep their cache. It sits in another folder, though: anything named by absolute path that loads files next to itself does not find them. That covers a widget script doing `$(dirname "$0")/lib.sh` or a relative `import`, and also launcher scripts such as npm's `npx.cmd` shim or a symlinked `/usr/local/bin/npx`. Keep a widget in one file, and start launchers by their bare name (looked up on `PATH`, not copied). Not copied, and started from their own path:
+
+- the program itself (`command[0]`) when it is a native executable for your system, which loads its libraries from its own folder: on Windows a path ending in `.exe`, elsewhere an ELF or Mach-O binary. Anything else named first is copied, including a `.bat`/`.cmd` and, on Windows, a program named without `.exe`. So is any file passed as an argument, even a native one, such as the `.dll` in `["dotnet", "…/app.dll"]`;
+- a file larger than 8 MiB;
+- a path that is not a regular file when the run starts, such as a folder (`uv run --directory …`) or a missing file.
+
+If the app's cache directory cannot be determined, or a script cannot be read or copied, the run fails with that error instead of falling back to the original file.
+
 Approvals are stored in `<app config>/widget-approvals.json`, as `{ "version": 1, "approved": { "<id>": "<fingerprint>" } }`. To revoke one, delete its entry (keep the JSON valid), or the file, and click "reload widgets". Approving writes only that plugin's entry into the file as it is on disk, so a revocation you have not reloaded yet stays revoked. If the file exists but is not valid JSON or has another `version`, no plugin is approved, and approving is refused until you fix or delete it.
 
 ## When a plugin runs
@@ -297,10 +307,11 @@ Neither runs until you approve the new fingerprint in the rail. This matters bec
 - **Files the fingerprint does not cover.**
   - A program resolved via `PATH` (`bash`, `python3`, `node`) is hashed by name only.
   - So is anything the script loads by itself: modules, sourced files, config files, or packages fetched by `uv`/`npx`.
-  - A file larger than 8 MiB is covered only by its size and modification time.
+  - A file larger than 8 MiB is covered only by its size and modification time, and runs from its own path.
+  - A native program named as `command[0]` by absolute path is checked before each run but started from its own path, where it also loads its libraries; scripts and arguments run from the verified copies.
 
-  Keep a widget self-contained in one script file, and use absolute interpreter paths if you want them pinned.
-- **The approvals file.** `widget-approvals.json` is an ordinary user file, like `approval-rules/`. Anything that can write arbitrary files as you can edit it, and it could just as well edit `~/.bashrc`. Approval does not defend against that level of access.
+  Keep a widget self-contained in one script file, and use absolute paths to native interpreters if you want them pinned.
+- **The approvals file and the script copies.** `widget-approvals.json` is an ordinary user file, like `approval-rules/`, and so are the verified copies under `widget-runs/` in the app's cache directory. Anything that can write arbitrary files as you can edit them, and it could just as well edit `~/.bashrc`. Approval does not defend against that level of access: something that changes a copy, or puts a file beside it, in the moment between the check and the plugin's start would run its own code.
 - **The webview.** Approving goes through the desktop window (`widgets_approve`), as answering tool approvals does. A compromised webview could approve a plugin, but it can already send prompts and answer tool approvals, so this adds no new power.
 - **Hostile project contents.** The working directory is the project, which you should treat as untrusted: a cloned repo can contain any file. Make sure nothing from it is imported or executed:
   - **Python:** run with `python3 -I`. It ignores the working directory, the `PYTHON*` variables and the user site-packages. `python3 -c` and `python3 -` otherwise put the working directory on `sys.path`, so a repo's `json.py` would run. With `-I`, neither the working directory nor the script's directory is put on the path.

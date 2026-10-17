@@ -21,9 +21,10 @@ It never sends a path, a command, a trigger or a context to Rust: only plugin id
 |---|---|
 | `src-tauri/src/widgets/config.rs` | load/validate `widgets.json` → `WidgetConfig { plugins: Vec<PluginEntry>, errors }`; `PluginEntry::matches(project, remote)` (directory-prefix path match, backslash normalised, `/` root special case, remote substring), `PluginEntry::wants(Trigger)` (`Manual` always, `Interval` iff `interval_ms`, else `triggers`) |
 | `src-tauri/src/widgets/schedule.rs` | **pure** scheduler state machine: `Scheduler::handle(Event, now_ms) -> Vec<Action>`, `next_deadline()`; no threads, IO or clock |
-| `src-tauri/src/widgets/trust.rs` | `fingerprint(&PluginEntry)` and `ApprovalStore` (`<app config>/widget-approvals.json`) |
+| `src-tauri/src/widgets/trust.rs` | `fingerprint(&PluginEntry)`, `is_fingerprint`, and `ApprovalStore` (`<app config>/widget-approvals.json`); the hashing steps `snapshot.rs` reuses |
+| `src-tauri/src/widgets/snapshot.rs` | `ScriptStore` (`<app cache>/widget-runs/`): `prepare(entry, approved)` → `Prepared::Ready(Run)` (`Run.argv` names verified copies in `store/<fingerprint>/`; owns a staging dir when they could not be stored) or `Prepared::Changed(fingerprint)`; `prune(approved)` |
 | `src-tauri/src/widgets/host.rs` | `WidgetHost` (Tauri managed state): scheduler thread, run registry, worker threads, event emits |
-| `src-tauri/src/widgets/run.rs` | `run_plugin(entry, ctx, on_spawn) -> Outcome`: spawn, stdin context, timeout, stdout cap, process-tree kill |
+| `src-tauri/src/widgets/run.rs` | `run_plugin(entry, argv, ctx, on_spawn) -> Outcome`: spawn of the given argv, stdin context, timeout, stdout cap, process-tree kill |
 | `src-tauri/src/widgets/context.rs` | `session_ctx(project)` (branch, password-free default remote; one repo discovery) and the bounded `PluginContext` |
 | `src-tauri/src/widgets/redact.rs` | credential masking for error text, on top of the crate-level `redaction.rs` shared with `agent/reader.rs` |
 | `src/app/widgets.js` | pure: `parseOutput`, `insertText`, `safeUrl`, `tweakKey`, `relativeTime`, `appendToDraft`, and the run bookkeeping `runKey`, `mergeRun`, `parsedLast`, `cardRun` (`test-widgets.mjs`) |
@@ -51,9 +52,10 @@ Kill  → registry kill_tree      Changed/Removed → app.emit(widgets://run | w
 - **One scheduler thread**, created with a fallible `thread::Builder`. It owns the `Scheduler` and blocks on an `mpsc` inbox with `recv_timeout(next_deadline - now)`. A timeout feeds `Event::Tick`.
 - **`now_ms` is epoch ms** (`SystemTime`), so `at`/`lastOkAt` are directly renderable. All arithmetic saturates, so clock skew never panics.
 - **Start action.**
-  - The host recomputes the fingerprint first. On a mismatch, it spawns nothing and feeds `Finished` with `"plugin changed since it was approved — approve it again"`. It then re-sends `Event::Config` with the plugin unapproved and emits `widgets://config`.
-  - Otherwise it spawns a worker thread for the run (fallible `Builder`; if that fails, it feeds `Finished` with an error).
-  - The worker calls `run_plugin`. Its `on_spawn` callback registers the run's `Arc<ProcessSupervisor>` in the registry. The worker removes the entry when the run returns, then sends `Finished`.
+  - The host spawns a worker thread for the run (fallible `Builder`; if that fails, it feeds `Finished` with an error).
+  - The worker calls `ScriptStore::prepare(entry, approved)`. An error (a file it cannot read or copy, no app cache dir when a copy is needed) is the run's error outcome; nothing spawns.
+  - On `Changed` (fingerprint mismatch), it spawns nothing and feeds `Finished` with `"plugin changed since it was approved — approve it again"`. The host then re-sends `Event::Config` with the plugin unapproved and emits `widgets://config`.
+  - On `Ready(argv)` the worker calls `run_plugin` with that argv. Its `on_spawn` callback registers the run's `Arc<ProcessSupervisor>` in the registry. The worker removes the entry when the run returns, then sends `Finished`.
 - **Run registry.** `Mutex<HashMap<RunKey, Arc<ProcessSupervisor>>>`. The lock is held only to insert, remove or loop over kills, never across a blocking run.
 - **Kill action.** `kill_tree()` on the registered supervisor.
 - **`kill_all()`** kills every registered supervisor synchronously and does not depend on the scheduler thread. It is called:
@@ -176,18 +178,24 @@ Frontend handling:
   - each argv element, NUL-terminated;
   - for every element that is an absolute path to a regular file: its length and contents, streamed in chunks. A file over 8 MiB contributes `len + mtime` instead.
 - **`ApprovalStore`.** `{ "version": 1, "approved": { "<id>": "<fingerprint>" } }`, written with `json_store::write_atomic`. `approve` re-reads the file and writes only the approved id into it, so an entry the user deleted to revoke stays deleted even before a reload (memory keeps it until `reload`); a file that exists but is unreadable, malformed or of another version approves nothing on `reload` and makes `approve` fail instead of being overwritten.
-- **Recheck before every spawn.** The fingerprint is recomputed in the worker, before `run_plugin`.
+- **Recheck before every spawn, bound to what runs.** The fingerprint is recomputed in the worker by `ScriptStore::prepare`, and the run's argv names copies that this same pass either wrote from the hashed bytes or compared equal to them. Hashing the original and then spawning it by path would let a script swapped in between run under the old approval (CWE-367). The hashed layout is unchanged, so existing approvals stay valid.
+  - **Store.** `store/<fingerprint>/<argv index>/<file name>`, one entry per approved fingerprint, reused for a stable path (uv keys its script environments by path) and no write per run. `approved` comes from the approvals file and is used as a path component only after `trust::is_fingerprint`.
+  - **Reuse verifies.** If `store/<approved>` is a real directory (`symlink_metadata`), the pass compares each stored copy with its original chunk by chunk inside the hash's sink (`Sink::Compare`; a missing copy or one with extra bytes at EOF counts as different) — one extra read of each copy, no second pass over the originals — and `holds_only` requires the entry to hold exactly the copies: one real file per real `<index>` directory, nothing else (a sibling `json.py` or `node_modules` would load before the real module; a copy linked to the original would follow a later swap of it). A different fingerprint means the original changed: `Changed`, and the entry stays for runs in flight. The approved fingerprint with a differing or unexpected entry (planted before the approval, tampered with, truncated by a crash before unsynced bytes reached the disk), or a file, symlink or junction where the entry belongs, is removed without following links and built again. Accepted race: two runs that find the same bad entry can have the slower one remove the faster one's rebuilt entry, failing that run once.
+  - **Build.** Otherwise each hashed file is streamed through the hash and into `staging/<pid>/<n>/` (created on the first copy, exclusively; unix `0700` dirs, file `0500` if the original is owner-executable, else `0400`). Only when the result equals `approved` is the staging directory renamed to `store/<approved>`. If the rename fails (an entry that could not be removed, a concurrent run that stored first, a handle an antivirus still holds on Windows), the run executes the staging copies once and `Run` deletes them when it drops: whatever sits at the target was neither built nor verified by this pass.
+  - **Not copied**, so run from their own path: `argv[0]` when the loader reads it, not an interpreter — on Windows a raw path ending in `.exe` starting with `MZ` (any other name could make Rust probe `<path>.exe` or start a `.bat`/`.cmd`, spelled with a trailing dot or space too, through cmd.exe); elsewhere an ELF or thin/fat Mach-O header (with posix_spawn, glibc ≥2.29 and macOS have no `/bin/sh` fallback for a fake header). It loads libraries next to itself, which are not fingerprinted anyway. Also a file over 8 MiB (pinned by size + mtime only), and anything not a regular file at check time (directories, missing paths; never hashed). Every hashed argument is copied, native or not.
+  - **Bounded copy.** A file that grows past the size `metadata` reported while it streams (a swap to `/dev/zero`) fails the run instead of filling the disk.
+  - **Pruning.** `ScriptStore::prune` on the scheduler thread's start, before any run, removes the staging directories of dead pids and of our own pid (a killed app leaves its staging behind: the updater relaunch and `RunEvent::Exit` skip `Drop`), and the store entries of fingerprints `ApprovalStore::holds` no longer. Without an app cache dir a run that needs a copy fails rather than run the originals.
 
 **Threat model.** Approval is enforced in Rust. The webview initiates approving (`widgets_approve(pluginId, fingerprint)`), just as it answers tool approvals:
 
 - **Compromised webview.** It could approve a plugin, but it can already send prompts and answer tool approvals, so this adds no new power.
 - **What approval defends against.** Changes to a plugin's `command` or script made outside the desktop UI, e.g. the agent writing `widgets.json` or a widget script under write-mode approval.
-- **What it does not defend against.** `widget-approvals.json` is a user file like `approval-rules/`. Anything with arbitrary user-file write access can edit it, as it can edit `~/.bashrc`. The rest of an entry (`match`, `triggers`, `intervalMs`, `timeoutMs`, `scope`, `title`, `enabled`) is not fingerprinted and takes effect on reload without a new approval.
+- **What it does not defend against.** `widget-approvals.json` is a user file like `approval-rules/`, and `<app cache>/widget-runs/` holds user files too. Anything with arbitrary user-file write access can edit them, as it can edit `~/.bashrc`; changing a copy, or adding a file beside it, between the check and the spawn is that level of access. The rest of an entry (`match`, `triggers`, `intervalMs`, `timeoutMs`, `scope`, `title`, `enabled`) is not fingerprinted and takes effect on reload without a new approval.
 
 ## Runner (`run.rs`)
 
 - **Spawn.**
-  - argv comes from the config, with no shell.
+  - argv is the one `ScriptStore::prepare` returned (the config, with each hashed script replaced by its verified copy), with no shell. A spawn error names the configured `argv[0]`, not the copy. On Linux a spawn failing with `ETXTBSY` is retried briefly: a freshly written copy can still be open for writing in a child another thread forked meanwhile (rust-lang/rust#114554).
   - The working directory is the project, or the home dir (`config::home_dir`) when there is none; never a temp dir.
   - The child gets `child_path::apply_trusted_child_path`: the extended `PATH` with empty and relative entries removed.
   - On Windows it starts with `CREATE_NO_WINDOW` (`agent::spawn::CREATE_NO_WINDOW`).
@@ -202,7 +210,7 @@ Frontend handling:
 
 ## Invariants
 
-- **Approval before every spawn.** No code path may start a plugin without a fingerprint check against `ApprovalStore` immediately before spawning.
+- **Approval before every spawn, of what is spawned.** No code path may start a plugin without a fingerprint check against `ApprovalStore` immediately before spawning, and the spawn runs the verified copies that check hashed, never a checked script path.
 - **Triggers and scheduling live in Rust.** No timers, trigger filtering, matching or run queues in React or `live.js`. The frontend only reports view state and renders.
 - **The frontend sends only ids and view state** (`pluginId`, `fingerprint`, `sessionId`, visibility, hidden ids). Never a path, a command, a trigger or a plugin context.
 - **`kill_all` sits beside `AgentBridge::shutdown_all`** in `crate::kill_child_processes`, which both the updater relaunch path (which skips `Drop`) and `RunEvent::Exit` call. Shutdown stops agents, browsers, widget plugins and terminal shells, in that order.
