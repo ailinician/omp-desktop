@@ -155,9 +155,9 @@ async fn off_ipc<T: Send + 'static>(
 }
 
 /// [`off_ipc`] against a shared `Arc<S>` — what every state-mutating command
-/// shares (`ProfileStore` and the keybindings `OverlayStore` alike): each one
-/// is a locked, fsync'd read-modify-write of its own JSON file (same
-/// rationale as `approval_approve_and_grant`).
+/// shares (`ProfileStore` and the keybindings `OverlayStore` alike): file-backed,
+/// each one is a locked, fsync'd read-modify-write of its own JSON file (same
+/// rationale as `approval_approve_and_grant`); memory-only, a short mutex hold.
 async fn with_blocking<S: Send + Sync + 'static, T: Send + 'static>(
     shared: &Arc<S>,
     f: impl FnOnce(&S) -> Result<T, String> + Send + 'static,
@@ -1205,6 +1205,30 @@ pub(crate) fn kill_child_processes(app: &AppHandle) {
     }
 }
 
+/// The per-user folder the persistent stores live in, from Tauri's
+/// `app_config_dir()`. `None` when it can't be resolved or is relative:
+/// every store then keeps its state in memory for the app run. There is no
+/// fallback to a shared location such as the OS temp dir, where another
+/// local account could plant the files these stores trust (`open-tabs.json`
+/// alone picks the folders and profiles omp starts in), and a relative path
+/// would resolve against whatever the working directory happens to be.
+fn config_dir<E: std::fmt::Display>(resolved: Result<PathBuf, E>) -> Option<PathBuf> {
+    match resolved {
+        Ok(dir) if dir.is_absolute() => Some(dir),
+        Ok(dir) => {
+            eprintln!(
+                "[omp-desktop] app config dir {} is not absolute; settings are kept in memory only",
+                dir.display()
+            );
+            None
+        }
+        Err(e) => {
+            eprintln!("[omp-desktop] no app config dir ({e}); settings are kept in memory only");
+            None
+        }
+    }
+}
+
 /// App-level state that needs a resolved path, and the cold-start "Open
 /// with" argv — `run()`'s `setup` hook. No omp process starts here: the app
 /// opens with no tab until the user (or an OS folder open) picks a project.
@@ -1213,7 +1237,8 @@ fn setup(app: &tauri::App) {
     if let Some(win) = app.get_webview_window("main") {
         win.open_devtools();
     }
-    let resolved_config_dir = app.path().app_config_dir().ok();
+    // Every store below is memory-only without it (see `config_dir`).
+    let resolved_config_dir = config_dir(app.path().app_config_dir());
     // Rail widget plugins: <app_config_dir>/widgets.json and the approvals in
     // <app_config_dir>/widget-approvals.json. No temp-dir fallback: a
     // `widgets.json` in a shared temp dir could be planted by another user,
@@ -1261,10 +1286,6 @@ fn setup(app: &tauri::App) {
                 RuleBook::new(dir.join("approval-rules"))
             }),
     ));
-    // Falls back to the temp dir if the config dir can't be resolved
-    // (e.g. a locked-down test environment) rather than failing
-    // startup — profiles just won't survive a restart there.
-    let config_dir = resolved_config_dir.unwrap_or_else(std::env::temp_dir);
     // Per-tab headless Chromium + the overlay omp reads its `cdpUrl` from.
     // It lives under the per-user app cache dir (user-owned, unlike a shared
     // temp dir); without one the manager is unavailable and sessions start
@@ -1292,13 +1313,19 @@ fn setup(app: &tauri::App) {
     if let Err(e) = pruning {
         eprintln!("[omp-desktop] browser leftovers not pruned: {e}");
     }
-    // Profile list: <app_config_dir>/profiles.json.
+    // Profile list: <app_config_dir>/profiles.json. No temp-dir fallback for
+    // it or the stores below: another account could plant the profile tabs
+    // start in, a rebind, or the folders the next launch opens.
     app.manage(Arc::new(profiles::ProfileStore::load(
-        config_dir.join("profiles.json"),
+        resolved_config_dir
+            .as_deref()
+            .map(|dir| dir.join("profiles.json")),
     )));
     // Keybinding overlay: <app_config_dir>/keybindings.json.
     app.manage(Arc::new(keybindings::overlay::OverlayStore::new(
-        config_dir.join("keybindings.json"),
+        resolved_config_dir
+            .as_deref()
+            .map(|dir| dir.join("keybindings.json")),
     )));
     // Widget scheduler thread; it loads the config and approvals itself.
     // Each run executes private copies of the plugin's scripts under
@@ -1314,11 +1341,13 @@ fn setup(app: &tauri::App) {
     )));
     // Recently opened projects: <app_config_dir>/recent-projects.json.
     app.manage(Arc::new(recent_projects::RecentProjectsStore::new(
-        config_dir.join("recent-projects.json"),
+        resolved_config_dir
+            .as_deref()
+            .map(|dir| dir.join("recent-projects.json")),
     )));
     // Open-tab layout for the next launch: <app_config_dir>/open-tabs.json.
     app.manage(Arc::new(open_tabs::OpenTabsStore::new(
-        config_dir.join("open-tabs.json"),
+        resolved_config_dir.map(|dir| dir.join("open-tabs.json")),
     )));
 
     // A cold start *is* how Windows and Linux file managers open a
@@ -1501,7 +1530,29 @@ fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
 
 #[cfg(test)]
 mod tests {
-    use super::StartSessionArgs;
+    use super::{config_dir, StartSessionArgs};
+    use std::path::PathBuf;
+
+    #[test]
+    fn an_absolute_config_dir_is_used_as_is() {
+        let cwd = std::env::current_dir().expect("cwd");
+        assert!(cwd.is_absolute());
+        let dir = config_dir::<&str>(Ok(cwd.join("omp-desktop-config")));
+        assert_eq!(dir, Some(cwd.join("omp-desktop-config")));
+    }
+
+    #[test]
+    fn an_unresolvable_config_dir_means_memory_only_not_the_temp_dir() {
+        assert_eq!(config_dir::<&str>(Err("no home directory")), None);
+    }
+
+    #[test]
+    fn a_relative_config_dir_is_refused() {
+        assert_eq!(
+            config_dir::<&str>(Ok(PathBuf::from("omp-desktop-config"))),
+            None
+        );
+    }
 
     /// The exact payload `live.js::_spawnSession` sends. Tauri hands the
     /// `args` object straight to serde, so a field-name or casing change on

@@ -6,6 +6,9 @@
 //! over `PI_CODING_AGENT_DIR`). Every desktop tab owns its own omp process,
 //! so every tab can run under its own profile — this module owns the list of
 //! profiles the UI offers, persisted at `<app_config_dir>/profiles.json`.
+//! Without a resolvable config folder the list lives in memory for the app
+//! run: it is never read from or written to a shared location (a planted
+//! list would choose the profile tabs start in).
 //!
 //! # The built-in profile
 //! [`DEFAULT_PROFILE_ID`] is reserved and spawns omp with **no** `--profile`
@@ -25,7 +28,7 @@
 /// seed is written, or before a seed is cleared.
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 /// Reserved id of the built-in profile: omp's own agent directory, spawned
 /// without a `--profile` flag.
@@ -49,7 +52,7 @@ pub struct Profile {
 }
 
 /// On-disk shape of `profiles.json`.
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 struct ProfilesFile {
     /// Absent (e.g. a hand-edited `{}`, or `{"startup":"work"}`) means "no
     /// profiles yet" — the same outcome as a missing file — not "corrupt".
@@ -421,9 +424,9 @@ fn normalize_file(file: ProfilesFile) -> ProfilesFile {
 /// second app instance adding a profile concurrently can't have its entry
 /// clobbered by this one's cached copy.
 pub struct ProfileStore {
-    path: PathBuf,
-    snapshots: PathBuf,
-    lock: PathBuf,
+    /// `None` when the app has no config folder: the list then lives in
+    /// `cache` only, for the app run.
+    files: Option<ProfileFiles>,
     /// The list and the startup pointer behind **one** mutex, not two.
     /// `startup_id()` is documented to always name a member of the list
     /// `snapshot()` returns, and
@@ -433,8 +436,16 @@ pub struct ProfileStore {
     cache: Mutex<ProfilesFile>,
 }
 
+/// `profiles.json` and its siblings, each derived once from the primary.
+struct ProfileFiles {
+    path: PathBuf,
+    snapshots: PathBuf,
+    lock: PathBuf,
+}
+
 impl ProfileStore {
-    /// Load the store at `path` (`<app_config_dir>/profiles.json`). A missing
+    /// Load the store at `path` (`<app_config_dir>/profiles.json`; `None`:
+    /// memory only, starting with just the built-in profile). A missing
     /// file yields just the built-in profile - the list is UI convenience
     /// state, never worth failing startup over. A *corrupt* file is recovered
     /// from the snapshot ring; see [`read_or_recover`]. The corrupt primary
@@ -444,18 +455,34 @@ impl ProfileStore {
     /// neither a primary nor (once the ring prunes past it) a snapshot to
     /// recover from on the next launch. [`ProfileStore::mutate`] performs
     /// the quarantine instead, immediately before it writes a replacement.
-    pub fn load(path: PathBuf) -> Self {
-        let snapshots = path.with_extension("snapshots");
-        let lock = path.with_extension("lock");
-        let (file, _corrupt_primary) =
-            read_or_recover(&path, &Self::snapshot_ring(&snapshots)).unwrap_or_default();
-        let file = normalize_file(file);
-        Self {
+    pub fn load(path: Option<PathBuf>) -> Self {
+        let files = path.map(|path| ProfileFiles {
+            snapshots: path.with_extension("snapshots"),
+            lock: path.with_extension("lock"),
             path,
-            snapshots,
-            lock,
+        });
+        // Normalised either way: that is what puts the built-in profile first.
+        let file = normalize_file(files.as_ref().map_or_else(ProfilesFile::default, |files| {
+            read_or_recover(&files.path, &Self::snapshot_ring(&files.snapshots))
+                .unwrap_or_default()
+                .0
+        }));
+        Self {
+            files,
             cache: Mutex::new(file),
         }
+    }
+
+    /// The backing files of a file-backed test store.
+    #[cfg(test)]
+    const fn files(&self) -> &ProfileFiles {
+        self.files.as_ref().expect("a file-backed store")
+    }
+
+    /// The primary file of a file-backed test store.
+    #[cfg(test)]
+    fn path(&self) -> &Path {
+        &self.files().path
     }
 
     /// Consume the store and yield its file path.
@@ -466,7 +493,7 @@ impl ProfileStore {
     /// same thing with an allocation and two lines.
     #[cfg(test)]
     fn into_path(self) -> PathBuf {
-        self.path
+        self.files.expect("a file-backed store").path
     }
 
     /// A second store over the same file, as a separate app instance would
@@ -474,7 +501,7 @@ impl ProfileStore {
     /// owned `PathBuf` and this store keeps using its own.
     #[cfg(test)]
     fn reopen(&self) -> Self {
-        Self::load(self.path.clone())
+        Self::load(Some(self.path().to_path_buf()))
     }
 
     /// Past versions of `profiles.json`, consulted only when the primary file
@@ -684,21 +711,38 @@ impl ProfileStore {
     /// Run `f` over the on-disk file under the advisory lock, then persist it
     /// and refresh the in-memory cache. Re-reading inside the lock is what
     /// makes concurrent mutations (two app instances) additive instead of
-    /// last-writer-wins.
+    /// last-writer-wins. A memory-only store runs `f` over the cache alone.
     fn mutate<T>(
         &self,
         f: impl FnOnce(&mut ProfilesFile) -> Result<T, String>,
     ) -> Result<T, String> {
+        let Some(ProfileFiles {
+            path,
+            snapshots,
+            lock,
+        }) = &self.files
+        else {
+            // Every write replaces the whole value, so poison is ignored.
+            let mut cached = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+            // A working copy, like the file-backed path's fresh read: a
+            // failing `f` must leave the cached list exactly as it was.
+            let mut file = cached.clone();
+            let value = f(&mut file)?;
+            file.startup = normalize_startup(file.startup, &file.profiles);
+            *cached = file;
+            drop(cached);
+            return Ok(value);
+        };
         // `with_lock_str` creates the lock's (= this file's) parent directory.
-        crate::json_store::with_lock_str(&self.lock, || {
+        crate::json_store::with_lock_str(lock, || {
             // Normalised on read; `f` only inserts sanitised names and
             // slug-derived ids, so the result needs no second pass. A read
             // error (permissions, I/O) aborts here rather than persisting a
             // list assembled from nothing - that would unlist every profile
             // the user has, and their ids are slug-derived, so re-adoption
             // would need the exact original names back.
-            let ring = Self::snapshot_ring(&self.snapshots);
-            let (file, corrupt_primary) = read_or_recover(&self.path, &ring)?;
+            let ring = Self::snapshot_ring(snapshots);
+            let (file, corrupt_primary) = read_or_recover(path, &ring)?;
             let mut file = normalize_file(file);
             let value = f(&mut file)?;
             // `f` may have removed the profile the pointer named (or pointed
@@ -723,9 +767,9 @@ impl ProfileStore {
                 // `read_or_recover`'s own note: a failed rename must not
                 // fail the mutation, since `file` already stands in for the
                 // primary either way.
-                let _ = std::fs::rename(&self.path, self.path.with_extension("json.corrupt"));
+                let _ = std::fs::rename(path, path.with_extension("json.corrupt"));
             }
-            crate::json_store::write_atomic(&self.path, &bytes)
+            crate::json_store::write_atomic(path, &bytes)
                 .map_err(|e| format!("write profiles: {e}"))?;
             // Refresh the cache *inside* the advisory lock, like
             // `approval::RuleBook::mutate_project_rules`. Outside it, two
@@ -846,7 +890,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("create scratch dir");
-        let store = ProfileStore::load(dir.join("profiles.json"));
+        let store = ProfileStore::load(Some(dir.join("profiles.json")));
         (store, ScratchGuard(dir))
     }
 
@@ -860,7 +904,7 @@ mod tests {
         a.create("X").expect("a creates X");
         b.create("Y").expect("b creates Y");
 
-        let ids: Vec<String> = ProfileStore::load(a.path)
+        let ids: Vec<String> = ProfileStore::load(Some(a.into_path()))
             .snapshot()
             .0
             .into_iter()
@@ -882,7 +926,7 @@ mod tests {
         )
         .expect("write hand-edited store");
 
-        let reloaded = ProfileStore::load(path);
+        let reloaded = ProfileStore::load(Some(path));
         let ids: Vec<String> = reloaded.snapshot().0.into_iter().map(|p| p.id).collect();
         assert_eq!(ids, vec![DEFAULT_PROFILE_ID, "ok"]);
         assert!(reloaded.resolve(Some("../../etc")).is_err());
@@ -894,7 +938,7 @@ mod tests {
         store.create("Work").expect("create work");
         // A truncated/garbled file (disk full, partial cloud sync) - the ring
         // holds the last good version, so the profile is not silently unlisted.
-        std::fs::write(&store.path, b"{\"profiles\":[").expect("corrupt the store");
+        std::fs::write(store.path(), b"{\"profiles\":[").expect("corrupt the store");
 
         let reloaded = store.reopen();
         let ids: Vec<String> = reloaded.snapshot().0.into_iter().map(|p| p.id).collect();
@@ -944,7 +988,7 @@ mod tests {
         let path = store.into_path();
         std::fs::create_dir_all(&path).expect("occupy the store path");
 
-        let store = ProfileStore::load(path);
+        let store = ProfileStore::load(Some(path));
         assert!(store.create("Work").is_err());
     }
 
@@ -1270,7 +1314,7 @@ mod tests {
         assert!(store.contains("home"));
         let path = store.into_path();
         assert_eq!(
-            ProfileStore::load(path)
+            ProfileStore::load(Some(path))
                 .snapshot()
                 .0
                 .into_iter()
@@ -1305,8 +1349,8 @@ mod tests {
     #[test]
     fn corrupt_store_file_falls_back_to_builtin_only() {
         let (store, _scratch) = scratch_store();
-        std::fs::write(&store.path, b"not json").expect("write corrupt");
-        let reloaded = ProfileStore::load(store.into_path());
+        std::fs::write(store.path(), b"not json").expect("write corrupt");
+        let reloaded = ProfileStore::load(Some(store.into_path()));
         assert_eq!(reloaded.snapshot().0, vec![builtin()]);
         // And a mutation still succeeds, overwriting the corrupt file.
         assert!(reloaded.create("Work").is_ok());
@@ -1327,7 +1371,7 @@ mod tests {
         // dropped by `normalize` on the following load.
         assert!(store.create("overflow").is_err());
         let path = store.into_path();
-        let reloaded = ProfileStore::load(path);
+        let reloaded = ProfileStore::load(Some(path));
         assert_eq!(reloaded.snapshot().0.len(), MAX_PROFILES);
         assert!(!reloaded.contains("overflow"));
     }
@@ -1411,8 +1455,8 @@ mod tests {
         // user, unlike a `chmod 0o000` directory, which root ignores and
         // which previously made this test false-red under a root test
         // runner.
-        std::fs::write(&store.path, b"not json").expect("write corrupt");
-        let snapshots = &store.snapshots;
+        std::fs::write(store.path(), b"not json").expect("write corrupt");
+        let snapshots = &store.files().snapshots;
         std::fs::remove_dir_all(snapshots).expect("remove snapshots dir");
         std::fs::write(snapshots, b"not a directory").expect("block with a regular file");
         let res = store.create("Second");
@@ -1426,11 +1470,11 @@ mod tests {
         // directory the OS or a sync agent is momentarily holding onto)
         // into permanent loss of the list.
         assert!(
-            !store.path.with_extension("json.corrupt").exists(),
+            !store.path().with_extension("json.corrupt").exists(),
             "must not quarantine before recovery succeeds"
         );
         assert_eq!(
-            std::fs::read(&store.path).expect("corrupt primary must survive a failed recovery"),
+            std::fs::read(store.path()).expect("corrupt primary must survive a failed recovery"),
             b"not json",
             "primary must be left in place for the next launch to retry recovery"
         );
@@ -1449,7 +1493,7 @@ mod tests {
         store.set_startup(&work.id).expect("set startup");
         assert_eq!(store.startup_id(), work.id);
         let path = store.into_path();
-        assert_eq!(ProfileStore::load(path).startup_id(), work.id);
+        assert_eq!(ProfileStore::load(Some(path)).startup_id(), work.id);
     }
 
     #[test]
@@ -1472,7 +1516,7 @@ mod tests {
         // Absent, not `"default"`: the built-in id is implicit on disk.
         // Parsed, not a raw substring check: a profile literally named
         // "startup" would also match `raw.contains("startup")`.
-        let raw = std::fs::read_to_string(&store.path).expect("read file");
+        let raw = std::fs::read_to_string(store.path()).expect("read file");
         let parsed: serde_json::Value = serde_json::from_str(&raw).expect("parse json");
         assert!(
             parsed.get("startup").is_none(),
@@ -1489,7 +1533,10 @@ mod tests {
         assert_eq!(store.startup_id(), DEFAULT_PROFILE_ID);
         // And the dangling pointer must not have reached disk.
         let path = store.into_path();
-        assert_eq!(ProfileStore::load(path).startup_id(), DEFAULT_PROFILE_ID);
+        assert_eq!(
+            ProfileStore::load(Some(path)).startup_id(),
+            DEFAULT_PROFILE_ID
+        );
     }
 
     #[test]
@@ -1512,7 +1559,7 @@ mod tests {
             br#"{"profiles":[{"id":"work","name":"Work"}],"startup":"ghost"}"#,
         )
         .expect("write");
-        let store = ProfileStore::load(path);
+        let store = ProfileStore::load(Some(path));
         assert_eq!(store.startup_id(), DEFAULT_PROFILE_ID);
         assert!(store.contains("work"));
     }
@@ -1562,7 +1609,7 @@ mod tests {
         b.create("Other").expect("b creates another profile");
         // Parsed, not a raw substring check: a profile literally named
         // "startup" would also match `raw.contains("startup")`.
-        let raw = std::fs::read_to_string(&a.path).expect("read file");
+        let raw = std::fs::read_to_string(a.path()).expect("read file");
         let parsed: serde_json::Value = serde_json::from_str(&raw).expect("parse json");
         assert!(
             parsed.get("startup").is_none(),
@@ -1595,8 +1642,8 @@ mod tests {
         let work = store.create("Work").expect("create work");
         store.set_startup(&work.id).expect("set startup");
         // Corrupt the primary; the ring's newest snapshot still names work.
-        std::fs::write(&store.path, b"not json").expect("write corrupt");
-        let reloaded = ProfileStore::load(store.path);
+        std::fs::write(store.path(), b"not json").expect("write corrupt");
+        let reloaded = ProfileStore::load(Some(store.into_path()));
         assert!(reloaded.contains(&work.id), "ring restored the list");
         assert_eq!(
             reloaded.startup_id(),
@@ -1639,7 +1686,7 @@ mod tests {
         let path = store.into_path();
         std::fs::write(&path, b"{}").expect("write empty object");
 
-        let reloaded = ProfileStore::load(path);
+        let reloaded = ProfileStore::load(Some(path));
         assert_eq!(reloaded.snapshot().0, vec![builtin()]);
         assert!(
             !reloaded.contains(&work.id),
@@ -1650,7 +1697,7 @@ mod tests {
     #[test]
     fn a_corrupt_primary_is_quarantined_only_once_a_mutation_replaces_it() {
         let (store, _scratch) = scratch_store();
-        std::fs::write(&store.path, b"not json").expect("write corrupt");
+        std::fs::write(store.path(), b"not json").expect("write corrupt");
 
         // `load` alone must not touch the corrupt primary: nothing is about
         // to replace it, so quarantining here would strand a process that
@@ -1658,13 +1705,13 @@ mod tests {
         // hit on the next launch (see `read_or_recover`'s doc comment).
         let reloaded = store.reopen();
         assert_eq!(reloaded.snapshot().0, vec![builtin()]);
-        let quarantined = store.path.with_extension("json.corrupt");
+        let quarantined = store.path().with_extension("json.corrupt");
         assert!(
             !quarantined.exists(),
             "load must not quarantine without an upcoming write"
         );
         assert_eq!(
-            std::fs::read(&store.path).expect("primary must still be present"),
+            std::fs::read(store.path()).expect("primary must still be present"),
             b"not json",
             "load must leave the corrupt primary in place"
         );
@@ -1679,8 +1726,42 @@ mod tests {
             "the corrupt bytes must survive for hand repair"
         );
         assert!(
-            store.path.exists(),
+            store.path().exists(),
             "mutate must leave a fresh primary behind"
         );
+    }
+
+    #[test]
+    fn a_memory_only_store_starts_with_the_builtin_and_keeps_changes_for_the_run() {
+        let store = ProfileStore::load(None);
+        assert_eq!(
+            store.snapshot(),
+            (vec![builtin()], DEFAULT_PROFILE_ID.to_string())
+        );
+        let work = store.create("Work").expect("create work");
+        store.set_startup(&work.id).expect("set startup");
+        store
+            .rename(DEFAULT_PROFILE_ID, "Personal")
+            .expect("rename builtin");
+        assert!(store.contains(&work.id));
+        assert_eq!(store.startup_id(), work.id);
+        assert_eq!(store.snapshot().0[0].name, "Personal");
+        // Deleting the startup profile falls back like the file-backed path.
+        store.remove(&work.id).expect("remove work");
+        assert!(!store.contains(&work.id));
+        assert_eq!(store.startup_id(), DEFAULT_PROFILE_ID);
+        // Nothing outlives the store.
+        assert!(!ProfileStore::load(None).contains(&work.id));
+    }
+
+    #[test]
+    fn a_failed_memory_only_mutation_leaves_the_list_unchanged() {
+        let store = ProfileStore::load(None);
+        let work = store.create("Work").expect("create work");
+        store.set_startup(&work.id).expect("set startup");
+        assert!(store.set_startup("ghost").is_err());
+        assert!(store.remove("ghost").is_err());
+        assert_eq!(store.startup_id(), work.id);
+        assert_eq!(store.snapshot().0.len(), 2);
     }
 }

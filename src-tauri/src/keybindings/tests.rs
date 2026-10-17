@@ -57,7 +57,7 @@ impl TmpHome {
     fn overlay_store(&self) -> overlay::OverlayStore {
         let dir = self.path.join(".config").join("omp-desktop");
         fs::create_dir_all(&dir).expect("config dir");
-        overlay::OverlayStore::new(dir.join("keybindings.json"))
+        overlay::OverlayStore::new(Some(dir.join("keybindings.json")))
     }
 }
 
@@ -309,7 +309,7 @@ fn corrupt_overlay_does_not_drop_omp_layer() {
     let home = TmpHome::new();
     home.write_omp_yml("app.plan.toggle: Alt+Shift+O\n");
     let store = home.overlay_store();
-    fs::write(store.path(), b"not json").unwrap();
+    fs::write(store.path().expect("file-backed"), b"not json").unwrap();
 
     let p = payload(&home.path, None, None, &store).unwrap();
     assert_eq!(p.omp["app.plan.toggle"], ["shift+alt+o"]);
@@ -332,7 +332,7 @@ fn payload_with_no_overlay_file_is_empty_and_pathed() {
     assert_eq!(p.omp["app.plan.toggle"], ["shift+alt+o"]);
     assert_eq!(p.overlay.len(), 0);
     assert!(p.overlay_error.is_none());
-    assert_eq!(p.overlay_path, store.path().to_string_lossy());
+    assert_eq!(p.overlay_path.as_deref().map(Path::new), store.path());
 }
 
 #[test]
@@ -356,6 +356,29 @@ fn payload_with_overlay_matches_payload_for_the_same_state() {
     assert_eq!(via_overlay.overlay, via_fresh_read.overlay);
     assert!(via_overlay.overlay_error.is_none());
     assert_eq!(via_overlay.overlay_path, via_fresh_read.overlay_path);
+}
+
+#[test]
+fn a_memory_only_overlay_layers_like_a_file_and_has_no_path() {
+    // No app config folder: the overlay lives in memory, and the payload
+    // says so with an absent path rather than naming a file nobody writes.
+    let home = TmpHome::new();
+    home.write_omp_yml("app.plan.toggle: Alt+Shift+O\n");
+    let store = overlay::OverlayStore::new(None);
+    let overlay_bindings = store
+        .set("app.plan.toggle", &["ctrl+shift+o".to_string()])
+        .unwrap();
+
+    let via_overlay =
+        payload_with_overlay(&home.path, None, None, overlay_bindings, store.path()).unwrap();
+    let via_fresh_read = payload(&home.path, None, None, &store).unwrap();
+
+    assert_eq!(via_fresh_read.omp["app.plan.toggle"], ["shift+alt+o"]);
+    assert_eq!(via_fresh_read.overlay["app.plan.toggle"], ["ctrl+shift+o"]);
+    assert_eq!(via_overlay.overlay, via_fresh_read.overlay);
+    assert!(via_fresh_read.overlay_error.is_none());
+    assert_eq!(via_fresh_read.overlay_path, None);
+    assert_eq!(via_overlay.overlay_path, None);
 }
 
 // ── ACTION_IDS ────────────────────────────────────────────────────────────────

@@ -127,9 +127,10 @@ pub struct Payload {
     pub omp_path: Option<String>,
     /// Built-in profile's file merged underneath, when `profile` is named.
     pub inherited_path: Option<String>,
-    /// `<app config dir>/keybindings.json` — always present as a path (the
-    /// file itself may not exist yet).
-    pub overlay_path: String,
+    /// `<app config dir>/keybindings.json` (the file itself may not exist
+    /// yet); `None` when the app has no config folder and the overlay lives
+    /// in memory only.
+    pub overlay_path: Option<String>,
 }
 
 // ── path helpers ──────────────────────────────────────────────────────────────
@@ -341,7 +342,7 @@ fn assemble_payload(
     omp_layer: OmpLayer,
     overlay: Bindings,
     overlay_error: Option<String>,
-    overlay_path: &Path,
+    overlay_path: Option<&Path>,
 ) -> Payload {
     Payload {
         omp: omp_layer.bindings,
@@ -351,7 +352,7 @@ fn assemble_payload(
         inherited_path: omp_layer
             .inherited_path
             .map(|p| p.to_string_lossy().into_owned()),
-        overlay_path: overlay_path.to_string_lossy().into_owned(),
+        overlay_path: overlay_path.map(|p| p.to_string_lossy().into_owned()),
     }
 }
 
@@ -393,7 +394,7 @@ pub fn payload_with_overlay(
     profile: Option<&str>,
     env_dir: Option<&OsStr>,
     overlay_bindings: Bindings,
-    overlay_path: &Path,
+    overlay_path: Option<&Path>,
 ) -> Result<Payload, String> {
     let omp_layer = read_omp(home, profile, env_dir)?;
     Ok(assemble_payload(

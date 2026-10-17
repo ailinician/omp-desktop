@@ -61,7 +61,7 @@ Kill  → registry kill_tree      Changed/Removed → app.emit(widgets://run | w
 - **`kill_all()`** kills every registered supervisor synchronously and does not depend on the scheduler thread. It is called:
   - on the updater relaunch path (which skips `Drop`) and on `RunEvent::Exit`, both through `crate::kill_child_processes`: `AgentBridge::shutdown_all` runs first, `BrowserManager::shutdown_all` second, then widget plugins are killed,
   - from `Drop`.
-- **Config source of truth.** The config is read once at startup and again on `widgets_reload`, never per run. The config path is `Option<PathBuf>`: `None` when `app_config_dir()` fails. There is no temp-dir fallback; the snapshot's `fatal` says why, and nothing runs.
+- **Config source of truth.** The config is read once at startup and again on `widgets_reload`, never per run. The config path is `Option<PathBuf>`: `None` when `app_config_dir()` fails or is relative (`lib.rs` `config_dir`). There is no temp-dir fallback; the snapshot's `fatal` says why, and nothing runs.
 
 ## Scheduler (`schedule.rs`)
 

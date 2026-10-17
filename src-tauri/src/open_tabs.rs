@@ -18,8 +18,13 @@
 //! unreadable file means nothing to restore, and the next write replaces it.
 //! The resume path is not trusted here: `start_session` validates it against
 //! the tab's profile like every other resume.
+//!
+//! Without a resolvable config folder the layout lives in memory (a webview
+//! reload still restores it) and no file is read or written: the next launch
+//! starts without tabs.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
@@ -71,35 +76,66 @@ pub struct Restore {
 
 /// Manages `<app config dir>/open-tabs.json`.
 pub struct OpenTabsStore {
-    path: PathBuf,
-    /// `path.with_extension("lock")`, computed once (same as `OverlayStore`).
-    lock: PathBuf,
+    backing: Backing,
+}
+
+enum Backing {
+    /// The file and `path.with_extension("lock")`, computed once (same as
+    /// `OverlayStore`).
+    File { path: PathBuf, lock: PathBuf },
+    /// No app config folder: the bytes the file would hold, for the app run
+    /// (empty until the first save). Bytes rather than a `Layout`, so a load
+    /// takes the file's exact path back through [`restorable`].
+    Memory(Mutex<Vec<u8>>),
 }
 
 impl OpenTabsStore {
-    /// Create a store pointing at `path`. The file need not exist yet.
-    pub fn new(path: PathBuf) -> Self {
-        let lock = path.with_extension("lock");
-        Self { path, lock }
+    /// Create a store pointing at `path` (the file need not exist yet), or
+    /// a memory-only one for `None`.
+    pub fn new(path: Option<PathBuf>) -> Self {
+        let backing = path.map_or_else(
+            || Backing::Memory(Mutex::default()),
+            |path| Backing::File {
+                lock: path.with_extension("lock"),
+                path,
+            },
+        );
+        Self { backing }
     }
 
     /// The saved layout, checked against the file system (see
-    /// [`restorable`]). Unlocked for the same reason as
-    /// `RecentProjectsStore::list`: `write_atomic` never exposes a
-    /// half-written file.
+    /// [`restorable`]). File-backed: unlocked for the same reason as
+    /// `RecentProjectsStore::list` (`write_atomic` never exposes a
+    /// half-written file). Memory-only: read under the bytes' mutex.
     pub fn load(&self) -> Restore {
-        restorable(json_store::read_or_default(&self.path))
+        restorable(match &self.backing {
+            Backing::File { path, .. } => json_store::read_or_default(path),
+            // Nothing saved yet (empty) parses as nothing to restore.
+            Backing::Memory(bytes) => serde_json::from_slice(&locked(bytes)).unwrap_or_default(),
+        })
     }
 
     /// Replace the saved layout with `layout`. Written as is: the file is
     /// untrusted anyway, so [`restorable`] sanitises it on the way back.
     pub fn save(&self, layout: &Layout) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(layout).map_err(|e| e.to_string())?;
-        json_store::with_lock_str(&self.lock, || {
-            json_store::write_atomic(&self.path, &bytes)
-                .map_err(|e| format!("write {}: {e}", self.path.display()))
-        })
+        match &self.backing {
+            Backing::File { path, lock } => json_store::with_lock_str(lock, || {
+                json_store::write_atomic(path, &bytes)
+                    .map_err(|e| format!("write {}: {e}", path.display()))
+            }),
+            Backing::Memory(saved) => {
+                *locked(saved) = bytes;
+                Ok(())
+            }
+        }
     }
+}
+
+/// A memory-only layout. Every save replaces the whole value, so poison is
+/// ignored.
+fn locked(bytes: &Mutex<Vec<u8>>) -> MutexGuard<'_, Vec<u8>> {
+    bytes.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Cap to [`MAX_TABS`], drop an `active` index that points past the end,
@@ -215,7 +251,7 @@ mod tests {
 
     fn scratch_store() -> (OpenTabsStore, ScratchGuard) {
         let dir = scratch();
-        (OpenTabsStore::new(dir.0.join("open-tabs.json")), dir)
+        (OpenTabsStore::new(Some(dir.0.join("open-tabs.json"))), dir)
     }
 
     fn tab(path: &str, session_file: Option<&str>) -> OpenTab {
@@ -256,6 +292,29 @@ mod tests {
         fs::write(dir.0.join("open-tabs.json"), b"{ not json").expect("write");
         let corrupt = store.load();
         assert!(corrupt.layout.tabs.is_empty() && corrupt.layout.active.is_none());
+    }
+
+    #[test]
+    fn a_memory_only_store_round_trips_for_its_lifetime_only() {
+        let dir = scratch();
+        let a = dir.folder("a");
+        let gone = dir.missing("gone");
+        let store = OpenTabsStore::new(None);
+        let empty = store.load();
+        assert!(empty.layout.tabs.is_empty() && empty.layout.active.is_none());
+
+        store
+            .save(&Layout {
+                tabs: vec![tab(&gone, None), tab(&a, None)],
+                active: Some(1),
+            })
+            .expect("save");
+        // The same sanitising restore as a file-backed store.
+        let got = store.load();
+        assert_eq!(got.layout.tabs, vec![tab(&a, None)]);
+        assert_eq!(got.layout.active, Some(0));
+        assert_eq!(got.skipped, vec![gone]);
+        assert_eq!(OpenTabsStore::new(None).load().layout.tabs, Vec::new());
     }
 
     #[test]
