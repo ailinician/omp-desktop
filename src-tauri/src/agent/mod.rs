@@ -674,10 +674,7 @@ mod tests {
         approvals::observe(
             &open,
             Some("extension_ui_request"),
-            &serde_json::json!({
-                "type": "extension_ui_request", "id": id, "method": "select",
-                "title": "Allow tool: bash", "options": ["Approve", "Deny"],
-            }),
+            &approval_prompt(id, "bash"),
         );
         open
     }
@@ -723,6 +720,14 @@ mod tests {
         let line = r#"{"type":"extension_ui_response","id":"req-1","value":"Approve"}"#;
         assert!(write_command(&Mutex::new(Broken), line, Some(("req-1", &open))).is_err());
         assert_eq!(open.lock().unwrap().tool("req-1"), Some("bash"));
+    }
+
+    /// omp's tool-approval prompt `id` for `tool`, as the reader sees it.
+    pub(super) fn approval_prompt(id: &str, tool: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "extension_ui_request", "id": id, "method": "select",
+            "title": format!("Allow tool: {tool}\nCommand: ls"), "options": ["Approve", "Deny"],
+        })
     }
 
     /// A map entry with no process behind it (generation 1, empty journal and

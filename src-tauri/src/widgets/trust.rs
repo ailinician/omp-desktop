@@ -29,8 +29,9 @@ const DOMAIN: &[u8] = b"omp-widget-v1\0";
 /// Scripts larger than this contribute `len + mtime` instead of their bytes,
 /// so a huge interpreter binary named in argv never costs a full read per run.
 pub(super) const MAX_HASHED_FILE_BYTES: u64 = 8 * 1024 * 1024;
-/// Read chunk for streaming a script into the hash.
-const CHUNK_BYTES: usize = 16 * 1024;
+/// Read chunk for streaming a script into the hash, and for comparing it
+/// with its stored copy (`snapshot.rs`): one chunk, one read of the copy.
+pub(super) const CHUNK_BYTES: usize = 16 * 1024;
 const APPROVALS_VERSION: u32 = 1;
 /// Length of [`fingerprint`]'s lowercase hex digest.
 const FINGERPRINT_HEX_LEN: usize = 64;
@@ -291,7 +292,7 @@ fn write(path: &Path, approved: &BTreeMap<String, String>) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::config::{Scope, Trigger};
+    use crate::widgets::config::test_entry;
 
     /// A scratch directory removed on drop.
     struct Scratch(PathBuf);
@@ -312,34 +313,19 @@ mod tests {
         }
     }
 
-    fn entry(command: &[&str]) -> PluginEntry {
-        PluginEntry {
-            id: "probe".to_owned(),
-            title: "Probe".to_owned(),
-            command: command.iter().map(|s| (*s).to_owned()).collect(),
-            match_path: None,
-            match_remote: None,
-            triggers: vec![Trigger::Activate],
-            timeout_ms: 10_000,
-            interval_ms: None,
-            enabled: true,
-            scope: Scope::Tab,
-        }
-    }
-
     #[test]
     fn fingerprint_is_stable_and_follows_argv() {
-        let a = entry(&["sh", "-c", "echo {}"]);
+        let a = test_entry(&["sh", "-c", "echo {}"]);
         assert_eq!(fingerprint(&a), fingerprint(&a));
         assert_eq!(fingerprint(&a).len(), 64);
         assert_ne!(
             fingerprint(&a),
-            fingerprint(&entry(&["sh", "-c", "echo []"]))
+            fingerprint(&test_entry(&["sh", "-c", "echo []"]))
         );
         // NUL termination keeps the argument boundaries in the hash.
         assert_ne!(
-            fingerprint(&entry(&["ab", "c"])),
-            fingerprint(&entry(&["a", "bc"]))
+            fingerprint(&test_entry(&["ab", "c"])),
+            fingerprint(&test_entry(&["a", "bc"]))
         );
     }
 
@@ -348,7 +334,7 @@ mod tests {
         let dir = Scratch::new("content");
         let script = dir.0.join("plugin.sh");
         fs::write(&script, "echo '{\"v\":1}'\n").unwrap();
-        let e = entry(&["sh", script.to_str().unwrap()]);
+        let e = test_entry(&["sh", script.to_str().unwrap()]);
         let before = fingerprint(&e);
         assert_eq!(
             before,
@@ -373,7 +359,7 @@ mod tests {
     fn fingerprint_ignores_directories_and_missing_paths() {
         let dir = Scratch::new("dirs");
         let missing = dir.0.join("missing.sh");
-        let e = entry(&["sh", missing.to_str().unwrap()]);
+        let e = test_entry(&["sh", missing.to_str().unwrap()]);
         let before = fingerprint(&e);
         fs::create_dir(&missing).unwrap();
         assert_eq!(before, fingerprint(&e), "a directory contributes nothing");
@@ -411,7 +397,7 @@ mod tests {
         let dir = Scratch::new("stale");
         let script = dir.0.join("plugin.sh");
         fs::write(&script, "echo {}\n").unwrap();
-        let e = entry(&["sh", script.to_str().unwrap()]);
+        let e = test_entry(&["sh", script.to_str().unwrap()]);
         let shown = fingerprint(&e);
         fs::write(&script, "rm -rf ~\n").unwrap();
 

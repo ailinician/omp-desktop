@@ -65,9 +65,19 @@ fn absolute_dirs(path: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
 
 /// `path` with every empty or relative entry removed.
 fn absolute_entries(path: &OsStr) -> OsString {
+    join_dirs(absolute_dirs(path))
+}
+
+/// Folders split from a PATH ([`child_path_dirs`]) joined back into one: the
+/// [`trusted_child_path`] for a child found by searching those folders.
+pub fn join_dirs<I>(dirs: I) -> OsString
+where
+    I: IntoIterator,
+    I::Item: AsRef<OsStr>,
+{
     // `split_paths` strips the quotes `join_paths` would reject, so joining
     // its own output cannot fail; an empty PATH is the safe answer if it did.
-    std::env::join_paths(absolute_dirs(path)).unwrap_or_default()
+    std::env::join_paths(dirs).unwrap_or_default()
 }
 
 /// Override the child command's PATH with [`child_path`]. `Command`
@@ -332,10 +342,14 @@ mod tests {
         );
     }
 
+    /// The issue's attack: a project folder holding an executable `omp`,
+    /// reached through an empty or relative PATH entry once the session's
+    /// cwd is that folder. Only absolute folders are searched, even when the
+    /// relative entries come first.
     #[test]
     fn only_absolute_path_folders_are_searched() {
         let bin = if cfg!(windows) { r"C:\bin" } else { "/bin" };
-        let path = std::env::join_paths(["relative", "", bin]).unwrap();
+        let path = std::env::join_paths([".", "relative", "", bin]).unwrap();
         assert_eq!(
             absolute_dirs(&path).collect::<Vec<_>>(),
             [std::path::PathBuf::from(bin)]

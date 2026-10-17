@@ -511,6 +511,7 @@ fn read_until_capped<R: BufRead>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::tests::approval_prompt;
     use serde_json::json;
 
     #[test]
@@ -774,12 +775,6 @@ mod tests {
             .unwrap();
         let stdin: Mutex<Vec<u8>> = Mutex::new(Vec::new());
         let open = Mutex::new(PendingApprovals::new(None));
-        let prompt = |id: &str, tool: &str| {
-            json!({
-                "type": "extension_ui_request", "id": id, "method": "select",
-                "title": format!("Allow tool: {tool}"), "options": ["Approve", "Deny"]
-            })
-        };
         let step = |frame: &serde_json::Value| {
             auto_approve_or_track(
                 frame,
@@ -792,8 +787,14 @@ mod tests {
             )
         };
 
-        assert!(step(&prompt("req-1", "edit")).is_some(), "rule-covered");
-        assert!(step(&prompt("req-2", "bash")).is_none(), "forwarded");
+        assert!(
+            step(&approval_prompt("req-1", "edit")).is_some(),
+            "rule-covered"
+        );
+        assert!(
+            step(&approval_prompt("req-2", "bash")).is_none(),
+            "forwarded"
+        );
         let open = open.lock().unwrap();
         assert_eq!(
             open.tool("req-1"),

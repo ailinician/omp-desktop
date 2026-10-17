@@ -123,7 +123,9 @@ fn spawn<A: AsRef<OsStr>>(
     argv: &[A],
     ctx: &PluginContext,
 ) -> Result<Child, String> {
-    let Some((argv0, rest)) = argv.split_first() else {
+    // `name`: the configured program, which the user knows, not the copy's
+    // path; `argv` is the command with copies swapped in, as long as it.
+    let (Some(name), Some((argv0, rest))) = (entry.command.first(), argv.split_first()) else {
         return Err("command is empty".to_string());
     };
     // Never a shared temp dir: an interpreter that puts its cwd on the module
@@ -154,11 +156,6 @@ fn spawn<A: AsRef<OsStr>>(
     crate::child_path::apply_trusted_child_path(&mut cmd);
     // Also hides the console window on Windows.
     ProcessSupervisor::prepare(&mut cmd);
-    // The configured name, which the user knows, not the copy's path.
-    let name = entry
-        .command
-        .first()
-        .map_or_else(|| argv0.as_ref().to_string_lossy(), Into::into);
     // The OS error names the cause; `NotFound` also means a missing shebang
     // interpreter or a vanished cwd, not only a missing program.
     spawn_retrying_busy(&mut cmd).map_err(|e| format!("could not start {name}: {e}"))
@@ -243,20 +240,12 @@ fn tail(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::config::{Scope, Trigger};
+    use crate::widgets::config::test_entry;
 
     fn entry(cmd: &[&str], timeout_ms: u64) -> PluginEntry {
         PluginEntry {
-            id: "t".into(),
-            title: "T".into(),
-            command: cmd.iter().map(|s| (*s).to_string()).collect(),
-            match_path: None,
-            match_remote: None,
-            triggers: vec![Trigger::Activate],
             timeout_ms,
-            interval_ms: None,
-            enabled: true,
-            scope: Scope::Tab,
+            ..test_entry(cmd)
         }
     }
 

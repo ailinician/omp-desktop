@@ -53,7 +53,7 @@ use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::private_fs::private_dirs;
+use crate::private_fs::{pid_dirs, private_dirs, remove_dir_retrying};
 use crate::supervisor::pid_is_alive;
 use crate::widgets::config::PluginEntry;
 use crate::widgets::trust;
@@ -64,8 +64,6 @@ const NO_STORE: &str =
     "the app cache directory could not be resolved — widget scripts cannot be copied for the run";
 /// Attempts at a fresh staging directory name before giving up.
 const STAGING_ATTEMPTS: u32 = 16;
-/// Read size when comparing a stored copy with its original.
-const COMPARE_BYTES: usize = 4096;
 
 /// What [`ScriptStore::prepare`] found.
 #[derive(Debug)]
@@ -117,17 +115,14 @@ impl ScriptStore {
     pub fn prune(&self, approved: impl Fn(&str) -> bool) {
         let Some(root) = &self.root else { return };
         let own = std::process::id();
-        for (name, path) in subdirs(&root.join(STAGING)) {
-            if name
-                .parse::<u32>()
-                .is_ok_and(|pid| pid == own || !pid_is_alive(pid))
-            {
-                let _ = fs::remove_dir_all(path);
+        for (pid, path) in pid_dirs(&root.join(STAGING)) {
+            if pid == own || !pid_is_alive(pid) {
+                let _ = remove_dir_retrying(&path);
             }
         }
         for (name, path) in subdirs(&root.join(STORE)) {
             if !approved(&name) {
-                let _ = fs::remove_dir_all(path);
+                let _ = remove_dir_retrying(&path);
             }
         }
     }
@@ -443,29 +438,25 @@ impl HashedFile {
     /// now, or compared equal to the end. An empty file never saw a chunk and
     /// is opened (copied empty, or compared) here.
     fn finish(mut self, open: impl FnOnce() -> io::Result<Sink>) -> io::Result<Option<bool>> {
-        if matches!(self.state, State::Pending) {
-            self.state = State::Copied {
-                sink: open()?,
-                read: 0,
-            };
-        }
-        match self.state {
-            State::Pending | State::Native => Ok(None),
-            State::Copied { sink, .. } => match sink {
-                Sink::Write(mut file) => file.flush().map(|()| Some(true)),
-                // Equal so far; a longer copy differs too.
-                Sink::Compare(mut copy) => Ok(Some(copy.read(&mut [0u8; 1]).is_ok_and(|n| n == 0))),
-                Sink::Differs => Ok(Some(false)),
-            },
+        // Opens a file still pending; otherwise an empty chunk is a no-op.
+        self.feed(&[], open)?;
+        let State::Copied { sink, .. } = self.state else {
+            return Ok(None);
+        };
+        match sink {
+            Sink::Write(mut file) => file.flush().map(|()| Some(true)),
+            // Equal so far; a longer copy differs too.
+            Sink::Compare(mut copy) => Ok(Some(copy.read(&mut [0u8; 1]).is_ok_and(|n| n == 0))),
+            Sink::Differs => Ok(Some(false)),
         }
     }
 }
 
 /// Whether the next bytes of `file` are `expected`.
 fn reads_as(file: &mut File, mut expected: &[u8]) -> bool {
-    let mut buf = [0u8; COMPARE_BYTES];
+    let mut buf = [0u8; trust::CHUNK_BYTES];
     while !expected.is_empty() {
-        let n = expected.len().min(COMPARE_BYTES);
+        let n = expected.len().min(trust::CHUNK_BYTES);
         if file.read_exact(&mut buf[..n]).is_err() || buf[..n] != expected[..n] {
             return false;
         }
@@ -509,24 +500,9 @@ fn is_native_image(head: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::test_support::TempDir;
-    use crate::widgets::config::{Scope, Trigger};
+    use crate::widgets::config::test_entry;
     use crate::widgets::context::PluginContext;
     use crate::widgets::run::run_plugin;
-
-    fn entry(command: &[&str]) -> PluginEntry {
-        PluginEntry {
-            id: "probe".to_owned(),
-            title: "Probe".to_owned(),
-            command: command.iter().map(|s| (*s).to_owned()).collect(),
-            match_path: None,
-            match_remote: None,
-            triggers: vec![Trigger::Activate],
-            timeout_ms: 10_000,
-            interval_ms: None,
-            enabled: true,
-            scope: Scope::Tab,
-        }
-    }
 
     fn ctx(project: &Path) -> PluginContext {
         PluginContext {
@@ -593,7 +569,7 @@ mod tests {
         let script = tmp.path().join("hello.mjs");
         fs::write(&script, "console.log('{}')\n").unwrap();
         let missing = tmp.path().join("missing.txt");
-        let e = entry(&["node", "-e", s(&script), s(&missing), s(tmp.path())]);
+        let e = test_entry(&["node", "-e", s(&script), s(&missing), s(tmp.path())]);
         let root = tmp.path().join("runs");
         let store = ScriptStore::new(Some(root.clone()));
 
@@ -623,7 +599,7 @@ mod tests {
         let tmp = TempDir::new("widget-snap", "verify");
         let script = tmp.path().join("out.json");
         fs::write(&script, "{\"v\":1}").unwrap();
-        let e = entry(&print_file(s(&script)));
+        let e = test_entry(&print_file(s(&script)));
         let root = tmp.path().join("runs");
         let store = ScriptStore::new(Some(root.clone()));
         let index = e.command.len() - 1;
@@ -657,7 +633,7 @@ mod tests {
         let tmp = TempDir::new("widget-snap", "layout");
         let script = tmp.path().join("w.py");
         fs::write(&script, "import json\n").unwrap();
-        let e = entry(&["python3", "-I", s(&script)]);
+        let e = test_entry(&["python3", "-I", s(&script)]);
         let store = ScriptStore::new(Some(tmp.path().join("runs")));
         let copy = PathBuf::from(&ready(&store, &e).argv[2]);
         let slot = copy.parent().unwrap().to_path_buf();
@@ -681,7 +657,7 @@ mod tests {
         let tmp = TempDir::new("widget-snap", "links");
         let script = tmp.path().join("out.json");
         fs::write(&script, "{\"v\":1}").unwrap();
-        let e = entry(&["cat", s(&script)]);
+        let e = test_entry(&["cat", s(&script)]);
         let store = ScriptStore::new(Some(tmp.path().join("runs")));
         let copy = PathBuf::from(&ready(&store, &e).argv[1]);
         let entry_dir = copy.parent().unwrap().parent().unwrap().to_path_buf();
@@ -707,7 +683,7 @@ mod tests {
         let tmp = TempDir::new("widget-snap", "edited");
         let script = tmp.path().join("w.sh");
         fs::write(&script, "echo {}").unwrap();
-        let e = entry(&["sh", s(&script)]);
+        let e = test_entry(&["sh", s(&script)]);
         let approved = trust::fingerprint(&e);
         let store = ScriptStore::new(Some(tmp.path().join("runs")));
         let run = ready(&store, &e);
@@ -727,7 +703,7 @@ mod tests {
         let tmp = TempDir::new("widget-snap", "changed");
         let script = tmp.path().join("w.sh");
         fs::write(&script, "echo {}").unwrap();
-        let e = entry(&["sh", s(&script)]);
+        let e = test_entry(&["sh", s(&script)]);
         let root = tmp.path().join("runs");
         let store = ScriptStore::new(Some(root.clone()));
 
@@ -747,7 +723,7 @@ mod tests {
         let tmp = TempDir::new("widget-snap", "swap");
         let script = tmp.path().join("out.json");
         fs::write(&script, "{\"v\":1}").unwrap();
-        let e = entry(&print_file(s(&script)));
+        let e = test_entry(&print_file(s(&script)));
         let store = ScriptStore::new(Some(tmp.path().join("runs")));
 
         let run = ready(&store, &e);
@@ -771,7 +747,7 @@ mod tests {
         let tmp = TempDir::new("widget-snap", "scratch");
         let script = tmp.path().join("out.json");
         fs::write(&script, "{\"v\":1}").unwrap();
-        let e = entry(&print_file(s(&script)));
+        let e = test_entry(&print_file(s(&script)));
         let root = tmp.path().join("runs");
         // `store` itself is a file: no entry can be created under it.
         let blocker = root.join(STORE);
@@ -804,7 +780,7 @@ mod tests {
             .unwrap()
             .set_len(trust::MAX_HASHED_FILE_BYTES + 1)
             .unwrap();
-        let e = entry(&[s(&program), s(&script), s(&spoof), s(&large)]);
+        let e = test_entry(&[s(&program), s(&script), s(&spoof), s(&large)]);
         let argv = ready(&ScriptStore::new(Some(tmp.path().join("runs"))), &e).argv;
         let want = configured(&e);
         assert_eq!(argv[0], want[0], "native program");
@@ -827,12 +803,12 @@ mod tests {
         let paths = ["w.cmd", "tool", "tool.bin"].map(|name| tmp.path().join(name));
         let dotted = format!("{}.", s(&paths[0]));
         for arg in [s(&paths[0]), dotted.as_str(), s(&paths[1]), s(&paths[2])] {
-            let e = entry(&[arg]);
+            let e = test_entry(&[arg]);
             assert_ne!(ready(&store, &e).argv[0], configured(&e)[0], "{arg}");
         }
         let exe = tmp.path().join("TOOL.EXE");
         fs::write(&exe, NATIVE.1).unwrap();
-        let e = entry(&[s(&exe)]);
+        let e = test_entry(&[s(&exe)]);
         assert_eq!(ready(&store, &e).argv[0], configured(&e)[0]);
     }
 
@@ -841,7 +817,7 @@ mod tests {
         let tmp = TempDir::new("widget-snap", "empty");
         let empty = tmp.path().join("empty.txt");
         fs::write(&empty, "").unwrap();
-        let e = entry(&["cat", s(&empty)]);
+        let e = test_entry(&["cat", s(&empty)]);
         let store = ScriptStore::new(Some(tmp.path().join("runs")));
         let argv = ready(&store, &e).argv;
         assert_ne!(argv[1], empty.as_os_str());
@@ -855,12 +831,12 @@ mod tests {
     fn no_cache_directory_fails_only_runs_that_need_a_copy() {
         let tmp = TempDir::new("widget-snap", "nodir");
         let store = ScriptStore::new(None);
-        let inline = entry(&["sh", "-c", "echo {}"]);
+        let inline = test_entry(&["sh", "-c", "echo {}"]);
         assert_eq!(ready(&store, &inline).argv, configured(&inline));
 
         let script = tmp.path().join("x.sh");
         fs::write(&script, "echo {}").unwrap();
-        let e = entry(&["sh", s(&script)]);
+        let e = test_entry(&["sh", s(&script)]);
         assert!(store.prepare(&e, &trust::fingerprint(&e)).is_err());
     }
 
@@ -877,7 +853,7 @@ mod tests {
         );
         let data = tmp.path().join("data.txt");
         fs::write(&data, "x").unwrap();
-        let e = entry(&[s(&script), s(&data)]);
+        let e = test_entry(&[s(&script), s(&data)]);
         let argv = ready(&ScriptStore::new(Some(tmp.path().join("runs"))), &e).argv;
         let mode = |p: &OsString| fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&argv[0]), 0o500);

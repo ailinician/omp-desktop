@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use super::instance::{create_private_file, remove_dir_retrying};
-use super::pipe::{attach, CdpPipes};
+use super::pipe::attach;
 use super::stderr::StderrTail;
 use crate::browser::broker::Broker;
 use crate::browser::lock;
@@ -46,51 +46,6 @@ enum Failure {
     Binary(String),
     /// Not the binary's fault (our pid file, a hung start): stop trying.
     Fatal(String),
-}
-
-/// Closes the broker once Chromium's stderr ends: the process tree is gone
-/// even if the pipe never reports its end (on Windows another process can
-/// inherit the pipe's ends). The drain starts before the broker exists.
-struct CloseOnEnd(Mutex<Watch>);
-
-enum Watch {
-    /// No broker yet, stderr still open.
-    Starting,
-    /// Stderr ended.
-    Ended,
-    /// Weak: the drain thread must not keep the connection alive.
-    Running(Weak<Broker>),
-}
-
-impl CloseOnEnd {
-    /// Stderr ended: close the broker, now or once it is [`watch`]ed.
-    ///
-    /// [`watch`]: Self::watch
-    fn ended(&self) {
-        let previous = std::mem::replace(&mut *lock(&self.0), Watch::Ended);
-        let Watch::Running(broker) = previous else {
-            return;
-        };
-        if let Some(broker) = broker.upgrade() {
-            broker.close();
-        }
-    }
-
-    /// Close `broker` when stderr ends; at once if it already has.
-    fn watch(&self, broker: &Arc<Broker>) {
-        let ended = {
-            let mut watch = lock(&self.0);
-            if matches!(*watch, Watch::Ended) {
-                true
-            } else {
-                *watch = Watch::Running(Arc::downgrade(broker));
-                false
-            }
-        };
-        if ended {
-            broker.close();
-        }
-    }
 }
 
 impl Chromium {
@@ -137,47 +92,49 @@ impl Chromium {
     /// user-data dir, and wait up to [`LAUNCH_TIMEOUT`] for it to answer.
     fn start(binary: &Path, profile: &Path, width: u32, height: u32) -> Result<Self, Failure> {
         let mut cmd = command(binary, profile, width, height);
-        let mut pipes = attach(&mut cmd).map_err(|e| Failure::Fatal(format!("cdp pipe: {e}")))?;
+        let pipes = attach(&mut cmd).map_err(|e| Failure::Fatal(format!("cdp pipe: {e}")))?;
         apply_child_path(&mut cmd);
         ProcessSupervisor::prepare(&mut cmd);
         let spawned = cmd.spawn();
         // Close our copies of Chromium's ends whatever happened: the pipes
         // must end with the browser.
-        pipes.spawned();
+        let (from_chromium, to_chromium) = pipes.spawned();
         let mut child = spawned.map_err(|e| Failure::Binary(format!("cannot run: {e}")))?;
         let supervisor = ProcessSupervisor::attach(&child);
-        let close_on_end = Arc::new(CloseOnEnd(Mutex::new(Watch::Starting)));
-        let stderr = child.stderr.take().map(|stderr| {
-            let close_on_end = Arc::clone(&close_on_end);
-            StderrTail::drain(stderr, move || close_on_end.ended())
-        });
         let mut pid_path = profile.as_os_str().to_os_string();
         pid_path.push(".pid");
         let pid_file = PathBuf::from(pid_path);
         let recorded = create_private_file(&pid_file, format!("{}\n", child.id()).as_bytes());
         let owns_pid_file = recorded.is_ok();
-        let CdpPipes {
-            from_chromium,
-            to_chromium,
-            ..
-        } = pipes;
-
-        let started = recorded
+        let broker = recorded
             .map_err(|e| Failure::Fatal(format!("pid file: {e}")))
             .and_then(|()| {
                 Broker::start(from_chromium, to_chromium)
                     .map_err(|e| Failure::Fatal(format!("cdp pipe reader: {e}")))
-            })
-            .and_then(|broker| {
-                close_on_end.watch(&broker);
-                match wait_for_browser(&mut child, &broker) {
-                    Ok(()) => Ok(broker),
-                    Err(failure) => {
-                        broker.close();
-                        Err(failure)
-                    }
-                }
             });
+        // The end of Chromium's stderr closes the broker: the process tree
+        // is gone even if the pipe never reports its end (on Windows another
+        // process can inherit the pipe's ends). Weak: the drain thread must
+        // not keep the connection alive.
+        let watched = broker.as_ref().ok().map(Arc::downgrade);
+        let stderr = child.stderr.take().map(|stderr| {
+            StderrTail::drain(stderr, move || {
+                if let Some(broker) = watched.as_ref().and_then(Weak::upgrade) {
+                    broker.close();
+                }
+            })
+        });
+
+        let started = broker.and_then(|broker| match wait_for_browser(&mut child, &broker) {
+            Ok(()) => Ok(broker),
+            Err(failure) => {
+                // Here, before the kill: a pipe thread holding the broker
+                // for a moment would otherwise close it on that thread,
+                // which cannot cancel the other's blocked I/O.
+                broker.close();
+                Err(failure)
+            }
+        });
         match started {
             Ok(broker) => Ok(Self {
                 child: Mutex::new(Some(child)),
@@ -319,9 +276,6 @@ fn wait_for_browser(child: &mut Child, broker: &Broker) -> Result<(), Failure> {
             Ok(Some(status)) => return Err(Failure::Binary(format!("exited early ({status})"))),
             Ok(None) => {}
             Err(e) => return Err(Failure::Fatal(format!("cannot poll process: {e}"))),
-        }
-        if !broker.is_alive() {
-            return Err(pipe_failed(child, "closed its debugging pipe"));
         }
         if Instant::now() >= deadline {
             return Err(Failure::Fatal(format!(

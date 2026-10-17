@@ -5,8 +5,8 @@ use super::view::{BrowserEmit, Frame, InputEvent, Pick, Status, TabInfo, View, V
 use super::*;
 use crate::test_support::eventually;
 use serde_json::{json, Value};
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::io::{self, Read, Write};
+use std::net::{Ipv4Addr, TcpStream};
 use std::time::Duration;
 
 /// Real-browser tests share one lock across modules. Hold it from before
@@ -25,36 +25,42 @@ pub(super) fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Minimal HTTP/1.1 GET against `127.0.0.1:port`; returns the body, read by
-/// its `Content-Length` (Chromium and the fakes ignore `Connection: close`).
+/// Ample time for a proxy connection's peer check (`lsof` may take
+/// seconds).
+pub(super) const PEER_CHECK: Duration = Duration::from_secs(10);
+
+/// Sends `request` to the proxy at `127.0.0.1:port`, then collects the
+/// reply until the proxy closes the connection (it does after every
+/// response), for at most [`PEER_CHECK`] per read: a slow peer check can
+/// hold the first byte back.
+pub(super) fn http_roundtrip(port: u16, request: &[u8]) -> io::Result<Vec<u8>> {
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port))?;
+    stream.set_read_timeout(Some(PEER_CHECK))?;
+    stream.write_all(request)?;
+    let mut got = Vec::new();
+    // What arrived before an error is kept in `got`.
+    let _ = stream.read_to_end(&mut got);
+    Ok(got)
+}
+
+/// The status line and body of a response.
+pub(super) fn split_response(response: &[u8]) -> (String, String) {
+    let text = String::from_utf8_lossy(response);
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let status = head.split("\r\n").next().unwrap_or_default();
+    (status.to_owned(), body.to_owned())
+}
+
+/// `method path` with a loopback Host, through the proxy at `port`: the
+/// status line and body of the response.
+pub(super) fn http_request(port: u16, method: &str, path: &str) -> io::Result<(String, String)> {
+    let head = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    http_roundtrip(port, head.as_bytes()).map(|response| split_response(&response))
+}
+
+/// The body of `GET path` through the proxy at `port`, whatever its status.
 pub(super) fn http_get(port: u16, path: &str) -> io::Result<String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-    )?;
-    let mut reader = BufReader::new(stream);
-    let mut length = 0;
-    loop {
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        let line = line.trim();
-        if line.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                length = value
-                    .trim()
-                    .parse()
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            }
-        }
-    }
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body)?;
-    String::from_utf8(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    http_request(port, "GET", path).map(|(_, body)| body)
 }
 
 /// The Chromium a real-browser test runs, as the app would find it. `None`

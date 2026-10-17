@@ -184,11 +184,12 @@ mod tcp_table {
     #[cfg(windows)]
     mod ffi {
         use std::net::SocketAddr;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
         use std::ptr::{addr_of_mut, null_mut};
         use std::sync::OnceLock;
 
         use windows_sys::Win32::Foundation::{
-            CloseHandle, ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, NO_ERROR,
+            ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE, NO_ERROR,
         };
         use windows_sys::Win32::NetworkManagement::IpHelper::{
             GetExtendedTcpTable, MIB_TCPROW_OWNER_MODULE, TCP_TABLE_OWNER_MODULE_CONNECTIONS,
@@ -232,18 +233,20 @@ mod tcp_table {
                 // Our pid since before the socket existed: ours.
                 return us.created <= bound;
             }
-            // SAFETY: plain-integer arguments; the handle (if any) is owned
-            // by the guard, which closes it.
-            let process = Handle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) });
-            if process.0.is_null() {
+            // SAFETY: plain-integer arguments.
+            let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+            if process.is_null() {
                 return false;
             }
+            // SAFETY: a process handle just opened here and owned by nothing
+            // else; `OwnedHandle` closes it exactly once.
+            let process = unsafe { OwnedHandle::from_raw_handle(process) };
             // Created after the socket: the pid was reused, this process
             // did not create it.
-            if created(process.0).is_none_or(|created| created > bound) {
+            if created(process.as_raw_handle()).is_none_or(|created| created > bound) {
                 return false;
             }
-            let Some(theirs) = UserSid::of(process.0) else {
+            let Some(theirs) = UserSid::of(process.as_raw_handle()) else {
                 return false;
             };
             // SAFETY: both SIDs point into live `TOKEN_USER` buffers: `theirs`
@@ -329,19 +332,6 @@ mod tcp_table {
             }
         }
 
-        /// An owned handle, closed on drop.
-        struct Handle(HANDLE);
-
-        impl Drop for Handle {
-            fn drop(&mut self) {
-                if !self.0.is_null() {
-                    // SAFETY: the handle was opened for this guard and is
-                    // closed exactly once, here.
-                    unsafe { CloseHandle(self.0) };
-                }
-            }
-        }
-
         /// A process's `TOKEN_USER`, in a buffer aligned for it.
         struct UserSid(Vec<usize>);
 
@@ -350,17 +340,27 @@ mod tcp_table {
                 let mut token: HANDLE = null_mut();
                 // SAFETY: `process` is a valid process handle (opened by the
                 // caller, or the current-process pseudo-handle); `token` is a
-                // live `HANDLE` the call writes, owned by the guard below.
+                // live `HANDLE` the call writes, owned by the `OwnedHandle`
+                // below.
                 let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, addr_of_mut!(token)) };
                 if opened == 0 {
                     return None;
                 }
-                let token = Handle(token);
+                // SAFETY: the call succeeded, so `token` is a token handle
+                // just opened here and owned by nothing else; `OwnedHandle`
+                // closes it exactly once.
+                let token = unsafe { OwnedHandle::from_raw_handle(token) };
                 let mut len = 0u32;
                 // SAFETY: a size query: a null buffer of length 0; `len` is a
                 // live `u32` the call writes. Its failure is expected.
                 unsafe {
-                    GetTokenInformation(token.0, TokenUser, null_mut(), 0, addr_of_mut!(len))
+                    GetTokenInformation(
+                        token.as_raw_handle(),
+                        TokenUser,
+                        null_mut(),
+                        0,
+                        addr_of_mut!(len),
+                    )
                 };
                 let words = usize::try_from(len)
                     .ok()?
@@ -374,7 +374,7 @@ mod tcp_table {
                 // live `u32` the call writes.
                 let read = unsafe {
                     GetTokenInformation(
-                        token.0,
+                        token.as_raw_handle(),
                         TokenUser,
                         buf.as_mut_ptr().cast(),
                         len,

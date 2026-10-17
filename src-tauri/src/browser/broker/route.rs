@@ -19,50 +19,15 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
-use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::{json, Value};
+
+use crate::browser::wire::{inner_session, Envelope, Str};
 
 pub type ClientId = u64;
 
 /// A JSON object's members, values kept raw.
 type Members<'t> = BTreeMap<Cow<'t, str>, &'t RawValue>;
-
-/// The top-level fields routing reads; the rest of the message stays raw.
-#[derive(Deserialize)]
-pub struct Head<'a> {
-    #[serde(default)]
-    pub id: Option<u64>,
-    #[serde(rename = "sessionId", borrow, default)]
-    pub session: Option<Cow<'a, str>>,
-    #[serde(borrow, default)]
-    pub method: Option<Cow<'a, str>>,
-    #[serde(borrow, default)]
-    pub params: Option<&'a RawValue>,
-    #[serde(borrow, default)]
-    pub result: Option<&'a RawValue>,
-}
-
-impl<'a> Head<'a> {
-    pub fn parse(text: &'a str) -> Option<Self> {
-        serde_json::from_str(text).ok()
-    }
-}
-
-/// A JSON string, borrowed from the text when it has no escapes.
-#[derive(Deserialize)]
-struct Text<'a>(#[serde(borrow)] Cow<'a, str>);
-
-/// The `sessionId` inside a `params` or `result` object.
-pub fn inner_session(raw: Option<&RawValue>) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Field<'a> {
-        #[serde(rename = "sessionId", borrow, default)]
-        session: Option<Cow<'a, str>>,
-    }
-    let field: Field<'_> = serde_json::from_str(raw?.get()).ok()?;
-    field.session.map(Cow::into_owned)
-}
 
 /// Commands whose reply names a session the sender then owns.
 fn attaches(method: &str) -> bool {
@@ -73,10 +38,10 @@ fn attaches(method: &str) -> bool {
 }
 
 /// Where a message from Chromium goes.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Inbound {
-    /// A reply or event of the broker's own root connection.
-    Root,
+#[derive(Debug)]
+pub enum Inbound<'t> {
+    /// A reply or event of the broker's own root connection, as read.
+    Root(Envelope<'t>),
     /// To `client`: as `rewritten`, or the text unchanged when `None`.
     Deliver {
         client: ClientId,
@@ -159,10 +124,10 @@ impl Routes {
         // `null` addresses the root, as no `sessionId` does.
         let session = match members
             .get("sessionId")
-            .map(|raw| serde_json::from_str::<Option<Text<'_>>>(raw.get()))
+            .map(|raw| serde_json::from_str::<Option<Str<'_>>>(raw.get()))
         {
             None | Some(Ok(None)) => None,
-            Some(Ok(Some(Text(session)))) => Some(session),
+            Some(Ok(Some(Str(session)))) => Some(session),
             Some(Err(_)) => {
                 return Err(error_reply(
                     Some(id),
@@ -191,8 +156,8 @@ impl Routes {
         };
         let attach = members
             .get("method")
-            .and_then(|raw| serde_json::from_str::<Text<'_>>(raw.get()).ok())
-            .is_some_and(|Text(method)| attaches(&method));
+            .and_then(|raw| serde_json::from_str::<Str<'_>>(raw.get()).ok())
+            .is_some_and(|method| attaches(method.as_str()));
         let mut out = String::with_capacity(text.len() + 64);
         // Writing to a `String` cannot fail.
         let _ = write!(out, "{{\"id\":{wire}");
@@ -200,35 +165,26 @@ impl Routes {
             out.push_str(",\"sessionId\":");
             push_json_str(&mut out, root);
         }
-        let skip = if root.is_some() {
-            &["id", "sessionId"][..]
-        } else {
-            &["id"][..]
-        };
-        finish_object(&mut out, &members, skip);
+        finish_object(&mut out, &members, rewritten(root.is_some()));
         self.in_flight.insert(wire, InFlight { client, id, attach });
         Ok(out)
     }
 
     /// Route `text` from Chromium, learning the sessions it creates or ends.
-    pub fn inbound(&mut self, text: &str) -> Inbound {
-        let Some(head) = Head::parse(text) else {
+    pub fn inbound<'t>(&mut self, text: &'t str) -> Inbound<'t> {
+        let Some(head) = Envelope::parse(text) else {
             return Inbound::Drop;
         };
-        if let Some(sent) = head
-            .id
-            .filter(|_| !self.in_flight.is_empty())
-            .and_then(|wire| self.in_flight.remove(&wire))
-        {
+        if let Some(sent) = head.id.and_then(|wire| self.in_flight.remove(&wire)) {
             return self.reply(&sent, &head, text);
         }
-        let Some(session) = head.session.as_deref() else {
-            return Inbound::Root;
+        let Some(session) = head.session() else {
+            return Inbound::Root(head);
         };
         let Some(&client) = self.owners.get(session) else {
             return Inbound::Drop;
         };
-        match head.method.as_deref() {
+        match head.method() {
             Some("Target.attachedToTarget") => {
                 if let Some(child) = inner_session(head.params) {
                     self.owners.insert(child, client);
@@ -251,7 +207,7 @@ impl Routes {
 
     /// The reply to `sent`, for its client: with the client's id, and
     /// without the client's root session.
-    fn reply(&mut self, sent: &InFlight, head: &Head<'_>, text: &str) -> Inbound {
+    fn reply(&mut self, sent: &InFlight, head: &Envelope<'_>, text: &str) -> Inbound<'static> {
         if sent.attach {
             if let Some(child) = inner_session(head.result) {
                 self.owners.insert(child, sent.client);
@@ -261,21 +217,12 @@ impl Routes {
             return Inbound::Drop;
         };
         let strip = head
-            .session
-            .as_deref()
+            .session()
             .is_some_and(|session| self.is_root(sent.client, session));
         let mut out = String::with_capacity(text.len() + 16);
         // Writing to a `String` cannot fail.
         let _ = write!(out, "{{\"id\":{}", sent.id);
-        finish_object(
-            &mut out,
-            &members,
-            if strip {
-                &["id", "sessionId"][..]
-            } else {
-                &["id"][..]
-            },
-        );
+        finish_object(&mut out, &members, rewritten(strip));
         Inbound::Deliver {
             client: sent.client,
             rewritten: Some(out),
@@ -293,6 +240,16 @@ pub fn error_reply(id: Option<u64>, session: Option<&str>, code: i32, message: &
         reply["sessionId"] = Value::from(session);
     }
     reply.to_string()
+}
+
+/// The members a rewritten message has written anew: its `id`, and with
+/// `session` its `sessionId` (put in, or taken out).
+const fn rewritten(session: bool) -> &'static [&'static str] {
+    if session {
+        &["id", "sessionId"]
+    } else {
+        &["id"]
+    }
 }
 
 /// `text` as a JSON string literal, appended to `out`.
@@ -430,9 +387,11 @@ mod tests {
             .0,
             1
         );
-        assert_eq!(
-            routes.inbound(r#"{"id":40,"result":{}}"#),
-            Inbound::Root,
+        assert!(
+            matches!(
+                routes.inbound(r#"{"id":40,"result":{}}"#),
+                Inbound::Root(head) if head.id == Some(40)
+            ),
             "answered once: a later reply with that id is the broker's"
         );
     }
@@ -466,12 +425,14 @@ mod tests {
                 (1, json!({ "id": 2, "sessionId": child, "result": {} }))
             );
             let event = format!(r#"{{"sessionId":"{child}","method":"Page.frameNavigated"}}"#);
-            assert_eq!(
-                routes.inbound(&event),
-                Inbound::Deliver {
-                    client: 1,
-                    rewritten: None
-                },
+            assert!(
+                matches!(
+                    routes.inbound(&event),
+                    Inbound::Deliver {
+                        client: 1,
+                        rewritten: None
+                    }
+                ),
                 "an event passes unchanged"
             );
         }
@@ -516,10 +477,10 @@ mod tests {
         routes.inbound(
             r#"{"sessionId":"R1","method":"Target.detachedFromTarget","params":{"sessionId":"C"}}"#,
         );
-        assert_eq!(
+        assert!(matches!(
             routes.inbound(r#"{"sessionId":"C","method":"x"}"#),
             Inbound::Drop
-        );
+        ));
         routes.inbound(
             r#"{"sessionId":"R2","method":"Target.attachedToTarget","params":{"sessionId":"D"}}"#,
         );
@@ -527,23 +488,25 @@ mod tests {
         assert_eq!(routes.client_of_root("R2"), Some(2));
         assert_eq!(routes.remove_client(2).as_deref(), Some("R2"));
         assert_eq!(routes.client_of_root("R2"), None);
-        assert_eq!(
+        assert!(matches!(
             routes.inbound(r#"{"sessionId":"D","method":"x"}"#),
             Inbound::Drop
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             routes.inbound(r#"{"sessionId":"R2","method":"x"}"#),
             Inbound::Drop
-        );
-        assert_eq!(
-            routes.inbound(r#"{"id":80,"result":{}}"#),
-            Inbound::Root,
+        ));
+        assert!(
+            matches!(routes.inbound(r#"{"id":80,"result":{}}"#), Inbound::Root(_)),
             "a removed client's command is forgotten"
         );
         routes.outbound(1, r#"{"id":1,"method":"m"}"#, 81).unwrap();
         routes.forget(81);
-        assert_eq!(routes.inbound(r#"{"id":81,"result":{}}"#), Inbound::Root);
-        assert_eq!(routes.inbound("not json"), Inbound::Drop);
+        assert!(matches!(
+            routes.inbound(r#"{"id":81,"result":{}}"#),
+            Inbound::Root(_)
+        ));
+        assert!(matches!(routes.inbound("not json"), Inbound::Drop));
     }
 
     #[test]

@@ -380,7 +380,7 @@ fn serve(shared: &Shared, id: u64, mut client: TcpStream) -> io::Result<()> {
         Ok(broker_client) => broker_client,
         Err(e) => return http::respond(&mut client, broker_failure(&broker), &e),
     };
-    let tap = Tap::new(&head, Arc::clone(&shared.on_target));
+    let tap = Tap::new(page, Arc::clone(&shared.on_target));
     let (up_feed, down_feed) = feed::spawn(tap);
     #[cfg(test)]
     let up_feed = up_feed.with_delay_ms(shared.client_push_delay_ms.load(Ordering::Relaxed));

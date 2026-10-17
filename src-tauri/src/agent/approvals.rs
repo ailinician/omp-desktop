@@ -172,19 +172,12 @@ impl AgentBridge {
 mod tests {
     use super::*;
     use crate::agent::inner::BridgeInner;
-    use crate::agent::tests::idle_inner;
+    use crate::agent::tests::{approval_prompt as prompt, idle_inner};
     use crate::test_support::TempDir;
     use serde_json::json;
     use std::path::Path;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
-
-    fn prompt(id: &str, tool: &str) -> Value {
-        json!({
-            "type": "extension_ui_request", "id": id, "method": "select",
-            "title": format!("Allow tool: {tool}\nCommand: ls"), "options": ["Approve", "Deny"],
-        })
-    }
 
     fn pending() -> PendingApprovals {
         PendingApprovals::new(Some(PathBuf::from("/proj")))
