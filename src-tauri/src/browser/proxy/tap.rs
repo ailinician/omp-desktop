@@ -60,17 +60,12 @@ pub(super) struct Tap {
 }
 
 impl Tap {
-    /// For the connection opened by `request_head`; `on_target` is told the
-    /// page the agent worked in.
-    pub(super) fn new(request_head: &[u8], on_target: AgentTarget) -> Self {
-        let page = request_path(request_head)
-            .and_then(|path| path.strip_prefix("/devtools/page/"))
-            .map(|id| id.split(['?', '#']).next().unwrap_or(id))
-            .filter(|id| !id.is_empty())
-            .map(str::to_owned);
+    /// For a connection to `page` (`None`: a browser-level one);
+    /// `on_target` is told the page the agent worked in.
+    pub(super) fn new(page: Option<&str>, on_target: AgentTarget) -> Self {
         Self {
             on_target,
-            page,
+            page: page.map(str::to_owned),
             sessions: HashMap::new(),
             pending: Pending::default(),
         }
@@ -82,9 +77,9 @@ impl Tap {
     pub(super) fn on_message(
         &mut self,
         direction: Direction,
-        message: &[u8],
+        message: &str,
     ) -> Result<(), &'static str> {
-        let Ok(message) = serde_json::from_slice::<Envelope>(message) else {
+        let Ok(message) = serde_json::from_str::<Envelope>(message) else {
             return Ok(());
         };
         match direction {
@@ -219,12 +214,6 @@ struct TargetInfo<'a> {
     kind: Option<Str<'a>>,
 }
 
-/// The request target of a request head's first line.
-fn request_path(head: &[u8]) -> Option<&str> {
-    let line = head.split(|&b| b == b'\n').next()?;
-    std::str::from_utf8(line).ok()?.split_whitespace().nth(1)
-}
-
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
@@ -235,21 +224,22 @@ mod tests {
     use super::super::tests::Reported;
     use super::{Str, Tap, TargetInfo};
 
-    const BROWSER: &[u8] = b"GET /devtools/browser/x HTTP/1.1\r\nHost: h\r\n\r\n";
+    /// A browser-level connection: no page of its own.
+    const BROWSER: Option<&str> = None;
 
-    /// A tap on a connection to `request`.
-    fn tap_on(request: &[u8]) -> (Tap, Reported) {
+    /// A tap on a connection to `page`.
+    fn tap_on(page: Option<&str>) -> (Tap, Reported) {
         let reported = Reported::default();
-        (Tap::new(request, reported.callback()), reported)
+        (Tap::new(page, reported.callback()), reported)
     }
 
     fn command(tap: &mut Tap, message: &Value) {
-        let fed = tap.on_message(Direction::Client, message.to_string().as_bytes());
+        let fed = tap.on_message(Direction::Client, &message.to_string());
         assert_eq!(fed, Ok(()));
     }
 
     fn server(tap: &mut Tap, message: &Value) -> Result<(), &'static str> {
-        tap.on_message(Direction::Server, message.to_string().as_bytes())
+        tap.on_message(Direction::Server, &message.to_string())
     }
 
     fn attached(tap: &mut Tap, session: &str, target: &str, kind: &str) {
@@ -407,7 +397,7 @@ mod tests {
     #[test]
     fn a_page_level_connection_works_in_its_own_page() {
         let bring = json!({ "id": 1, "method": "Page.bringToFront", "params": {} });
-        let (mut tap, seen) = tap_on(b"GET /devtools/page/B7?x=1 HTTP/1.1\r\n\r\n");
+        let (mut tap, seen) = tap_on(Some("B7"));
         command(&mut tap, &bring);
         assert_eq!(seen.all(), ["B7"]);
         let (mut browser, seen) = tap_on(BROWSER);
@@ -421,8 +411,8 @@ mod tests {
     #[test]
     fn messages_that_are_not_json_are_ignored() {
         let (mut tap, seen) = tap_on(BROWSER);
-        assert_eq!(tap.on_message(Direction::Client, b"{not json"), Ok(()));
-        assert_eq!(tap.on_message(Direction::Server, b"\xff\xfe"), Ok(()));
+        assert_eq!(tap.on_message(Direction::Client, "{not json"), Ok(()));
+        assert_eq!(tap.on_message(Direction::Server, "[1,"), Ok(()));
         attached(&mut tap, "s1", "T1", "page");
         command(&mut tap, &in_session(1, "Page.navigate", "s1"));
         assert_eq!(seen.all(), ["T1"]);

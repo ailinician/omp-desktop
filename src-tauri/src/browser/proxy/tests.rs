@@ -21,7 +21,9 @@ use super::{AgentTarget, Ensure, Proxy, MAX_CONNECTIONS, MAX_UNVETTED};
 use crate::browser::broker::fake::fake_browser;
 use crate::browser::broker::Broker;
 use crate::browser::lock;
-use crate::browser::tests::{cdp_error, cdp_result, http_get};
+use crate::browser::tests::{
+    cdp_error, cdp_result, http_get, http_request, http_roundtrip, split_response, PEER_CHECK,
+};
 use crate::test_support::eventually;
 
 /// The targets a tap reported.
@@ -94,21 +96,15 @@ fn upgrade(path: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n\r\n")
 }
 
-/// Sends `request`, then collects the reply until the proxy closes the
-/// connection (it does after every response), for at most 10 s per read: a
-/// slow peer check (`lsof` on macOS) can hold the first byte back.
+/// [`http_roundtrip`], which must reach the proxy.
 fn raw_roundtrip(port: u16, request: &[u8]) -> Vec<u8> {
-    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-    stream.set_read_timeout(Some(PEER_CHECK)).unwrap();
-    stream.write_all(request).unwrap();
-    let mut got = Vec::new();
-    // What arrived before an error is kept in `got`.
-    let _ = stream.read_to_end(&mut got);
-    got
+    http_roundtrip(port, request).unwrap()
 }
 
-/// Ample time for a connection's peer check (`lsof` may take seconds).
-const PEER_CHECK: Duration = Duration::from_secs(10);
+/// [`http_request`], which must reach the proxy.
+fn request(port: u16, method: &str, path: &str) -> (String, String) {
+    http_request(port, method, path).unwrap()
+}
 
 /// The ids of the connections waiting for their head, oldest first.
 fn unvetted_ids(proxy: &Proxy) -> Vec<u64> {
@@ -128,20 +124,6 @@ fn idle_socket(proxy: &Proxy) -> TcpStream {
     });
     assert!(waiting.is_some(), "the idle socket waits for its head");
     socket
-}
-
-/// The status line and body of a response.
-fn split_response(response: &[u8]) -> (String, String) {
-    let text = String::from_utf8_lossy(response);
-    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
-    let status = head.split("\r\n").next().unwrap_or_default();
-    (status.to_owned(), body.to_owned())
-}
-
-/// `method path` with a loopback Host: its status line and body.
-fn request(port: u16, method: &str, path: &str) -> (String, String) {
-    let head = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
-    split_response(&raw_roundtrip(port, head.as_bytes()))
 }
 
 /// Whether the proxy closed `stream` (an EOF or a reset) before its read
@@ -849,7 +831,8 @@ fn two_agents_are_isolated() {
 fn a_page_socket_works_in_its_page() {
     let reported = Reported::default();
     let proxy = serving(fake_browser(chromium), reported.callback());
-    let mut ws = agent_socket(&proxy, "/devtools/page/P1");
+    // The page is the path's, without the query.
+    let mut ws = agent_socket(&proxy, "/devtools/page/P1?x=1");
     send(
         &mut ws,
         &json!({ "id": 1, "method": "Page.bringToFront", "params": {} }),
