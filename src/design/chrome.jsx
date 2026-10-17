@@ -88,6 +88,20 @@ function WindowChrome({
 }
 
 // ── Project tabs ─────────────────────────────────────────────────────
+// A tab's click props: select on click, close on middle-click, as in
+// browsers (#24). WebKit before Safari 18.2 / WebKitGTK 2.46 has no
+// `auxclick` and reports it as a `click` with button 1, hence the check in
+// onClick too; newer engines never send `click` for button 1, so this
+// can't double-fire. Swallowing the middle-button mousedown stops Windows
+// autoscroll and Linux primary-selection paste from firing on the tab.
+function tabClickProps(onSelect, onClose) {
+  return {
+    onClick: e => (e.button === 1 ? onClose?.() : onSelect?.()),
+    onMouseDown: e => { if (e.button === 1) e.preventDefault(); },
+    onAuxClick: e => { if (e.button === 1) { e.preventDefault(); onClose?.(); } },
+  };
+}
+
 function TabBar({
   projects, activeId, onSelect, onClose, onRename, onNew, onHistory, onNewInProject, onReorder,
   sidebarOpen, onToggleSidebar,
@@ -137,15 +151,7 @@ function TabBar({
           <div key={p.id}
             {...reorder.itemProps("projects", group.key, "x")}
             className={`tab ${active ? "active" : ""}${reorder.dropClass("projects", group.key)}`}
-            // Middle-click closes, as in browsers (#24). WebKit before
-            // Safari 18.2 / WebKitGTK 2.46 has no `auxclick` and reports it as
-            // a `click` with button 1, hence the check here too; newer engines
-            // never send `click` for button 1, so this can't double-fire.
-            // Swallowing the middle-button mousedown stops Windows autoscroll
-            // and Linux primary-selection paste from firing on the tab.
-            onClick={e => (e.button === 1 ? onClose?.(p.id) : onSelect(p.id))}
-            onMouseDown={e => { if (e.button === 1) e.preventDefault(); }}
-            onAuxClick={e => { if (e.button === 1) { e.preventDefault(); onClose?.(p.id); } }}
+            {...tabClickProps(() => onSelect(p.id), () => onClose?.(p.id))}
             // The first click of the pair already selected the tab.
             onDoubleClick={e => { if (onRename && !e.target.closest(".tab-close")) setRenaming(p.id); }}>
             <span className="tab-bar-mark" style={{ background: active ? p.color : "transparent" }} />
@@ -170,9 +176,7 @@ function TabBar({
       {settings?.open && (
         <div className={`tab app-tab ${settings.active ? "active" : ""}`}
           title={`settings (${hintFor("desktop.settings.open", "Ctrl+,")})`}
-          onClick={e => (e.button === 1 ? onCloseSettings?.() : onSelectSettings?.())}
-          onMouseDown={e => { if (e.button === 1) e.preventDefault(); }}
-          onAuxClick={e => { if (e.button === 1) { e.preventDefault(); onCloseSettings?.(); } }}>
+          {...tabClickProps(onSelectSettings, onCloseSettings)}>
           <span className="tab-bar-mark" style={{ background: settings.active ? "var(--fg-3)" : "transparent" }} />
           <Icon name="cog" size={12} />
           <span className="tab-name">Settings</span>

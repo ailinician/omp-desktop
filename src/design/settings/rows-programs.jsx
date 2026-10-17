@@ -30,14 +30,13 @@ const _SRP_CHROMIUM = {
   pick: (bridge) => bridge.browserPickPath(),
 };
 
-function _SRP_Shell({ ctx, query }) {
+function _SRP_Shell({ row, ctx, query }) {
   const { SettingsRow: Row, PathPicker, usePathSetting } = window;
   const { settings, error, save, pick } = usePathSetting(ctx.bridge, _SRP_SHELL);
   const { label, rows } = window.OMP_TERMINAL.shellMenu(settings);
-  const fallback = settings?.defaultShell ? ` (\`${settings.defaultShell}\`)` : "";
+  const fallback = settings?.defaultShell ? ` Here: \`${settings.defaultShell}\`.` : "";
   return (
-    <Row label="Shell" query={query}
-      desc={`What new terminals run. Running ones keep their shell. Default runs your default shell${fallback}.`}
+    <Row label={row.label} query={query} desc={`${row.desc}${fallback}`}
       resettable={!!settings?.shell} onReset={() => save("")}>
       <PathPicker name="shell" label={label} rows={rows} disabled={!settings} error={error}
         title={settings ? (settings.shell || `default: ${settings.defaultShell}`) : undefined}
@@ -47,10 +46,10 @@ function _SRP_Shell({ ctx, query }) {
 }
 
 // `modified` / `onReset` come from the page (the schema row's `terminalHeight` key).
-function _SRP_TerminalHeight({ ctx, query, modified, onReset }) {
+function _SRP_TerminalHeight({ row, ctx, query, modified, onReset }) {
   const Row = window.SettingsRow;
   return (
-    <Row label="Height" desc="Shared by all tabs. Drag the panel's top edge to change it." query={query}
+    <Row label={row.label} desc={row.desc} query={query}
       modified={modified} onReset={onReset}>
       <span className="st-ro">{ctx.terminalHeight} px</span>
     </Row>
@@ -64,13 +63,12 @@ function _SRP_chromiumTitle(settings) {
   return settings.automatic ? `automatic: ${settings.automatic}` : "automatic: no Chromium-based browser found";
 }
 
-function _SRP_Chromium({ ctx, query }) {
+function _SRP_Chromium({ row, ctx, query }) {
   const { SettingsRow: Row, PathPicker, usePathSetting } = window;
   const { settings, error, save, pick } = usePathSetting(ctx.bridge, _SRP_CHROMIUM);
   const { label, rows } = window.OMP_BROWSER.pathMenu(settings);
   return (
-    <Row label="Browser" query={query}
-      desc="Which Chromium the panel runs; panels started afterwards use it. `automatic` finds one installed on this PC."
+    <Row label={row.label} desc={row.desc} query={query}
       resettable={!!settings?.path} onReset={() => save("")}>
       <PathPicker name="chromium" label={label} title={_SRP_chromiumTitle(settings)} rows={rows}
         disabled={!settings} error={error ?? settings?.error ?? null} save={save} pick={pick} />

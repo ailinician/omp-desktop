@@ -10,33 +10,26 @@
    The row frame and controls are settings/controls.jsx's.
    ═════════════════════════════════════════════════════════════════════ */
 
-// The column-width tweaks in display order; 0 = the column's default.
-const _SRL_WIDTHS = [
-  { name: "sidebar", key: "sidebarWidth" },
-  { name: "rail", key: "railWidth" },
-  { name: "tree", key: "treeWidth" },
-  { name: "split", key: "splitWidth" },
-  // 0 = half the stage (OMP_BROWSER.clampWidth).
-  { name: "browser", key: "browserWidth", fallback: "½ stage" },
-];
+// What a column-width tweak of 0 shows; 0 = the column's default, for the
+// browser half the stage (OMP_BROWSER.clampWidth).
+const _SRL_WIDTH_DEFAULT = { browserWidth: "½ stage" };
 
-// `modified` / `onReset` come from the page (the schema row's width `keys`).
+// The schema row's `keys` are the width tweaks, in display order;
+// `modified` / `onReset` come from the page.
 function _SRL_Widths({ row, ctx, query, modified, onReset }) {
   const { SettingsRow: Row, SettingsButton: Button } = window;
   const { t } = ctx;
   return (
-    <Row stack label={row.label ?? "Column widths"}
-      desc={row.desc ?? "Drag a column edge to resize it, double-click the edge to reset one."}
-      query={query} modified={modified} onReset={onReset}
+    <Row stack label={row.label} desc={row.desc} query={query} modified={modified} onReset={onReset}
       aside={<Button onClick={ctx.panes.reset} disabled={!modified}>Reset all widths</Button>}>
       <div className="st-widths">
-        {_SRL_WIDTHS.map(w => {
-          const px = t[w.key] ?? 0;
+        {row.keys.map(key => {
+          const px = t[key] ?? 0;
           return (
-            <div key={w.key} className="st-width">
-              <small>{w.name}</small>
+            <div key={key} className="st-width">
+              <small>{key.replace(/Width$/, "")}</small>
               <b>
-                {px > 0 ? <>{Math.round(px)}<i> px</i></> : <span className="st-width-def">{w.fallback ?? "default"}</span>}
+                {px > 0 ? <>{Math.round(px)}<i> px</i></> : <span className="st-width-def">{_SRL_WIDTH_DEFAULT[key] ?? "default"}</span>}
                 {px > 0 && <span className="st-moddot" title="Changed from default" />}
               </b>
             </div>
@@ -58,7 +51,7 @@ function _SRL_Switch({ tweak, label, desc, ctx, query }) {
   );
 }
 
-function _SRL_Widgets({ ctx, query }) {
+function _SRL_Widgets({ row, ctx, query }) {
   const { SettingsRow: Row, SettingsButton: Button, Icon } = window;
   const { widgets } = ctx;
   return (
@@ -71,8 +64,7 @@ function _SRL_Widgets({ ctx, query }) {
         <_SRL_Switch key={r.tweak} tweak={r.tweak} label={r.label} ctx={ctx} query={query}
           desc="A widget an omp extension shows in this rail." />
       ))}
-      <Row stack label="Plugin config" query={query}
-        desc="Plugins and their triggers. A changed script asks for approval again before it runs."
+      <Row stack label={row.label} desc={row.desc} query={query}
         aside={(
           <Button onClick={widgets.reload}>
             <Icon name="refresh" size={11} />Reload widgets

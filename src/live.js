@@ -2871,6 +2871,7 @@
   function _sendToAll(cmd) {
     if (!window.__TAURI__) return;
     const json = JSON.stringify(cmd);
+    // A warning, not `_invokeSafe`'s error: a tab missing it is expected.
     for (const sessionId of sessionRegistry.keys()) {
       window.__TAURI__.core.invoke("send_command", { sessionId, json })
         .catch(e => console.warn(`[live] ${cmd.type} for '${sessionId}' not sent:`, e));
@@ -4340,6 +4341,7 @@
      *  then) and `autoName` at each auto-title check, so neither sends
      *  anything here. */
     setSessionPrefs(values) {
+      // fromTweaks keeps only PREFS.KEYS, so the whole tweaks object may come in.
       const next = PREFS.fromTweaks({ ...sessionPrefs, ...values }, window.TWEAK_DEFAULTS);
       const changed = PREFS.changedKeys(sessionPrefs, next);
       if (changed.length === 0) return;

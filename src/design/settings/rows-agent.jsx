@@ -15,7 +15,7 @@ function _SRA_profileName(ctx, id) {
   return ctx.profiles.find(p => p.id === id)?.name ?? id;
 }
 
-function _SRA_StartupProfile({ ctx, query }) {
+function _SRA_StartupProfile({ row, ctx, query }) {
   const { SettingsRow: Row, PathPicker, DEFAULT_PROFILE_ID } = window;
   const [error, setError] = React.useState(null);
   const current = ctx.startupProfileId;
@@ -32,8 +32,7 @@ function _SRA_StartupProfile({ ctx, query }) {
     if (!res?.ok) setError(res?.error ?? "the profile could not be saved");
   };
   return (
-    <Row label="Startup profile" query={query}
-      desc="The profile of the tab opened at launch and of new tabs. Profiles are created and renamed from the profile menu."
+    <Row label={row.label} desc={row.desc} query={query}
       resettable={current !== DEFAULT_PROFILE_ID} onReset={() => save(DEFAULT_PROFILE_ID)}>
       <PathPicker name="startup profile" label={_SRA_profileName(ctx, current)} title={current}
         rows={rows} disabled={rows.length === 0} error={error} save={save} />
@@ -41,7 +40,7 @@ function _SRA_StartupProfile({ ctx, query }) {
   );
 }
 
-function _SRA_GoalContinue({ ctx, query }) {
+function _SRA_GoalContinue({ row, ctx, query }) {
   const { SettingsRow: Row, SettingsToggle: Toggle } = window;
   const profileId = ctx.goal?.profileId ?? null;
   const cont = window.useGoalContinuation(ctx.bridge, profileId, true);
@@ -49,14 +48,13 @@ function _SRA_GoalContinue({ ctx, query }) {
   const scope = name ? ` Applies to profile “${name}” (omp's config); its running tabs pick it up without a restart.` : "";
   let control;
   if (cont.value !== null) {
-    control = <Toggle value={cont.value} label="Keep working on a goal" onChange={v => { if (!cont.busy) cont.set(v); }} />;
+    control = <Toggle value={cont.value} label={row.label} onChange={v => { if (!cont.busy) cont.set(v); }} />;
   } else {
     control = <span className="st-ro">{cont.error ? "unavailable" : "reading…"}</span>;
   }
   return (
     <>
-      <Row label="Keep working on a goal" query={query}
-        desc={`omp continues an active goal on its own after each turn instead of waiting for you. Costs tokens while unattended.${scope}`}>
+      <Row label={row.label} query={query} desc={`${row.desc}${scope}`}>
         {control}
       </Row>
       {cont.error && <div className="st-row-error">{cont.error}</div>}

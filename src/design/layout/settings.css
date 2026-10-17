@@ -135,7 +135,6 @@
 }
 .st-seg button:hover { color: var(--fg); }
 .st-seg button[aria-checked="true"] { background: var(--bg-active); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line-bright); }
-.st-seg button.warn[aria-checked="true"] { color: var(--rose); }
 .st-seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .st-tgl {
@@ -183,12 +182,6 @@
   font-family: var(--font-mono); font-size: var(--d-text-xs); color: var(--fg-3);
   overflow-wrap: anywhere; user-select: text;
 }
-.st-modeblurb {
-  padding: 10px 12px; border-radius: 8px;
-  border: 1px solid var(--line); background: var(--bg-input);
-  color: var(--fg-3); font-size: var(--d-text-sm); line-height: 1.5;
-}
-.st-modeblurb.warn { border-color: color-mix(in oklab, var(--rose) 45%, transparent); color: var(--fg-2); }
 
 /* Theme cards: `.theme-<id>` on each card scopes that theme's tokens. */
 .st-themes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }

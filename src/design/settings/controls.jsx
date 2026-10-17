@@ -72,13 +72,13 @@ function SettingsToggle({ value, onChange, label }) {
   );
 }
 
-/** Segmented choice; `options` [{ value, label, warn? }]. */
+/** Segmented choice; `options` [{ value, label }]. */
 function SettingsSeg({ value, options, onChange, label }) {
   return (
     <div className="st-seg" role="radiogroup" aria-label={label}>
       {options.map(o => (
         <button type="button" key={String(o.value)} role="radio" aria-checked={o.value === value}
-          className={o.warn ? "warn" : undefined} onClick={() => onChange(o.value)}>
+          onClick={() => onChange(o.value)}>
           {o.label}
         </button>
       ))}
@@ -135,14 +135,14 @@ function ThemeCards({ value, themes, onChange }) {
 
 /** Accent: the theme's own (pill) or one of the swatches. */
 function AccentSwatches({ value, themeAccent, colors, onChange }) {
-  const cur = String(value ?? "").toLowerCase();
-  const own = themeAccent.toLowerCase();
+  const { sameColor } = window.OMP_ACCENT;
+  const own = sameColor(value, themeAccent);
   return (
     <div className="st-sw" role="radiogroup" aria-label="Accent">
-      <button type="button" className="st-sw-theme" role="radio" aria-checked={cur === own}
+      <button type="button" className="st-sw-theme" role="radio" aria-checked={own}
         onClick={() => onChange(themeAccent)}>theme</button>
       {colors.map(c => (
-        <button type="button" key={c} role="radio" aria-checked={cur === c.toLowerCase() && cur !== own}
+        <button type="button" key={c} role="radio" aria-checked={!own && sameColor(value, c)}
           aria-label={c} title={c} style={{ background: c }} onClick={() => onChange(c)} />
       ))}
     </div>

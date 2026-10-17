@@ -153,13 +153,9 @@ function App() {
   React.useEffect(() => {
     bridge?.setPromptHistoryLimit(t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT);
   }, [bridge, t.promptHistoryLimit]);
-  // Behaviours live.js owns (app/session-prefs.js); sent again on change.
-  React.useEffect(() => {
-    bridge?.setSessionPrefs({
-      restoreTabs: t.restoreTabs, confirmBusyClose: t.confirmBusyClose, autoName: t.autoName,
-      autoCompaction: t.autoCompaction, autoRetry: t.autoRetry,
-    });
-  }, [bridge, t.restoreTabs, t.confirmBusyClose, t.autoName, t.autoCompaction, t.autoRetry]);
+  // Behaviours live.js owns (app/session-prefs.js): it takes its keys from
+  // the tweaks and acts only on a changed one.
+  React.useEffect(() => { bridge?.setSessionPrefs(t); }, [bridge, t]);
   // Refuse a file or link drop no handler took (`refusesStrayDrop`), so the
   // webview never navigates to it now that Tauri's native file drop is off
   // (#50). The composer's handlers run first and accept their own drops.
@@ -736,6 +732,8 @@ function App() {
   // Returns {ok, error}; the backend re-validates the id under its lock, so
   // the menu renders a refusal inline rather than assuming success.
   const handleSetStartupProfile = React.useCallback(id => bridge?.setStartupProfile(id), [bridge]);
+  // Stable: the dialog's key listener re-subscribes on a new handler.
+  const handleCloseAnswer = React.useCallback(ok => bridge?.resolveCloseConfirm(ok), [bridge]);
 
   const showRail  = t.layout !== "focus";
   const showSplit = subagentUi.paneOpen;
@@ -778,12 +776,16 @@ function App() {
     section: stab.section,
     setSection: id => setStab(s => window.OMP_SETTINGS_TAB.setSection(s, id)),
   } : null;
+  // Dropped once the tab closes: the ctx's closures hold that render's scope.
   const settingsLastCtx = React.useRef(null);
-  if (settingsLiveCtx) settingsLastCtx.current = settingsLiveCtx;
+  settingsLastCtx.current = stab.open ? settingsLiveCtx ?? settingsLastCtx.current : null;
   const settingsIdleCtx = React.useMemo(
-    () => (settingsLastCtx.current ? { ...settingsLastCtx.current, active: false } : null),
+    () => (stab.open && settingsLastCtx.current ? { ...settingsLastCtx.current, active: false } : null),
     [stab.open, stab.active]);
-  const settingsCtx = settingsLiveCtx ?? (stab.open ? settingsIdleCtx : null);
+  const settingsCtx = settingsLiveCtx ?? settingsIdleCtx;
+  const settingsChanged = React.useMemo(
+    () => (stab.open ? window.OMP_SETTINGS.modifiedCount("all", t, settingsKeyOpts) : 0),
+    [stab.open, t, settingsKeyOpts]);
 
   // Chat links: project files to the preview, localhost to the browser panel.
   return (
@@ -820,7 +822,7 @@ function App() {
             updateVersion={updater.pillVersion}
             onUpdate={updater.openModal}
             onCheckUpdate={updater.check}
-            settings={{ open: stab.open, active: stab.active, changed: window.OMP_SETTINGS.modifiedCount("all", t, settingsKeyOpts) }}
+            settings={{ open: stab.open, active: stab.active, changed: settingsChanged }}
             onSelectSettings={() => openSettings()}
             onCloseSettings={closeSettings}
           />
@@ -1089,7 +1091,7 @@ function App() {
       )}
 
       {closeConfirm && (
-        <ConfirmCloseDialog confirm={closeConfirm} onAnswer={ok => bridge?.resolveCloseConfirm(ok)} />
+        <ConfirmCloseDialog confirm={closeConfirm} onAnswer={handleCloseAnswer} />
       )}
     </_AL_MdLinkCtx.Provider>
   );

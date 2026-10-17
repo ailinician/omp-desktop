@@ -20,7 +20,7 @@ const {
   SettingsSlider: _SP_Slider, ThemeCards: _SP_ThemeCards, AccentSwatches: _SP_Swatches, SettingsStrip: _SP_Strip,
 } = window;
 
-const _SP_IS_MAC = typeof navigator !== "undefined" && /Mac/.test(navigator.platform);
+const _SP_IS_MAC = window.OMP_KEYMAP?.detectMac?.() ?? false;
 const _SP_FIELD = "input, textarea, select, [contenteditable='true'], [role='slider']";
 
 function _SP_TweakRow({ row, ctx, query }) {
@@ -103,11 +103,13 @@ function SettingsPage({ ctx }) {
   const section = sections[idx];
   const q = query.trim();
   const hits = React.useMemo(() => S.search(q, t), [S, q, t]);
-  const counts = q ? hits.bySection : Object.fromEntries(sections.map(s => [s.id, S.modifiedCount(s.id, t, ctx.keyOpts)]));
+  const counts = React.useMemo(
+    () => (q ? hits.bySection : Object.fromEntries(sections.map(s => [s.id, S.modifiedCount(s.id, t, ctx.keyOpts)]))),
+    [S, q, hits, sections, t, ctx.keyOpts]);
   // While searching, the footer resets the matched rows only.
-  const resetEdits = q
+  const resetEdits = React.useMemo(() => (q
     ? S.resetRows(hits.groups.flatMap(g => g.rows), t, ctx.keyOpts)
-    : S.resetEdits(section.id, t, ctx.keyOpts);
+    : S.resetEdits(section.id, t, ctx.keyOpts)), [S, q, hits, section.id, t, ctx.keyOpts]);
   const canReset = Object.keys(resetEdits).length > 0;
 
   const closeHint = window.OMP_KEYMAP ? window.OMP_KEYMAP.hintFor("desktop.tab.close") : "Ctrl+W";
@@ -223,4 +225,6 @@ function SettingsPage({ ctx }) {
   );
 }
 
-window.SettingsPage = SettingsPage;
+// Memo: behind a project tab the page keeps one ctx, so streaming frames
+// skip it.
+window.SettingsPage = React.memo(SettingsPage);

@@ -14,18 +14,17 @@ function _SRAp_project(ctx) {
   return ctx.activeProject?.id ? ctx.activeProject : null;
 }
 
-function _SRAp_Mode({ ctx, query }) {
+function _SRAp_Mode({ row, ctx, query }) {
   const { SettingsRow: Row, ApprovalModeSection } = window;
   return (
-    <Row stack label="Tool approval mode" query={query}
-      desc="When the agent asks before it runs a tool: a default for every project, and projects that override it. A change restarts omp in the affected open tabs; conversations continue.">
+    <Row stack label={row.label} desc={row.desc} query={query}>
       <ApprovalModeSection view={ctx.approvalModes} activeProject={_SRAp_project(ctx)}
         sessions={ctx.sessions} query={query} />
     </Row>
   );
 }
 
-function _SRAp_Rules({ ctx, query }) {
+function _SRAp_Rules({ row, ctx, query }) {
   const { SettingsRow: Row, SettingsButton: Button, Icon } = window;
   const project = _SRAp_project(ctx);
   const [count, setCount] = React.useState(null);
@@ -40,8 +39,7 @@ function _SRAp_Rules({ ctx, query }) {
     lead = `${count === 0 ? "No" : count} standing rule${count === 1 ? "" : "s"} for this tab's session and project.`;
   }
   return (
-    <Row label="Always-allow rules" query={query} className="st-linkrow"
-      desc={`${lead} Rules are only granted from a prompt; here you review and revoke them.`}>
+    <Row label={row.label} query={query} className="st-linkrow" desc={`${lead} ${row.desc}`}>
       <Button accent onClick={ctx.openApprovals}>
         Manage rules <Icon name="external" size={11} />
       </Button>

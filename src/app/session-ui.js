@@ -234,6 +234,7 @@
     entryOf, updateEntry, pruneEntries, seedEntries,
     PLAN_IDLE, togglePlan, enterPlan, approvePlan, annotatePlan, markPlanSent,
     DRAFT_IDLE, recallInDraft,
+    PASTE_LINES_MIN, PASTE_LINES_MAX,
     normalizePaste, shouldCollapsePaste, collapsePaste, pastesIn, expandPastes, inlinePaste,
   };
 })();

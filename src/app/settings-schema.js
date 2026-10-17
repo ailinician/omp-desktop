@@ -13,10 +13,11 @@
 //     reset; Rust-backed rows (shell, chromium, profiles, approvals,
 //     keybindings) own none and never count.
 // `desc` is schema-authored text; `backtick` segments render as code.
-// Bounds of collapseAfter / promptHistoryLimit and the fold modes come from
-// OMP_COLLAPSE / OMP_PROMPT_HISTORY, read late (getters), so load order
-// among the plain app/*.js modules does not matter. TWEAK_DEFAULTS is read
-// late too.
+// Bounds of collapseAfter / promptHistoryLimit / pasteCollapseLines and the
+// fold modes come from OMP_COLLAPSE / OMP_PROMPT_HISTORY / OMP_SESSION_UI,
+// read late (getters), as are OMP_ACCENT (accent comparison), OMP_KEYMAP
+// (shortcut keywords) and TWEAK_DEFAULTS, so load order among the plain
+// app/*.js modules does not matter.
 (function () {
   const THEMES = Object.freeze([
     { id: "aurora", tone: "dark", accent: "#8AF0C8" },
@@ -30,6 +31,7 @@
   const defaults = () => window.TWEAK_DEFAULTS ?? {};
   const collapse = () => window.OMP_COLLAPSE;
   const history = () => window.OMP_PROMPT_HISTORY;
+  const sessionUi = () => window.OMP_SESSION_UI;
   const opts = (values, labels = {}) => values.map(v => ({ value: v, label: labels[v] ?? String(v) }));
   const foldOptions = () => opts(collapse()?.MODES ?? ["auto", "open", "folded"]);
 
@@ -71,6 +73,11 @@
           { fold: "tool", get options() { return foldOptions(); } }),
         tweak("collapseAfter", "slider", "Collapse after", "With `auto`: how many newer turns before an entry folds.", "auto fold", {
           step: 1, unit: " newer",
+          // Only matters while a fold mode is auto.
+          visibleIf: (values) => {
+            const m = collapse()?.foldModes(values) ?? { thinking: values?.foldThinking ?? "auto", tool: values?.foldTools ?? "auto" };
+            return m.thinking === "auto" || m.tool === "auto";
+          },
           get min() { return collapse()?.MIN_AFTER ?? 1; },
           get max() { return collapse()?.MAX_AFTER ?? 30; },
         }),
@@ -86,7 +93,9 @@
       ] },
       { name: "Pasting", rows: [
         tweak("pasteCollapseLines", "slider", "Collapse pastes longer than", "A longer paste shows as a `[paste #1 +40 lines]` chip; the agent still gets the full text.", "paste chip",
-          { min: 2, max: 50, step: 1, unit: " lines" }),
+          { step: 1, unit: " lines",
+            get min() { return sessionUi()?.PASTE_LINES_MIN ?? 2; },
+            get max() { return sessionUi()?.PASTE_LINES_MAX ?? 50; } }),
       ] },
       { name: "History", rows: [
         tweak("promptHistoryLimit", "slider", "Prompt history", "How many of your prompts `↑` in the composer can recall, per tab.", "recall up arrow", {
@@ -110,7 +119,7 @@
     ] },
     { id: "terminal", icon: "terminal", title: "Terminal", blurb: "The shell panel under the chat. Each tab has its own shell, started in the tab's project folder.", groups: [
       { name: "Shell", src: "terminal.json", rows: [
-        custom("shell", "Shell", "What new terminals run. Running ones keep their shell. Empty runs your default shell.", "powershell pwsh bash cmd"),
+        custom("shell", "Shell", "What new terminals run. Running ones keep their shell. `default` runs your default shell.", "powershell pwsh bash cmd"),
       ] },
       { name: "Panel", rows: [
         tweak("terminalAutoOpen", "toggle", "Open with new tab", "Show the terminal panel when a tab opens.", "auto"),
@@ -121,7 +130,7 @@
     ] },
     { id: "browser", icon: "web", title: "Browser", blurb: "The Chromium panel the agent and you share in each tab.", groups: [
       { name: "Chromium", src: "browser.json", rows: [
-        custom("chromium", "Browser", "Which Chromium the panel runs. Empty finds one installed on this PC.", "chrome edge chromium"),
+        custom("chromium", "Browser", "Which Chromium the panel runs; panels started afterwards use it. `automatic` finds one installed on this PC.", "chrome edge chromium"),
       ] },
       { name: "Links", rows: [
         tweak("browserLocalhostInPanel", "toggle", "Open localhost links in the panel", "A click on a `localhost` link in the chat opens it here instead of your system browser.", "dev server url"),
@@ -152,10 +161,10 @@
     ] },
     { id: "approvals", icon: "check", title: "Approvals", sep: true, blurb: "When the agent asks before it runs a tool.", groups: [
       { name: "Approval mode", src: "approval-mode.json", rows: [
-        custom("approvalMode", "Tool approval mode", "A change restarts omp in the affected open tabs; conversations continue.", "yolo write always ask permission project override default"),
+        custom("approvalMode", "Tool approval mode", "When the agent asks before it runs a tool: a default for every project, and projects that override it. A change restarts omp in the affected open tabs; conversations continue.", "yolo write always ask permission project override default"),
       ] },
       { name: "Standing rules", rows: [
-        custom("approvalRules", "Always-allow rules", "Rules saved from “Always allow” answers. Rules are only granted from a prompt; here you review and revoke them.", "rules allow revoke"),
+        custom("approvalRules", "Always-allow rules", "Rules are only granted from a prompt; here you review and revoke them.", "rules always allow revoke saved answers"),
       ] },
     ] },
     { id: "shortcuts", icon: "command", title: "Shortcuts", blurb: "Every app action and its chords. A change to one of omp's own bindings is saved as a desktop override.", groups: [
@@ -166,14 +175,12 @@
     ] },
   ];
 
-  const ROWS = SECTIONS.flatMap(s => s.groups.flatMap(g => g.rows.map(row => ({ row, section: s, group: g }))));
-  const SECTION_OF = new Map(ROWS.map(e => [e.row, e.section.id]));
   const sectionById = (id) => SECTIONS.find(s => s.id === id);
   const sectionRows = (s) => s.groups.flatMap(g => g.rows);
+  const ROWS = SECTIONS.flatMap(sectionRows);
 
   /** Every row, in page order. */
-  const rows = () => ROWS.map(e => e.row);
-  const sectionOf = (row) => SECTION_OF.get(row);
+  const rows = () => ROWS;
 
   /** The value a tweak row's control shows: fold modes resolved, numbers clamped. */
   function value(row, values) {
@@ -197,12 +204,8 @@
     return v ?? fallback;
   }
 
-  /** Hidden rows: collapseAfter only matters while a fold mode is auto. */
-  function visible(row, values) {
-    if (row.key !== "collapseAfter") return true;
-    const m = collapse()?.foldModes(values) ?? { thinking: values?.foldThinking ?? "auto", tool: values?.foldTools ?? "auto" };
-    return m.thinking === "auto" || m.tool === "auto";
-  }
+  /** Shown now: a row with `visibleIf` asks it (collapseAfter). */
+  const visible = (row, values) => row.visibleIf?.(values) ?? true;
 
   // Tweak keys a custom row owns that differ from their defaults. A
   // `keyPrefix` row counts only `opts.prefixKeys` when given: the keys it
@@ -223,7 +226,7 @@
    *  `opts.prefixKeys`: see ownedChanged. */
   function isModified(row, values, opts) {
     if (row.kind === "custom") return ownedChanged(row, values, opts).length > 0;
-    if (row.key === "accent") return String(values?.accent ?? "").toLowerCase() !== themeAccent(values?.theme).toLowerCase();
+    if (row.key === "accent") return !window.OMP_ACCENT.sameColor(values?.accent, themeAccent(values?.theme));
     return value(row, values) !== value(row, defaults());
   }
 
@@ -261,6 +264,8 @@
   const resetEdits = (sectionId, values, opts) => resetRows(scope(sectionId).flatMap(sectionRows), values, opts);
 
   // `moreKw`: keywords known only at runtime (the shortcut action names).
+  // Custom rows show `label` and `desc` too, plus runtime text of their own;
+  // `version` shows runtime text as its desc, `shortcuts` only its editor.
   const searchText = (row) =>
     `${row.label} ${(row.desc ?? "").replace(/`/g, "")} ${row.kw ?? ""} ${row.moreKw?.() ?? ""}`.toLowerCase();
 
@@ -286,6 +291,6 @@
 
   window.OMP_SETTINGS = Object.freeze({
     SECTIONS, THEMES, ACCENTS, themeAccent,
-    rows, sectionOf, value, clamp, visible, isModified, resetRow, modifiedCount, resetRows, resetEdits, search,
+    rows, value, clamp, visible, isModified, resetRow, modifiedCount, resetRows, resetEdits, search,
   });
 })();

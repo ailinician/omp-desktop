@@ -50,7 +50,10 @@
   /** Whether the Rust close guard should hold the window's close: the
    *  setting is on and some tab is busy. */
   function closeGuardArmed(prefs, sessions) {
-    return !!prefs?.confirmBusyClose && busyTabs(sessions).length > 0;
+    // Runs on every notify: no per-tab objects just to test for one.
+    if (!prefs?.confirmBusyClose || !Array.isArray(sessions)) return false;
+    const { isBusyRunState } = window.OMP_TURN_STATUS;
+    return sessions.some(s => s && isBusyRunState(s.runState));
   }
 
   /** The confirmation closing tab `id` needs, or null to close at once

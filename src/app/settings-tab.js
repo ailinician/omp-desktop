@@ -40,5 +40,5 @@
     return { settingsActive: false, sessionId: ids[next] };
   }
 
-  window.OMP_SETTINGS_TAB = Object.freeze({ DEFAULT_SECTION, initial, open, close, selectProject, setSection, cycle });
+  window.OMP_SETTINGS_TAB = Object.freeze({ initial, open, close, selectProject, setSection, cycle });
 })();

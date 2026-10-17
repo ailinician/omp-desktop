@@ -20,7 +20,8 @@ function _SRS_phase(state) {
   }
 }
 
-function _SRS_Version({ ctx, query }) {
+// The schema desc is search text only: the shown desc is the runtime state.
+function _SRS_Version({ row, ctx, query }) {
   const { SettingsRow: Row, SettingsButton: Button, Icon } = window;
   const { updater } = ctx;
   const skipped = ctx.t.skippedUpdate ?? null;
@@ -31,7 +32,7 @@ function _SRS_Version({ ctx, query }) {
     skipped ? `skipped \`${skipped}\`` : "",
   ].filter(Boolean).join(" · ");
   return (
-    <Row label="Version" desc={desc} query={query}>
+    <Row label={row.label} desc={desc} query={query}>
       <div className="st-btns">
         {skipped && (
           <Button onClick={updater.clearSkipped} title={`offer ${skipped} again`}>Clear skipped</Button>

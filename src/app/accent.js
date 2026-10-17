@@ -46,5 +46,5 @@
 
   const TOKEN_NAMES = ["--accent", "--accent-soft", "--accent-glow", "--accent-deep"];
 
-  window.OMP_ACCENT = { TOKEN_NAMES, parseHex, accentTokens, sameColor };
+  window.OMP_ACCENT = { TOKEN_NAMES, accentTokens, sameColor };
 })();
