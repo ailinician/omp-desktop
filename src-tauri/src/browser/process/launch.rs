@@ -3,33 +3,38 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+use serde_json::json;
+
 use super::instance::{create_private_file, remove_dir_retrying};
+use super::pipe::{attach, CdpPipes};
 use super::stderr::StderrTail;
+use crate::browser::broker::Broker;
 use crate::browser::lock;
 use crate::child_path::apply_child_path;
 use crate::supervisor::ProcessSupervisor;
 
-/// How long a fresh Chromium gets to publish its debugging port.
+/// How long a fresh Chromium gets to answer on its debugging pipe.
 pub const LAUNCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How long a browser whose pipe failed at start gets to show it exited.
+const EXIT_GRACE: Duration = Duration::from_secs(1);
+
 /// Most binaries one launch tries: a broken install falls back to the next
 /// browser, but a machine where none starts must not wait on all of them.
 const MAX_ATTEMPTS: usize = 3;
-
-/// File Chromium writes into the user-data dir once the debugging port is up.
-const PORT_FILE: &str = "DevToolsActivePort";
 
 /// A headless Chromium owned by the app, with its own throwaway profile.
 /// Killed as a whole process tree on [`stop`](Self::stop) or when dropped.
 pub struct Chromium {
     child: Mutex<Option<Child>>,
     supervisor: ProcessSupervisor,
-    port: u16,
+    /// The CDP connection over the browser's debugging pipe.
+    broker: Arc<Broker>,
     profile: PathBuf,
     pid_file: PathBuf,
 }
@@ -43,11 +48,57 @@ enum Failure {
     Fatal(String),
 }
 
+/// Closes the broker once Chromium's stderr ends: the process tree is gone
+/// even if the pipe never reports its end (on Windows another process can
+/// inherit the pipe's ends). The drain starts before the broker exists.
+struct CloseOnEnd(Mutex<Watch>);
+
+enum Watch {
+    /// No broker yet, stderr still open.
+    Starting,
+    /// Stderr ended.
+    Ended,
+    /// Weak: the drain thread must not keep the connection alive.
+    Running(Weak<Broker>),
+}
+
+impl CloseOnEnd {
+    /// Stderr ended: close the broker, now or once it is [`watch`]ed.
+    ///
+    /// [`watch`]: Self::watch
+    fn ended(&self) {
+        let previous = std::mem::replace(&mut *lock(&self.0), Watch::Ended);
+        let Watch::Running(broker) = previous else {
+            return;
+        };
+        if let Some(broker) = broker.upgrade() {
+            broker.close();
+        }
+    }
+
+    /// Close `broker` when stderr ends; at once if it already has.
+    fn watch(&self, broker: &Arc<Broker>) {
+        let ended = {
+            let mut watch = lock(&self.0);
+            if matches!(*watch, Watch::Ended) {
+                true
+            } else {
+                *watch = Watch::Running(Arc::downgrade(broker));
+                false
+            }
+        };
+        if ended {
+            broker.close();
+        }
+    }
+}
+
 impl Chromium {
     /// Start the first of `binaries` (at most [`MAX_ATTEMPTS`]) that comes
     /// up, each in a fresh profile from `next_profile`. A binary that cannot
-    /// be started or exits before publishing its port makes way for the
-    /// next; the error lists every attempt with the end of its stderr.
+    /// be started, or exits or closes its debugging pipe before answering
+    /// on it, makes way for the next; the error lists every attempt with
+    /// the end of its stderr.
     pub fn launch(
         binaries: &[PathBuf],
         mut next_profile: impl FnMut() -> PathBuf,
@@ -82,34 +133,56 @@ impl Chromium {
         Err(format!("chromium did not start: {}", failures.join("; ")))
     }
 
-    /// Launch `binary` headless on a free debugging port, using `profile` as
-    /// its user-data dir, and wait up to [`LAUNCH_TIMEOUT`] for the port.
+    /// Launch `binary` headless with a CDP pipe, using `profile` as its
+    /// user-data dir, and wait up to [`LAUNCH_TIMEOUT`] for it to answer.
     fn start(binary: &Path, profile: &Path, width: u32, height: u32) -> Result<Self, Failure> {
-        // A stale port file from an earlier run would be read as this launch's.
-        let _ = std::fs::remove_file(profile.join(PORT_FILE));
-
         let mut cmd = command(binary, profile, width, height);
+        let mut pipes = attach(&mut cmd).map_err(|e| Failure::Fatal(format!("cdp pipe: {e}")))?;
         apply_child_path(&mut cmd);
         ProcessSupervisor::prepare(&mut cmd);
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| Failure::Binary(format!("cannot run: {e}")))?;
+        let spawned = cmd.spawn();
+        // Close our copies of Chromium's ends whatever happened: the pipes
+        // must end with the browser.
+        pipes.spawned();
+        let mut child = spawned.map_err(|e| Failure::Binary(format!("cannot run: {e}")))?;
         let supervisor = ProcessSupervisor::attach(&child);
-        let stderr = child.stderr.take().map(StderrTail::drain);
+        let close_on_end = Arc::new(CloseOnEnd(Mutex::new(Watch::Starting)));
+        let stderr = child.stderr.take().map(|stderr| {
+            let close_on_end = Arc::clone(&close_on_end);
+            StderrTail::drain(stderr, move || close_on_end.ended())
+        });
         let mut pid_path = profile.as_os_str().to_os_string();
         pid_path.push(".pid");
         let pid_file = PathBuf::from(pid_path);
         let recorded = create_private_file(&pid_file, format!("{}\n", child.id()).as_bytes());
         let owns_pid_file = recorded.is_ok();
+        let CdpPipes {
+            from_chromium,
+            to_chromium,
+            ..
+        } = pipes;
 
-        match recorded
+        let started = recorded
             .map_err(|e| Failure::Fatal(format!("pid file: {e}")))
-            .and_then(|()| wait_for_port(&mut child, profile))
-        {
-            Ok(port) => Ok(Self {
+            .and_then(|()| {
+                Broker::start(from_chromium, to_chromium)
+                    .map_err(|e| Failure::Fatal(format!("cdp pipe reader: {e}")))
+            })
+            .and_then(|broker| {
+                close_on_end.watch(&broker);
+                match wait_for_browser(&mut child, &broker) {
+                    Ok(()) => Ok(broker),
+                    Err(failure) => {
+                        broker.close();
+                        Err(failure)
+                    }
+                }
+            });
+        match started {
+            Ok(broker) => Ok(Self {
                 child: Mutex::new(Some(child)),
                 supervisor,
-                port,
+                broker,
                 profile: profile.to_path_buf(),
                 pid_file,
             }),
@@ -134,16 +207,17 @@ impl Chromium {
         }
     }
 
-    /// The remote-debugging port Chromium listens on (`127.0.0.1`).
-    pub const fn port(&self) -> u16 {
-        self.port
+    /// The CDP connection to this browser.
+    pub const fn broker(&self) -> &Arc<Broker> {
+        &self.broker
     }
 
-    /// Whether the Chromium process is still running.
+    /// Whether the Chromium process is still running and its pipe works.
     pub fn is_alive(&self) -> bool {
-        lock(&self.child)
-            .as_mut()
-            .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+        self.broker.is_alive()
+            && lock(&self.child)
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
     }
 
     /// Kill the process tree, reap it and remove the profile (retrying on
@@ -154,6 +228,7 @@ impl Chromium {
     pub fn stop(&self) {
         let mut guard = lock(&self.child);
         if let Some(mut child) = guard.take() {
+            self.broker.close();
             self.supervisor.kill_tree();
             let _ = child.kill();
             let _ = child.wait();
@@ -181,7 +256,7 @@ fn command(binary: &Path, profile: &Path, width: u32, height: u32) -> Command {
     user_data_dir.push(profile);
     let mut cmd = Command::new(binary);
     cmd.arg("--headless=new")
-        .arg("--remote-debugging-port=0")
+        // The CDP pipe itself (`pipe.rs`) is added by `attach`: no port.
         .arg(user_data_dir)
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
@@ -223,40 +298,60 @@ fn is_script(path: &Path) -> bool {
         .is_ok_and(|()| head == *b"#!")
 }
 
-/// The debugging port from `<profile>/DevToolsActivePort`: its first line,
-/// which only counts once the line is complete.
-pub fn read_active_port(profile: &Path) -> Option<u16> {
-    let content = std::fs::read_to_string(profile.join(PORT_FILE)).ok()?;
-    let (first, _) = content.split_once('\n')?;
-    first.trim().parse().ok().filter(|&port| port != 0)
-}
-
-/// Poll for the port file until it appears, `child` exits or the timeout hits.
-fn wait_for_port(child: &mut Child, profile: &Path) -> Result<u16, Failure> {
+/// Ask the browser for its version over the pipe until it answers, `child`
+/// exits or the timeout hits.
+fn wait_for_browser(child: &mut Child, broker: &Broker) -> Result<(), Failure> {
     let deadline = Instant::now() + LAUNCH_TIMEOUT;
+    let version = broker
+        .request("Browser.getVersion", json!({}))
+        .map_err(|e| pipe_failed(child, &e))?;
     loop {
-        if let Some(port) = read_active_port(profile) {
-            return Ok(port);
+        match version.wait(POLL_INTERVAL) {
+            Some(Ok(_)) => return Ok(()),
+            Some(Err(e)) if broker.is_alive() => {
+                return Err(Failure::Binary(format!("Browser.getVersion: {e}")));
+            }
+            // The connection ended: every later wait would return at once.
+            Some(Err(_)) => return Err(pipe_failed(child, "closed its debugging pipe")),
+            None => {}
         }
         match child.try_wait() {
             Ok(Some(status)) => return Err(Failure::Binary(format!("exited early ({status})"))),
             Ok(None) => {}
             Err(e) => return Err(Failure::Fatal(format!("cannot poll process: {e}"))),
         }
+        if !broker.is_alive() {
+            return Err(pipe_failed(child, "closed its debugging pipe"));
+        }
         if Instant::now() >= deadline {
             return Err(Failure::Fatal(format!(
-                "no debugging port after {}s",
+                "no answer on the debugging pipe after {}s",
                 LAUNCH_TIMEOUT.as_secs()
             )));
         }
-        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// The pipe failed at start: usually because the browser is exiting, which
+/// says more, so give it up to [`EXIT_GRACE`] to show that; else `reason`.
+fn pipe_failed(child: &mut Child, reason: &str) -> Failure {
+    let deadline = Instant::now() + EXIT_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Failure::Binary(format!("exited early ({status})")),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => return Failure::Binary(reason.into()),
+            Err(e) => return Failure::Fatal(format!("cannot poll process: {e}")),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::browser::tests::{chromium_or_skip, http_get, tempdir, CHROMIUM};
+    use crate::browser::tests::{chromium_or_skip, tempdir, CHROMIUM};
     #[cfg(unix)]
     use crate::supervisor::pid_is_alive;
 
@@ -269,20 +364,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn active_port_is_read_from_the_first_line() {
-        let dir = tempdir("port");
-        std::fs::write(
-            dir.join("DevToolsActivePort"),
-            "51234\n/devtools/browser/abc\n",
-        )
-        .unwrap();
-        assert_eq!(read_active_port(&dir), Some(51234));
-        std::fs::write(dir.join("DevToolsActivePort"), "x\n").unwrap();
-        assert_eq!(read_active_port(&dir), None);
-    }
-
-    /// Real Chromium; skipped (passes with a note) when none is found.
+    /// Real Chromium; skipped (passes with a note) when none is found. It
+    /// answers on the pipe and opens no debugging port: no
+    /// `DevToolsActivePort` file, which Chromium writes for a port only.
     #[test]
     fn start_and_stop_real_chromium() {
         let _chromium = lock(&CHROMIUM);
@@ -291,11 +375,19 @@ mod tests {
         };
         let dir = tempdir("launch-real");
         let c = Chromium::launch(&[bin], profiles(&dir), 800, 600).expect("start");
-        assert!(c.port() > 0);
-        let body = http_get(c.port(), "/json/version").expect("version");
-        assert!(body.contains("webSocketDebuggerUrl"), "{body}");
+        let version = c
+            .broker()
+            .call("Browser.getVersion", json!({}), LAUNCH_TIMEOUT)
+            .expect("version");
+        assert!(version["product"].as_str().is_some(), "{version}");
+        assert!(c.is_alive());
+        assert!(
+            !dir.join("profile-0/DevToolsActivePort").exists(),
+            "no debugging port"
+        );
         c.stop();
         assert!(!c.is_alive());
+        assert!(!c.broker().is_alive());
         assert!(!dir.join("profile-0").exists(), "profile removed");
         c.stop(); // idempotent
     }
@@ -402,7 +494,7 @@ mod tests {
         let works = crate::browser::tests::fake_chromium(&dir, "0");
         let c = Chromium::launch(&[dies, missing, works], profiles(&dir), 800, 600)
             .expect("the third binary starts");
-        assert!(c.port() > 0);
+        assert!(c.is_alive());
         assert!(
             !dir.join("profile-0").exists(),
             "failed attempt's profile removed"
@@ -411,6 +503,21 @@ mod tests {
             dir.join("profile-2").exists(),
             "the running browser's profile"
         );
+        c.stop();
+    }
+
+    /// A binary that runs but closes its debugging pipe is not a browser
+    /// the panel can use: the next one is tried.
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_without_the_pipe_makes_way_for_the_next() {
+        let dir = tempdir("launch-no-pipe");
+        let closes = script(&dir, "closes", "exec 3<&- 4>&-\nexec sleep 300");
+        let works = crate::browser::tests::fake_chromium(&dir, "0");
+        let c = Chromium::launch(&[closes, works], profiles(&dir), 800, 600)
+            .expect("the second binary starts");
+        assert!(c.is_alive());
+        assert!(!dir.join("profile-0").exists(), "first attempt cleaned up");
         c.stop();
     }
 
@@ -503,7 +610,8 @@ mod tests {
                 "for a in \"$@\"; do case \"$a\" in --user-data-dir=*) d=\"${{a#--user-data-dir=}}\";; esac; done\n\
                  printf '%s\\n' \"$XDG_CONFIG_HOME\" > '{seen}'\n\
                  mkdir -p \"$d\"\n\
-                 printf '40001\\n/devtools/browser/x\\n' > \"$d/DevToolsActivePort\"\n\
+                 dd bs=1 count=1 <&3 >/dev/null 2>&1\n\
+                 printf '{{\"id\":1,\"result\":{{}}}}\\000' >&4\n\
                  exec sleep 300",
                 seen = seen.display()
             ),

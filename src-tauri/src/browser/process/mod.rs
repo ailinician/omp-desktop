@@ -6,10 +6,12 @@
 mod instance;
 mod launch;
 mod locate;
+mod pipe;
 mod reap;
 mod settings;
 mod stderr;
 
 pub use instance::{prepare_instance_dir, prune_dead, remove_dir_retrying, write_overlay};
 pub use launch::Chromium;
+pub use pipe::cancel_blocked_read;
 pub use settings::{BrowserSettings, SettingsStore};

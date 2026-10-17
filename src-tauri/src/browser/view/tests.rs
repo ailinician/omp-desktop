@@ -1,15 +1,19 @@
 //! The panel against a real Chromium (skipped when none is installed), the
-//! URL policy, and a view core against a fake CDP endpoint for the other
+//! URL policy, and a view core against a fake Chromium for the other
 //! view tests.
 
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+use tungstenite::{Message, WebSocket};
 
-use super::super::cdp::{browser_ws_url, CdpClient};
-use super::super::tests::{cdp_result, fake_cdp, manager, manager_with_chromium, mouse, CHROMIUM};
+use super::super::cdp::CdpClient;
+use super::super::tests::{
+    cdp_result, fake_cdp, http_get, manager, manager_with_chromium, mouse, CHROMIUM,
+};
 use super::super::{lock, BrowserManager};
 use super::{
     checked_url, BrowserEmit, Core, Frame, InputEvent, Pick, Status, TabInfo, View, ViewState,
@@ -135,7 +139,7 @@ impl BrowserEmit for States {
     fn pick(&self, _: &str, _: &Pick) {}
 }
 
-/// A view core connected to a fake CDP endpoint with page `a` listed, what
+/// A view core connected to a fake Chromium with page `a` listed, what
 /// it emitted, and the methods it sent. `reply` may answer a request
 /// (`None`: a new session per attach, a one-entry history, else an empty
 /// result).
@@ -145,7 +149,7 @@ pub(super) fn fake_core(
     let sent = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&sent);
     let mut sessions = 0;
-    let url = fake_cdp(move |request| {
+    let fake = fake_cdp(move |request| {
         let method = request["method"].as_str().unwrap_or_default();
         lock(&log).push(method.to_owned());
         let answer = reply(request).unwrap_or_else(|| match method {
@@ -163,7 +167,7 @@ pub(super) fn fake_core(
     });
     let states = Arc::new(States::default());
     let core = Core::new("s1", Arc::clone(&states) as Arc<dyn BrowserEmit>);
-    let client = CdpClient::connect(&url, Box::new(|_, _, _| {})).unwrap();
+    let client = CdpClient::connect(fake, Box::new(|_, _, _| {})).unwrap();
     assert!(core.client.set(client).is_ok());
     lock(&core.inner).upsert_page(&json!({ "targetId": "a", "url": "about:blank" }));
     (core, states, sent)
@@ -474,19 +478,71 @@ fn a_slow_server_is_not_a_failed_navigation_and_a_failed_load_is_told() {
     m.release("s1");
 }
 
-/// The agent's side: a raw client through the placeholder port, on the
-/// browser connection or (`page`) on one page's own.
-fn agent(m: &BrowserManager, page: Option<&str>) -> CdpClient {
+/// The agent's side: a raw CDP client through the placeholder port (the
+/// proxy, as omp connects), on the browser connection or (`page`) on one
+/// page's own. Calls are answered in order; events in between are skipped.
+struct Agent {
+    ws: Mutex<WebSocket<TcpStream>>,
+    next_id: AtomicU64,
+}
+
+impl Agent {
+    fn call(&self, session: Option<&str>, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut message = json!({ "id": id, "method": method, "params": params });
+        if let Some(session) = session {
+            message["sessionId"] = Value::from(session);
+        }
+        let mut reply = roundtrip(&mut lock(&self.ws), id, message.to_string())?;
+        if let Some(error) = reply.get("error") {
+            return Err(error["message"].as_str().unwrap_or("cdp error").to_owned());
+        }
+        Ok(reply["result"].take())
+    }
+
+    fn close(&self) {
+        let _ = lock(&self.ws).close(None);
+    }
+}
+
+/// Send `text` and read until the reply with `id` comes.
+fn roundtrip(ws: &mut WebSocket<TcpStream>, id: u64, text: String) -> Result<Value, String> {
+    ws.send(Message::text(text)).map_err(|e| e.to_string())?;
+    loop {
+        let Message::Text(text) = ws.read().map_err(|e| e.to_string())? else {
+            continue;
+        };
+        let reply: Value = serde_json::from_str(text.as_str()).map_err(|e| e.to_string())?;
+        if reply["id"] == id {
+            return Ok(reply);
+        }
+    }
+}
+
+fn agent(m: &BrowserManager, page: Option<&str>) -> Agent {
     let port = m.port("s1").unwrap();
-    let ws = page.map_or_else(
-        || browser_ws_url(port).unwrap(),
+    let url = page.map_or_else(
+        || {
+            let version: Value =
+                serde_json::from_str(&http_get(port, "/json/version").unwrap()).unwrap();
+            version["webSocketDebuggerUrl"].as_str().unwrap().to_owned()
+        },
         |id| format!("ws://127.0.0.1:{port}/devtools/page/{id}"),
     );
-    CdpClient::connect(&ws, Box::new(|_, _, _: Value| {})).unwrap()
+    let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let (ws, _) = tungstenite::client(url.as_str(), stream)
+        .unwrap_or_else(|e| panic!("agent handshake: {e}"));
+    Agent {
+        ws: Mutex::new(ws),
+        next_id: AtomicU64::new(1),
+    }
 }
 
 /// Attach as puppeteer does and give back the page session.
-fn attach(agent: &CdpClient, target: &str) -> String {
+fn attach(agent: &Agent, target: &str) -> String {
     let attached = agent
         .call(
             None,
@@ -497,13 +553,13 @@ fn attach(agent: &CdpClient, target: &str) -> String {
     attached["sessionId"].as_str().unwrap().to_owned()
 }
 
-fn navigate(agent: &CdpClient, session: &str, url: &str) {
+fn navigate(agent: &Agent, session: &str, url: &str) {
     agent
         .call(Some(session), "Page.navigate", json!({ "url": url }))
         .unwrap();
 }
 
-fn create_page(agent: &CdpClient, url: &str) -> String {
+fn create_page(agent: &Agent, url: &str) -> String {
     let created = agent
         .call(None, "Target.createTarget", json!({ "url": url }))
         .unwrap();
