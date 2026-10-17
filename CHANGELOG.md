@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Typography on Windows: interface text now uses Segoe UI Variable (Segoe UI on Windows 10) and code uses Cascadia Mono, Cascadia Code or Consolas, instead of falling through the macOS-only fonts to Arial and Consolas. Chinese and Japanese characters still take Windows' fallback font for the display language.
 - Windows title-bar buttons (minimize, maximize, close) were coloured red, yellow and green by leftover prototype rules. They now use the theme's text colour, draw as line icons instead of text glyphs, and sit flush with no gaps or rounded corners.
+- The browser panel's Chromium could be controlled by other user accounts on the same computer: its debugging port and the agent's connection point accepted anyone on the machine. Chromium now opens no debugging port at all and talks to the app over a private pipe, and the app answers the agent's browser connections only from programs running as your own user.
 
 ## [0.10.1] - 2026-10-16
 

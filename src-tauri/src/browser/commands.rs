@@ -157,8 +157,8 @@ impl BrowserManager {
         }
         let emit = Arc::clone(&sink) as Arc<dyn BrowserEmit>;
         emit.state(session_id, &ViewState::new(Status::Starting));
-        let started = self.chromium_port(session_id).and_then(|port| {
-            let view = Arc::new(View::connect(session_id, port, Arc::clone(&emit))?);
+        let started = self.chromium(session_id).and_then(|broker| {
+            let view = Arc::new(View::connect(session_id, &broker, Arc::clone(&emit))?);
             match view.open(size, last_agent.as_deref()) {
                 Ok(()) => Ok(view),
                 Err(e) => {

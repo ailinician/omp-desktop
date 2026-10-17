@@ -1,6 +1,7 @@
-//! The panel's view of a tab's Chromium: one browser-level CDP connection
-//! (`Target.attachToTarget { flatten: true }`, so one socket serves every
-//! page session), the page targets, and the screencast of the active one.
+//! The panel's view of a tab's Chromium: one browser-level CDP client on
+//! the tab's broker (`Target.attachToTarget { flatten: true }`, so one
+//! connection serves every page session), the page targets, and the
+//! screencast of the active one.
 //!
 //! Threads: the connection's reader runs [`events::handler`] (frames and
 //! quick bookkeeping only), a worker thread does everything that needs a
@@ -29,7 +30,8 @@ use serde_json::json;
 
 use self::events::{Event, InputItem};
 use super::annotate::CapturedImage;
-use super::cdp::{browser_ws_url, CdpClient};
+use super::broker::Broker;
+use super::cdp::CdpClient;
 use super::lock;
 
 pub(in crate::browser) use self::core::Core;
@@ -40,7 +42,7 @@ pub use input::InputEvent;
 pub(in crate::browser) use model::Size;
 
 const MAX_URL_LEN: usize = 8192;
-/// Input events not yet written to the CDP socket (sending does not wait
+/// Input events not yet sent to Chromium (sending does not wait
 /// for the page); beyond this the panel's input is refused ("browser is
 /// busy").
 const INPUT_QUEUE: usize = 512;
@@ -74,13 +76,17 @@ pub struct View {
 }
 
 impl View {
-    /// Connect to the Chromium on `port` (its own port, not the proxy's).
-    pub fn connect(sid: &str, port: u16, emit: Arc<dyn BrowserEmit>) -> Result<Self, String> {
-        let url = browser_ws_url(port)?;
+    /// Connect a browser-level client to the tab's Chromium through its
+    /// broker (not through the agents' proxy).
+    pub(in crate::browser) fn connect(
+        sid: &str,
+        broker: &Arc<Broker>,
+        emit: Arc<dyn BrowserEmit>,
+    ) -> Result<Self, String> {
         let core = Arc::new(Core::new(sid, emit));
         let (events, queue) = mpsc::channel();
         let handler = events::handler(Arc::downgrade(&core), events.clone()); // the view keeps one sender for `Barrier` and `Stop`
-        let client = CdpClient::connect(&url, handler)?;
+        let client = CdpClient::connect(broker.connect_browser()?, handler)?;
         if core.client.set(client).is_err() {
             return Err("cdp client already set".into());
         }

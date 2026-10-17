@@ -4,8 +4,8 @@
 //!
 //! One [`Tap`] per connection. From the messages it keeps a
 //! `sessionId`-to-`targetId` map and reports the intent commands of a fixed
-//! list. It runs on the connection's observer thread, never on a splice
-//! thread.
+//! list. It runs on the connection's observer thread, never on a thread
+//! that forwards messages.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};

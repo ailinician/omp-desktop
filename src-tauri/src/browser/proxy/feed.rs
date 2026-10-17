@@ -1,20 +1,17 @@
-//! What the splice hands the [`Tap`]: complete CDP messages, decoded on the
-//! pipe threads and observed on a thread of their own.
+//! What a proxy connection hands the [`Tap`]: its CDP messages, observed on
+//! a thread of their own.
 //!
-//! Each pipe thread owns the [`Feed`] of its direction and calls
-//! [`Feed::push`] on every chunk *before* forwarding it. `push` only runs the
-//! framing ([`Messages`]; for the server, after checking the upgrade
-//! response) and queues each text message that completes and fits the size
-//! cap; a bigger payload streams past without being copied (the cap is
-//! larger for one event, see [`ATTACHED`]). Both directions
-//! share one queue, so a command is queued before its last byte can reach
+//! The connection's two pump threads each own the [`Feed`] of their
+//! direction and call [`Feed::push`] on every message *before* forwarding
+//! it. `push` only queues a message that fits the size cap (larger for one
+//! event, see [`ATTACHED`]); a bigger one passes without being copied. Both
+//! directions share one queue, so a command is queued before it can reach
 //! Chromium and cause a reply, and the observer meets commands, replies and
 //! the commands depending on them in causal order.
 //!
 //! Parsing JSON and the follow callback run on the observer thread only, and
-//! the splice never waits for it: a full queue, broken framing or a
-//! negotiated extension switches the tap off for the connection (both sides
-//! and the observer), never the splice.
+//! the pumps never wait for it: a full queue switches the tap off for the
+//! connection (both sides and the observer), never the forwarding.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -22,27 +19,25 @@ use std::sync::{Arc, OnceLock};
 use std::thread;
 
 use super::tap::Tap;
-use super::ws_frames::{Lost, Messages};
 
 /// Largest command the tap reads (a client message over it is skipped).
 const MAX_COMMAND: usize = 1 << 20;
 /// Largest reply or event the tap reads. Everything it needs is small; a
-/// screenshot's reply is not, and is skipped without being buffered.
+/// screenshot's reply is not, and is skipped without being copied.
 const MAX_REPLY: usize = 64 << 10;
-/// How Chromium starts a `Target.attachedToTarget` event (it writes
-/// `method` first). The event carries the page's URL and title in full, and
+/// How a `Target.attachedToTarget` event starts. Chromium writes `method`
+/// first; on a client's root session the broker rebuilds the message with
+/// its keys sorted (dropping `sessionId`), and `method` < `params`, so the
+/// event still starts so. It carries the page's URL and title in full, and
 /// it is the only place an auto-attached session is named, so it is read up
 /// to [`MAX_COMMAND`]: a page whose URL fits a command the tap reads (the
-/// `Page.navigate` that opened it) is also followed. Of any other server
-/// message over [`MAX_REPLY`] only this many leading bytes are copied.
-const ATTACHED: &[u8] = br#"{"method":"Target.attachedToTarget""#;
-/// Longest response head of the upgrade.
-const MAX_UPGRADE_HEAD: usize = 16 << 10;
+/// `Page.navigate` that opened it) is also followed.
+const ATTACHED: &str = r#"{"method":"Target.attachedToTarget""#;
 /// Messages queued for the observer of one connection, at most.
 const QUEUE_MESSAGES: usize = 1024;
 /// Bytes queued for the observer of one connection, at most: room for four
 /// of the largest commands (or attach events) the tap reads, or sixty-four
-/// of the largest replies. Skipped payloads never count, so a burst of
+/// of the largest replies. Skipped messages never count, so a burst of
 /// screenshots costs nothing here; only an observer stuck for good fills it.
 const QUEUE_BYTES: usize = 4 * MAX_COMMAND;
 
@@ -51,18 +46,18 @@ const QUEUE_BYTES: usize = 4 * MAX_COMMAND;
 pub(super) enum Direction {
     /// Sent by the client (the agent).
     Client,
-    /// Sent by the server (Chromium).
+    /// Sent by the server (Chromium, through the broker).
     Server,
 }
 
-type Queued = (Direction, Vec<u8>);
+type Queued = (Direction, String);
 
 /// What both feeds and the observer of a connection share.
 #[derive(Default)]
 struct State {
     /// Why the tap was switched off, once it was.
     off: OnceLock<&'static str>,
-    /// Payload bytes in the queue.
+    /// Message bytes in the queue.
     queued: AtomicUsize,
 }
 
@@ -79,16 +74,9 @@ impl State {
     }
 }
 
-enum Decoder {
-    /// The server's response head so far.
-    Upgrade(Vec<u8>),
-    Frames(Messages),
-}
-
-/// One direction's end of a connection's observer, owned by its pipe thread.
+/// One direction's end of a connection's observer, owned by its pump thread.
 pub(super) struct Feed {
     direction: Direction,
-    decoder: Decoder,
     queue: SyncSender<Queued>,
     state: Arc<State>,
     /// How long this feed sleeps in every `push` (the ordering test slows
@@ -99,7 +87,7 @@ pub(super) struct Feed {
 
 /// Start the observer thread that owns `tap`; returns the client's and the
 /// server's feed. The thread ends when both are gone. If it cannot start,
-/// the feeds are born off: the splice goes on untapped.
+/// the feeds are born off: the connection goes on untapped.
 pub(super) fn spawn(tap: Tap) -> (Feed, Feed) {
     let (client, server, messages, state) = channel();
     let observer = Arc::clone(&state);
@@ -117,79 +105,49 @@ pub(super) fn spawn(tap: Tap) -> (Feed, Feed) {
 fn channel() -> (Feed, Feed, Receiver<Queued>, Arc<State>) {
     let (queue, messages) = mpsc::sync_channel(QUEUE_MESSAGES);
     let state = Arc::new(State::default());
-    let feed = |direction, decoder, queue| Feed {
+    let feed = |direction, queue| Feed {
         direction,
-        decoder,
         queue,
         state: Arc::clone(&state),
         #[cfg(test)]
         delay: std::time::Duration::ZERO,
     };
-    let client = feed(
-        Direction::Client,
-        Decoder::Frames(Messages::new(true, MAX_COMMAND)),
-        queue.clone(),
-    );
-    let server = feed(Direction::Server, Decoder::Upgrade(Vec::new()), queue);
+    let client = feed(Direction::Client, queue.clone());
+    let server = feed(Direction::Server, queue);
     (client, server, messages, state)
 }
 
 impl Feed {
-    /// Decode `bytes`, the next chunk of this direction, and queue the text
-    /// messages it completes. Never blocks: the pipe thread calls it before
-    /// it forwards the chunk.
-    pub(super) fn push(&mut self, bytes: &[u8]) {
-        if bytes.is_empty() || self.state.is_off() {
+    /// Queue `message`, the next of this direction, when it fits the cap.
+    /// Never blocks: the pump thread calls it before it forwards the
+    /// message.
+    pub(super) fn push(&self, message: &str) {
+        if self.state.is_off() {
             return;
         }
         #[cfg(test)]
         thread::sleep(self.delay);
-        let mut messages = Vec::new();
-        if let Err(why) = self.decode(bytes, &mut messages) {
-            self.state.off(why);
+        let cap = match self.direction {
+            Direction::Client => MAX_COMMAND,
+            Direction::Server if message.starts_with(ATTACHED) => MAX_COMMAND,
+            Direction::Server => MAX_REPLY,
+        };
+        if message.len() > cap {
             return;
         }
-        for message in messages {
-            if let Err(why) = self.enqueue(message) {
-                self.state.off(why);
-                return;
-            }
+        if let Err(why) = self.enqueue(message) {
+            self.state.off(why);
         }
     }
 
-    fn decode(&mut self, bytes: &[u8], out: &mut Vec<Vec<u8>>) -> Result<(), &'static str> {
-        let lost = match self.direction {
-            Direction::Client => "client frames cannot be followed",
-            Direction::Server => "server frames cannot be followed",
-        };
-        let frames = match &mut self.decoder {
-            Decoder::Frames(messages) => return messages.feed(bytes, out).map_err(|Lost| lost),
-            Decoder::Upgrade(head) => {
-                head.extend_from_slice(bytes);
-                let Some(end) = head.windows(4).position(|w| w == b"\r\n\r\n") else {
-                    return if head.len() > MAX_UPGRADE_HEAD {
-                        Err("no upgrade response")
-                    } else {
-                        Ok(())
-                    };
-                };
-                check_upgrade(&head[..end])?;
-                // The frames that rode in with the head.
-                head.split_off(end + 4)
-            }
-        };
-        let mut messages = Messages::new(false, MAX_REPLY).reading_up_to(ATTACHED, MAX_COMMAND);
-        let fed = messages.feed(&frames, out).map_err(|Lost| lost);
-        self.decoder = Decoder::Frames(messages);
-        fed
-    }
-
-    fn enqueue(&self, message: Vec<u8>) -> Result<(), &'static str> {
+    fn enqueue(&self, message: &str) -> Result<(), &'static str> {
         let len = message.len();
         if self.state.queued.fetch_add(len, Ordering::AcqRel) + len > QUEUE_BYTES {
             return Err("observer queue full");
         }
-        match self.queue.try_send((self.direction, message)) {
+        // The observer runs after the message is forwarded (and dropped):
+        // it needs a copy of its own.
+        match self.queue.try_send((self.direction, message.to_owned())) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => Err("observer queue full"),
             Err(TrySendError::Disconnected(_)) => Err("observer stopped"),
@@ -217,28 +175,10 @@ fn observe(mut tap: Tap, messages: &Receiver<Queued>, state: &State) {
         if state.is_off() {
             return;
         }
-        if let Err(why) = tap.on_message(direction, &message) {
+        if let Err(why) = tap.on_message(direction, message.as_bytes()) {
             return state.off(why);
         }
     }
-}
-
-/// `Ok` for the `101` response head of a WebSocket upgrade without a
-/// negotiated extension (compressed frames cannot be read).
-fn check_upgrade(head: &[u8]) -> Result<(), &'static str> {
-    let head = std::str::from_utf8(head).map_err(|_| "upgrade response is not text")?;
-    let mut lines = head.split("\r\n");
-    if lines.next().and_then(|s| s.split_whitespace().nth(1)) != Some("101") {
-        return Err("upgrade refused");
-    }
-    let extended = lines.any(|line| {
-        line.split_once(':')
-            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("sec-websocket-extensions"))
-    });
-    if extended {
-        return Err("Sec-WebSocket-Extensions negotiated (compressed frames)");
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -250,62 +190,38 @@ mod tests {
 
     use serde_json::json;
 
-    use super::super::tests::{frame, masked_text, text, Reported};
+    use super::super::tests::Reported;
     use super::super::{tap::Tap, AgentTarget};
-    use super::{channel, spawn, Direction, Feed, Queued, MAX_REPLY, QUEUE_MESSAGES};
+    use super::{channel, spawn, Direction, Queued, ATTACHED, MAX_REPLY, QUEUE_MESSAGES};
+    use crate::browser::broker::fake::fake_browser;
+    use crate::browser::broker::Recv;
     use crate::browser::lock;
     use crate::test_support::eventually;
 
     const BROWSER: &[u8] = b"GET /devtools/browser/x HTTP/1.1\r\nHost: h\r\n\r\n";
-    const UPGRADED: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n";
 
     /// What the feeds queued so far, in queue order.
-    fn drained(queue: &Receiver<Queued>) -> Vec<(Direction, String)> {
-        queue
-            .try_iter()
-            .map(|(direction, m)| (direction, String::from_utf8(m).unwrap()))
-            .collect()
+    fn drained(queue: &Receiver<Queued>) -> Vec<Queued> {
+        queue.try_iter().collect()
     }
 
-    fn client(message: &str) -> (Direction, String) {
+    fn client(message: &str) -> Queued {
         (Direction::Client, message.to_owned())
     }
 
-    fn server(message: &str) -> (Direction, String) {
+    fn server(message: &str) -> Queued {
         (Direction::Server, message.to_owned())
     }
 
-    /// Pushes `wire` to `feed` in chunks of `step` bytes, as the pipe does.
-    fn push_in_chunks(feed: &mut Feed, wire: &[u8], step: usize) {
-        for chunk in wire.chunks(step) {
-            feed.push(chunk);
-        }
-    }
-
     #[test]
-    fn fragments_control_frames_and_one_byte_reads_make_no_difference() {
-        let message = r#"{"id":1,"method":"Page.navigate"}"#;
-        let (head, tail) = message.as_bytes().split_at(10);
-        let mut wire = frame(0x1, false, true, head);
-        wire.extend(frame(0x9, true, true, b"hi"));
-        wire.extend(frame(0x0, true, true, tail));
-        for step in [1, 3, wire.len()] {
-            let (mut up, _down, queue, _) = channel();
-            push_in_chunks(&mut up, &wire, step);
-            assert_eq!(drained(&queue), [client(message)], "step {step}");
-        }
-    }
-
-    #[test]
-    fn oversized_payloads_are_never_queued_and_decoding_stays_in_sync() {
-        let (mut up, mut down, queue, state) = channel();
-        down.push(UPGRADED);
-        // A screenshot-sized reply streamed past in splice-sized reads.
-        push_in_chunks(&mut down, &text(&"x".repeat(5 << 20)), 16 << 10);
-        down.push(&text("after"));
+    fn oversized_messages_are_never_queued() {
+        let (up, down, queue, state) = channel();
+        // A screenshot-sized reply, then one inside the cap.
+        down.push(&"x".repeat(5 << 20));
+        down.push("after");
         // A command over its cap, then one inside it.
-        up.push(&masked_text(&"y".repeat(1_500_000)));
-        up.push(&masked_text("next"));
+        up.push(&"y".repeat(1_500_000));
+        up.push("next");
         assert_eq!(drained(&queue), [server("after"), client("next")]);
         assert_eq!(
             state.queued.load(Ordering::Acquire),
@@ -316,13 +232,12 @@ mod tests {
 
     #[test]
     fn commands_and_replies_are_queued_in_the_order_they_were_pushed() {
-        let (mut up, mut down, queue, _) = channel();
-        down.push(UPGRADED);
-        up.push(&masked_text("c1"));
-        down.push(&text("r1"));
-        down.push(&text("e1"));
-        up.push(&masked_text("c2"));
-        down.push(&text("r2"));
+        let (up, down, queue, _) = channel();
+        up.push("c1");
+        down.push("r1");
+        down.push("e1");
+        up.push("c2");
+        down.push("r2");
         assert_eq!(
             drained(&queue),
             [
@@ -335,92 +250,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_upgrade_response_is_skipped_and_checked() {
-        for step in [7, 4096] {
-            let (_up, mut down, queue, _) = channel();
-            let mut wire = UPGRADED.to_vec();
-            wire.extend(text("behind the head"));
-            push_in_chunks(&mut down, &wire, step);
-            assert_eq!(drained(&queue), [server("behind the head")], "step {step}");
-        }
-        for (response, why) in [
-            (
-                "HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n",
-                "Sec-WebSocket-Extensions negotiated (compressed frames)",
-            ),
-            (
-                "HTTP/1.1 101 Switching Protocols\r\nsec-websocket-EXTENSIONS: x\r\n\r\n",
-                "Sec-WebSocket-Extensions negotiated (compressed frames)",
-            ),
-            (
-                "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n",
-                "upgrade refused",
-            ),
-        ] {
-            let (mut up, mut down, queue, _) = channel();
-            assert_eq!(down.off_reason(), None);
-            down.push(response.as_bytes());
-            down.push(&text("ignored"));
-            up.push(&masked_text("ignored"));
-            assert_eq!(down.off_reason(), Some(why), "{response}");
-            assert!(drained(&queue).is_empty(), "{response}");
-        }
-    }
-
-    #[test]
-    fn a_response_that_never_ends_switches_the_tap_off() {
-        let (_up, mut down, queue, _) = channel();
-        down.push(b"HTTP/1.1 101 Switching Protocols\r\n");
-        down.push(&vec![b'a'; 20_000]);
-        down.push(UPGRADED); // too late
-        down.push(&text("ignored"));
-        assert_eq!(down.off_reason(), Some("no upgrade response"));
-        assert_eq!(drained(&queue), Vec::new());
-    }
-
-    #[test]
-    fn garbage_switches_the_tap_off_and_never_panics() {
-        let (mut up, mut down, queue, _) = channel();
-        down.push(UPGRADED);
-        up.push(&[0xFF; 32]);
-        up.push(&masked_text("ignored"));
-        down.push(&text("ignored"));
-        assert_eq!(up.off_reason(), Some("client frames cannot be followed"));
-        assert!(drained(&queue).is_empty(), "off after the first violation");
-
-        // Pseudo-random bytes, in odd chunks, both directions, with and
-        // without a valid upgrade first.
-        let mut state = 0x2545_F491_4F6C_DD1D_u64;
-        let mut next = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        for round in 0..300 {
-            let (mut up, mut down, queue, _) = channel();
-            if round % 2 == 0 {
-                down.push(UPGRADED);
-            }
-            for _ in 0..20 {
-                let len = usize::try_from(next() % 40).unwrap();
-                let bytes: Vec<u8> = (0..len).map(|_| next().to_le_bytes()[0]).collect();
-                if next() % 2 == 0 {
-                    up.push(&bytes);
-                } else {
-                    down.push(&bytes);
-                }
-            }
-            drop(drained(&queue));
-        }
-    }
-
-    fn activate(target: &str) -> Vec<u8> {
-        masked_text(
-            &json!({ "id": 1, "method": "Target.activateTarget", "params": { "targetId": target } })
-                .to_string(),
-        )
+    fn activate(target: &str) -> String {
+        json!({ "id": 1, "method": "Target.activateTarget", "params": { "targetId": target } })
+            .to_string()
     }
 
     /// A tap whose callback blocks on `gate` and counts its calls.
@@ -437,28 +269,29 @@ mod tests {
         (Tap::new(BROWSER, callback), calls)
     }
 
+    /// Waits until the gated callback was entered `n` times.
+    fn entered(calls: &AtomicUsize, n: usize) -> bool {
+        eventually(Duration::from_secs(3), || {
+            (calls.load(Ordering::SeqCst) == n).then_some(())
+        })
+        .is_some()
+    }
+
     #[test]
     fn a_large_reply_behind_a_stuck_observer_leaves_the_tap_on() {
         let gate = Arc::new(Mutex::new(()));
         let reported = Reported::default();
         let (tap, calls) = gated_tap(&gate, &reported);
         let held = lock(&gate);
-        let (mut up, mut down) = spawn(tap);
-        down.push(UPGRADED);
+        let (up, down) = spawn(tap);
         up.push(&activate("T1")); // the observer blocks in this callback
-        assert!(
-            eventually(Duration::from_secs(3), || {
-                (calls.load(Ordering::SeqCst) == 1).then_some(())
-            })
-            .is_some(),
-            "the observer reached the callback"
-        );
+        assert!(entered(&calls, 1), "the observer reached the callback");
         // Screenshots far bigger than any queue, and one reply of the largest
         // size the tap reads, all while the observer is stuck.
         for _ in 0..3 {
-            push_in_chunks(&mut down, &text(&"x".repeat(8 << 20)), 16 << 10);
+            down.push(&"x".repeat(8 << 20));
         }
-        down.push(&text(&format!("\"{}\"", "y".repeat(MAX_REPLY - 2))));
+        down.push(&format!("\"{}\"", "y".repeat(MAX_REPLY - 2)));
         up.push(&activate("T2"));
         assert_eq!(up.off_reason(), None, "nothing overflowed");
         drop(held);
@@ -473,21 +306,18 @@ mod tests {
     }
 
     #[test]
-    fn a_stuck_observer_disables_the_tap_without_blocking_the_splice() {
+    fn a_stuck_observer_disables_the_tap_without_blocking_the_pump() {
         let gate = Arc::new(Mutex::new(()));
         let reported = Reported::default();
         let (tap, calls) = gated_tap(&gate, &reported);
         let held = lock(&gate);
-        let (mut up, mut down) = spawn(tap);
-        down.push(UPGRADED);
+        let (up, _down) = spawn(tap);
         up.push(&activate("T")); // the observer blocks in this callback
-        assert!(eventually(Duration::from_secs(3), || {
-            (calls.load(Ordering::SeqCst) == 1).then_some(())
-        })
-        .is_some());
+        assert!(entered(&calls, 1));
         let start = Instant::now();
+        let command = activate("T");
         for _ in 0..=QUEUE_MESSAGES {
-            up.push(&activate("T"));
+            up.push(&command);
         }
         assert!(
             start.elapsed() < Duration::from_secs(2),
@@ -509,15 +339,11 @@ mod tests {
         let reported = Reported::default();
         let (tap, calls) = gated_tap(&gate, &reported);
         let held = lock(&gate);
-        let (mut up, mut down) = spawn(tap);
-        down.push(UPGRADED);
+        let (up, _down) = spawn(tap);
         up.push(&activate("T")); // the observer blocks in this callback
-        assert!(eventually(Duration::from_secs(3), || {
-            (calls.load(Ordering::SeqCst) == 1).then_some(())
-        })
-        .is_some());
+        assert!(entered(&calls, 1));
         // Commands under the size cap, far fewer than QUEUE_MESSAGES.
-        let command = masked_text(&"y".repeat(1_000_000));
+        let command = "y".repeat(1_000_000);
         for _ in 0..4 {
             up.push(&command);
         }
@@ -530,17 +356,16 @@ mod tests {
     #[test]
     fn a_page_whose_attach_event_is_over_the_reply_cap_is_followed() {
         let reported = Reported::default();
-        let (mut up, mut down) = spawn(Tap::new(BROWSER, reported.callback()));
-        down.push(UPGRADED);
+        let (up, down) = spawn(Tap::new(BROWSER, reported.callback()));
         // Chromium's layout: `method` first, the URL in full.
         let attached = format!(
             r#"{{"method":"Target.attachedToTarget","params":{{"sessionId":"S1","targetInfo":{{"targetId":"T1","type":"page","title":"","url":"data:text/plain,{}"}},"waitingForDebugger":false}}}}"#,
             "x".repeat(4 * MAX_REPLY)
         );
-        push_in_chunks(&mut down, &text(&attached), 16 << 10);
-        up.push(&masked_text(
+        down.push(&attached);
+        up.push(
             r#"{"id":2,"method":"Page.navigate","params":{"url":"about:blank"},"sessionId":"S1"}"#,
-        ));
+        );
         assert!(
             eventually(Duration::from_secs(3), || (!reported.all().is_empty())
                 .then_some(()))
@@ -549,5 +374,29 @@ mod tests {
         );
         assert_eq!(reported.all(), ["T1"]);
         assert_eq!(up.off_reason(), None);
+    }
+
+    #[test]
+    fn an_attach_event_on_a_root_session_still_starts_with_the_prefix() {
+        // `params` ahead of `method`: the broker's rebuild puts them in order.
+        let event = json!({
+            "params": {
+                "sessionId": "S1",
+                "targetInfo": { "targetId": "T1", "type": "page", "url": "about:blank" },
+                "waitingForDebugger": false,
+            },
+            "method": "Target.attachedToTarget",
+        });
+        // Sent on the client's root session (the fake adds its `sessionId`).
+        let broker = fake_browser(move |_| Some(vec![event.clone()]));
+        let client = broker.connect_browser().unwrap();
+        client
+            .send(r#"{"id":1,"method":"Target.setAutoAttach","params":{}}"#)
+            .unwrap();
+        let Recv::Message(text) = client.recv(Duration::from_secs(5)) else {
+            panic!("no event");
+        };
+        assert!(text.starts_with(ATTACHED), "{text}");
+        assert!(!text.contains(r#""sessionId":"root"#), "{text}");
     }
 }

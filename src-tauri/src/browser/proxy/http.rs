@@ -1,24 +1,22 @@
 //! The HTTP side of the proxy: reading and vetting a client's request head
-//! before anything is launched, and relaying `/json*` discovery with the
-//! CDP WebSocket URLs rewritten to point back at the proxy.
+//! before anything is launched, and writing the plain responses.
 
-use std::fmt::Write as _;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::TcpStream;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Longest request head a client may send.
 pub(super) const MAX_HEAD: usize = 16 * 1024;
-const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A request head that passed [`admit`].
 pub(super) struct Admitted<'a> {
-    /// The head without its terminating blank line.
-    pub head: &'a str,
-    /// A `GET /json*` discovery request: relayed with rewritten URLs.
-    /// Everything else is a WebSocket upgrade or other `/json*` request,
-    /// spliced untouched.
-    pub discovery: bool,
+    pub method: &'a str,
+    /// The origin-form request target (path and query).
+    pub target: &'a str,
+    /// `Sec-WebSocket-Key`, when sent.
+    pub ws_key: Option<&'a str>,
+    /// `Sec-WebSocket-Version`, when sent.
+    pub ws_version: Option<&'a str>,
 }
 
 /// Vets `head` (without its terminator) before the lazy launch, so nothing
@@ -34,6 +32,7 @@ pub(super) fn admit(head: &[u8]) -> Result<Admitted<'_>, &'static str> {
         return Err("origin-form target required");
     };
     let (mut host, mut browser, mut upgrade) = (None, false, false);
+    let (mut ws_key, mut ws_version) = (None, None);
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             return Err("malformed header");
@@ -52,6 +51,10 @@ pub(super) fn admit(head: &[u8]) -> Result<Admitted<'_>, &'static str> {
             upgrade |= value
                 .split(',')
                 .any(|token| token.trim().eq_ignore_ascii_case("websocket"));
+        } else if name.eq_ignore_ascii_case("sec-websocket-key") {
+            ws_key = Some(value);
+        } else if name.eq_ignore_ascii_case("sec-websocket-version") {
+            ws_version = Some(value);
         }
     }
     if !host.is_some_and(loopback_authority) {
@@ -60,13 +63,14 @@ pub(super) fn admit(head: &[u8]) -> Result<Admitted<'_>, &'static str> {
     if browser {
         return Err("requests from a web browser are refused");
     }
-    let json = target.starts_with("/json");
-    if !json && !upgrade {
+    if !target.starts_with("/json") && !upgrade {
         return Err("WebSocket upgrade required");
     }
     Ok(Admitted {
-        head,
-        discovery: json && method == "GET",
+        method,
+        target,
+        ws_key,
+        ws_version,
     })
 }
 
@@ -145,98 +149,21 @@ pub(super) fn read_head(
     }
 }
 
+/// A plain-text response; the connection ends with it.
 pub(super) fn respond(stream: &mut TcpStream, status: &str, body: &str) -> io::Result<()> {
+    respond_as(stream, status, "text/plain; charset=UTF-8", body)
+}
+
+/// A response of `content_type`; the connection ends with it.
+pub(super) fn respond_as(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> io::Result<()> {
     write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
-}
-
-/// Replaces `127.0.0.1:{from}` and `localhost:{from}` with `127.0.0.1:{to}`.
-pub(super) fn rewrite_json(body: &str, from: u16, to: u16) -> String {
-    let target = format!("127.0.0.1:{to}");
-    body.replace(&format!("127.0.0.1:{from}"), &target)
-        .replace(&format!("localhost:{from}"), &target)
-}
-
-/// `head` is the admitted discovery request without its terminator; `ports`
-/// are Chromium's and the proxy's own. Only now may Host point at Chromium.
-pub(super) fn relay_json(
-    client: &mut TcpStream,
-    mut upstream: TcpStream,
-    head: &str,
-    ports: (u16, u16),
-) -> io::Result<()> {
-    let (chromium, own) = ports;
-    upstream.set_read_timeout(Some(UPSTREAM_TIMEOUT))?;
-    let mut request = String::with_capacity(head.len() + 24);
-    for line in head.split("\r\n").filter(|l| !has_header(l, "host")) {
-        request.push_str(line);
-        request.push_str("\r\n");
-    }
-    let _ = write!(request, "Host: 127.0.0.1:{chromium}\r\n\r\n");
-    upstream.write_all(request.as_bytes())?;
-
-    let (head, body) = read_response(&mut BufReader::new(upstream))?;
-    let body =
-        String::from_utf8(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let body = rewrite_json(&body, chromium, own);
-
-    let mut response = head
-        .iter()
-        .filter(|l| !has_header(l, "content-length") && !has_header(l, "connection"))
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join("\r\n");
-    let _ = write!(
-        response,
-        "\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    client.write_all(response.as_bytes())?;
-    Ok(())
-}
-
-/// Longest body [`read_response`] accepts: Chromium's discovery JSON lists
-/// one entry per target, far below this.
-const MAX_BODY: usize = 1 << 20;
-
-/// Reads one HTTP/1.1 response from Chromium: the status and header lines
-/// (without line ends) and the body. Chromium ignores `Connection: close`,
-/// so the body is read by `Content-Length`, never to EOF.
-pub(in crate::browser) fn read_response(
-    reader: &mut impl BufRead,
-) -> io::Result<(Vec<String>, Vec<u8>)> {
-    let invalid = |why: &str| io::Error::new(io::ErrorKind::InvalidData, why);
-    let mut head = Vec::new();
-    let mut length = None;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        let line = line.trim_end();
-        if line.is_empty() {
-            break;
-        }
-        if has_header(line, "content-length") {
-            length = line
-                .split_once(':')
-                .and_then(|(_, v)| v.trim().parse::<usize>().ok());
-        }
-        head.push(line.to_owned());
-    }
-    let length = length.ok_or_else(|| invalid("response has no Content-Length"))?;
-    if length > MAX_BODY {
-        return Err(invalid("response body is too large"));
-    }
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body)?;
-    Ok((head, body))
-}
-
-fn has_header(line: &str, name: &str) -> bool {
-    line.split_once(':')
-        .is_some_and(|(n, _)| n.trim().eq_ignore_ascii_case(name))
 }
