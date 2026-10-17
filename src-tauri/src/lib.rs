@@ -645,7 +645,8 @@ async fn approval_rules_list(
 /// that same process (`AgentBridge::approve_and_grant`), never from the
 /// webview: a prompt with no open match in that process is refused with
 /// nothing answered or saved, and a rule is saved only once the answer was
-/// written.
+/// written. A rejection means nothing reached omp (the prompt still waits);
+/// `Some(reason)` means the prompt was approved but the rule was not saved.
 ///
 /// Runs `async` + `spawn_blocking`: a project grant's `RuleBook::grant`
 /// performs a locked file read-modify-write with up to several blocking
@@ -657,7 +658,7 @@ async fn approval_approve_and_grant(
     request_id: String,
     scope: String,
     app: AppHandle,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let scope = parse_rule_scope(&scope)?;
     off_ipc(move || {
         let rule_book = app.state::<Arc<RuleBook>>();

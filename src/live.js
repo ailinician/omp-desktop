@@ -520,6 +520,23 @@
     return settled;
   }
 
+  // Undo a local `_settleAsk` whose answer never reached omp: the bubble
+  // with this id that reads answered (and was not cancelled by omp since)
+  // takes input again. Returns whether one matched.
+  function _reopenAsk(id) {
+    let reopened = false;
+    state.messages = state.messages.map(m => {
+      if (m.kind === "ask" && m.id === id && m.answered && !m.cancelled) {
+        reopened = true;
+        const { answered: _a, answer: _v, ...open } = m;
+        return open;
+      }
+      return m;
+    });
+    if (reopened) notify();
+    return reopened;
+  }
+
   // Resolve a pending ask bubble: settle it, then send `payload` back to
   // omp — only if it was still open, so a re-answer sends nothing.
   // Proven with an eval-kernel cell (7/7 cases: patch applied, array
@@ -3588,12 +3605,33 @@
      *  so a grant never lands on another tab's scope. The bubble settles at
      *  once (its buttons go inert, so a second click sends nothing), and
      *  the call names the prompt's own session, whichever tab is active by
-     *  the time it runs. A prompt not in the active tab is left alone. */
+     *  the time it runs. A prompt not in the active tab is left alone.
+     *  A rejection means nothing reached omp (prompt unknown to Rust: past
+     *  the 64-prompt cap, an id too long to record, no running process), so
+     *  the bubble is reopened for a plain Approve/Deny and a note says why —
+     *  never a fallback `send_command` Approve, which would answer whatever
+     *  process now holds the id. A non-null value means the prompt was
+     *  approved but the rule was not saved. Both only while this activation
+     *  of the tab is still the one shown (the bubble lives in its state). */
     async approveAndRemember(prompt, scope) {
       const sessionId = prompt?.sessionId;
       if (!sessionId || sessionId !== activeSessionId || !prompt.id) return;
       if (!_settleAsk(prompt.id, { answered: true, answer: "Approve" })) return;
-      await _invokeSafe("approval_approve_and_grant", { sessionId, requestId: prompt.id, scope });
+      const gen = _switchGen;
+      const res = await _invokeResult("approval_approve_and_grant", { sessionId, requestId: prompt.id, scope });
+      const unsaved = res.ok ? res.value : null;
+      if (res.ok && !unsaved) return;
+      if (_switchGen !== gen || activeSessionId !== sessionId) {
+        console.warn(`[live] approve and remember for '${sessionId}':`, res.ok ? unsaved : res.error);
+        return;
+      }
+      if (!res.ok) {
+        _reopenAsk(prompt.id);
+        _pushAssistantNote(`**Approve and remember failed:** ${res.error}. The prompt is open again.`);
+      } else {
+        _pushAssistantNote(`**Approved, but the rule was not saved:** ${unsaved}`);
+      }
+      notify();
     },
 
     /** Revoke a previously granted rule. No-op if it wasn't granted. */

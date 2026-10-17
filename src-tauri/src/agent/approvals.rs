@@ -28,7 +28,9 @@ use crate::approval::{self, RuleBook, RuleScope};
 const MAX_PENDING: usize = 64;
 
 /// Longest request id recorded. omp's ids are short; a longer one is not
-/// kept, so its prompt can still be answered but not granted.
+/// kept, so its prompt can still be answered with Approve or Deny, but
+/// "Approve and remember" is refused with nothing written (the webview
+/// then reopens the prompt).
 const MAX_ID_BYTES: usize = 256;
 
 pub(super) struct PendingApprovals {
@@ -143,16 +145,19 @@ impl AgentBridge {
     ///    cannot outlive a reap that already cleared the session's grants
     ///    (`reap_and_clear_grants` clears after the removal). A project
     ///    grant writes its file without the locks, so this blocks: call it
-    ///    off the IPC thread. A grant that fails here leaves the prompt
-    ///    answered (the user approved it in the same click) and is
-    ///    reported as the error.
+    ///    off the IPC thread.
+    ///
+    /// `Err`: nothing was written to omp — the prompt is still waiting, and
+    /// the caller may offer it again. `Ok(None)`: answered and granted.
+    /// `Ok(Some(reason))`: answered (the user approved it in the same
+    /// click), but the rule was not saved for `reason`.
     pub fn approve_and_grant(
         &self,
         rule_book: &RuleBook,
         session_id: &str,
         request_id: &str,
         scope: RuleScope,
-    ) -> Result<(), String> {
+    ) -> Result<Option<String>, String> {
         self.approve_and_grant_via(rule_book, session_id, request_id, scope, |inner| {
             inner.stdin.as_ref().map(Arc::clone)
         })
@@ -167,7 +172,7 @@ impl AgentBridge {
         request_id: &str,
         scope: RuleScope,
         stdin_of: impl FnOnce(&BridgeInner) -> Option<Arc<Mutex<W>>>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<String>, String> {
         let (stdin, open, tool, root) = self
             .with_entry(session_id, |inner| {
                 let stdin = stdin_of(inner).ok_or_else(|| "agent not running".to_string())?;
@@ -205,18 +210,20 @@ impl AgentBridge {
         }
 
         let ended = || format!("session '{session_id}' ended before the grant was saved");
-        match root {
-            None => self
-                .with_entry(session_id, |inner| {
+        let granted = root.map_or_else(
+            || {
+                self.with_entry(session_id, |inner| {
                     if Arc::ptr_eq(&inner.approvals, &open) {
                         rule_book.grant(session_id, None, &tool, RuleScope::Session)
                     } else {
                         Err(ended())
                     }
-                })?
-                .unwrap_or_else(|| Err(ended())),
-            Some(root) => rule_book.grant(session_id, Some(&root), &tool, RuleScope::Project),
-        }
+                })
+                .and_then(|granted| granted.unwrap_or_else(|| Err(ended())))
+            },
+            |root| rule_book.grant(session_id, Some(&root), &tool, RuleScope::Project),
+        );
+        Ok(granted.err())
     }
 }
 
@@ -333,7 +340,7 @@ mod tests {
         request_id: &str,
         scope: RuleScope,
         pipe: &Pipe,
-    ) -> Result<(), String> {
+    ) -> Result<Option<String>, String> {
         bridge.approve_and_grant_via(book, session_id, request_id, scope, |_| {
             Some(Arc::clone(pipe))
         })
@@ -377,7 +384,10 @@ mod tests {
         assert_eq!(written(&pipe), "", "nothing answered");
         assert!(!book.is_granted("sess-b", Some(&proj_b), "bash"));
 
-        approve(&bridge, &book, "sess-a", "req-1", RuleScope::Project, &pipe).unwrap();
+        assert_eq!(
+            approve(&bridge, &book, "sess-a", "req-1", RuleScope::Project, &pipe),
+            Ok(None)
+        );
         assert_eq!(written(&pipe), approve_line("req-1"));
         assert!(book.is_granted("any-session", Some(&proj_a), "bash"));
         assert!(!book.is_granted("sess-b", Some(&proj_b), "bash"));
@@ -390,7 +400,10 @@ mod tests {
         assert_eq!(written(&pipe), approve_line("req-1"));
         assert!(!book.is_granted("sess-a", None, "bash"));
 
-        approve(&bridge, &book, "sess-a", "req-2", RuleScope::Session, &pipe).unwrap();
+        assert_eq!(
+            approve(&bridge, &book, "sess-a", "req-2", RuleScope::Session, &pipe),
+            Ok(None)
+        );
         assert_eq!(
             written(&pipe),
             approve_line("req-1") + &approve_line("req-2")
@@ -499,13 +512,39 @@ mod tests {
         let dir = TempDir::new("approvals", "approve-respawn-mid");
         let book = RuleBook::new(dir.path().join("rules"));
         let bridge = bridge_with_prompts(dir.path());
-        let err = bridge
+        let unsaved = bridge
             .approve_and_grant_via(&book, "sess-a", "req-1", RuleScope::Session, |_| {
                 Some(Arc::new(Mutex::new(Respawning(&bridge))))
             })
-            .unwrap_err();
-        assert!(err.contains("ended before the grant"), "{err}");
+            .unwrap()
+            .expect("answered, rule not saved");
+        assert!(unsaved.contains("ended before the grant"), "{unsaved}");
         assert!(!book.is_granted("sess-a", None, "bash"));
+    }
+
+    /// The answer reached omp but the project rules file could not be
+    /// written: reported as answered-without-rule, and the prompt stays
+    /// answered (not put back for a second answer).
+    #[test]
+    fn a_failed_project_rules_write_after_the_answer_reports_the_unsaved_rule() {
+        let dir = TempDir::new("approvals", "approve-rules-unwritable");
+        // The rules folder is a regular file, so the grant cannot be saved.
+        let rules = dir.path().join("rules");
+        std::fs::write(&rules, b"not a folder").unwrap();
+        let book = RuleBook::new(rules);
+        let bridge = bridge_with_prompts(dir.path());
+        let pipe = Pipe::default();
+        let unsaved = approve(&bridge, &book, "sess-a", "req-1", RuleScope::Project, &pipe)
+            .unwrap()
+            .expect("answered, rule not saved");
+        assert_ne!(unsaved, "");
+        assert_eq!(written(&pipe), approve_line("req-1"));
+        assert_eq!(
+            open_tool(&bridge, "sess-a", "req-1"),
+            None,
+            "stays answered"
+        );
+        assert!(!book.is_granted("sess-a", Some(dir.path()), "bash"));
     }
 
     #[test]
@@ -531,7 +570,10 @@ mod tests {
             approve(&bridge, &book, "sess-a", "req-1", RuleScope::Project, &pipe).unwrap_err();
         assert!(err.contains("requires a project root"), "{err}");
         assert_eq!(written(&pipe), "");
-        approve(&bridge, &book, "sess-a", "req-1", RuleScope::Session, &pipe).unwrap();
+        assert_eq!(
+            approve(&bridge, &book, "sess-a", "req-1", RuleScope::Session, &pipe),
+            Ok(None)
+        );
         assert_eq!(written(&pipe), approve_line("req-1"));
         assert!(book.is_granted("sess-a", None, "bash"));
     }
