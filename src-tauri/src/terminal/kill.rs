@@ -320,12 +320,7 @@ fn list_pids() -> Vec<i32> {
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn list_pids() -> Vec<i32> {
-    use std::process::{Command, Stdio};
-    Command::new("/bin/ps")
-        .args(["-A", "-o", "pid="])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
+    crate::spawn_gate::output(std::process::Command::new("/bin/ps").args(["-A", "-o", "pid="]))
         .map_or_else(
             |_| Vec::new(),
             |out| {

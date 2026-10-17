@@ -44,7 +44,12 @@ use std::path::{Path, PathBuf};
 /// commands are the user's own choice, as they are for `git status`. The
 /// built-in conversions (`eol`, `text`, `ident`, `working-tree-encoding`)
 /// run no command and are kept too.
-fn open(path: &Path) -> Result<(gix::Repository, PathBuf), String> {
+///
+/// The drivers that stay are commands gix runs: the returned guard holds
+/// the spawn gate ([`crate::spawn_gate`]) and must live as long as the
+/// reads on the repository.
+fn open(path: &Path) -> Result<(crate::spawn_gate::Shared, gix::Repository, PathBuf), String> {
+    let gate = crate::spawn_gate::shared();
     let (mut repo, work_dir) = crate::workspace::discover(path)?;
     // Collected first: the read borrows the config the removal replaces.
     let local: Vec<_> = repo
@@ -66,7 +71,7 @@ fn open(path: &Path) -> Result<(gix::Repository, PathBuf), String> {
             .commit()
             .map_err(fail("failed to configure git filters"))?;
     }
-    Ok((repo, work_dir))
+    Ok((gate, repo, work_dir))
 }
 
 /// Files a tree carries before it is cut off and marked `truncated` —

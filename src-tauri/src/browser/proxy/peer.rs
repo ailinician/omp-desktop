@@ -452,13 +452,14 @@ mod lsof {
         /// lookup) for the established TCP sockets matching `selection`;
         /// `None` when it cannot run or takes over [`TIMEOUT`].
         fn lsof(selection: &str) -> Option<String> {
-            let mut child = Command::new("/usr/sbin/lsof")
-                .args(["-nP", "-a", selection, "-sTCP:ESTABLISHED", "-Fpun"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .ok()?;
+            let mut child = crate::spawn_gate::spawn(
+                Command::new("/usr/sbin/lsof")
+                    .args(["-nP", "-a", selection, "-sTCP:ESTABLISHED", "-Fpun"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null()),
+            )
+            .ok()?;
             let Some(mut stdout) = child.stdout.take() else {
                 let _ = child.kill();
                 let _ = child.wait();

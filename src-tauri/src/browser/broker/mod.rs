@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -70,11 +70,6 @@ struct State {
     next_client: ClientId,
 }
 
-struct Threads {
-    reader: JoinHandle<()>,
-    writer: JoinHandle<()>,
-}
-
 pub struct Broker {
     /// For the `/devtools/browser/<id>` URL the proxy hands out.
     id: String,
@@ -86,13 +81,12 @@ pub struct Broker {
     /// Ids on the pipe: the broker's own commands and every client's.
     next_id: AtomicU64,
     alive: AtomicBool,
-    threads: Mutex<Option<Threads>>,
 }
 
 impl Broker {
     /// Serve the pipe pair: `from_chromium` is read and `to_chromium`
-    /// written on threads of their own, until the pipe ends or the broker
-    /// is closed (or dropped).
+    /// written on threads of their own, until the pipe ends (Chromium is
+    /// gone) or the broker is closed (or dropped).
     pub fn start(
         from_chromium: impl Read + Send + 'static,
         to_chromium: impl Write + Send + 'static,
@@ -110,10 +104,9 @@ impl Broker {
             waiters: Waiters::new(CLOSED),
             next_id: AtomicU64::new(1),
             alive: AtomicBool::new(true),
-            threads: Mutex::new(None),
         });
         let reading = Arc::downgrade(&broker);
-        let reader = thread::Builder::new()
+        thread::Builder::new()
             .name("browser-cdp-pipe".into())
             .spawn(move || {
                 Self::read_loop(
@@ -122,10 +115,9 @@ impl Broker {
                 );
             })?;
         let writing = Arc::downgrade(&broker);
-        let writer = thread::Builder::new()
+        thread::Builder::new()
             .name("browser-cdp-write".into())
             .spawn(move || Self::write_loop(&writing, &queue, to_chromium))?;
-        *lock(&broker.threads) = Some(Threads { reader, writer });
         Ok(broker)
     }
 
@@ -261,9 +253,10 @@ impl Broker {
         })
     }
 
-    /// End the connection: every client and pending call ends, the writer
-    /// stops and the pipe threads are woken. Idempotent, and callable from
-    /// any thread. Chromium itself is the caller's to stop.
+    /// End the connection: every client and pending call ends and the
+    /// writer stops. Idempotent, and callable from any thread. Chromium
+    /// itself is the caller's to stop; the reader leaves when its pipe ends
+    /// with it, or at the next message.
     pub fn close(&self) {
         if !self.alive.swap(false, Ordering::SeqCst) {
             return;
@@ -279,16 +272,6 @@ impl Broker {
         }
         // The writer ends with its queue and drops our end of the pipe.
         self.to_chromium.close();
-        let threads = lock(&self.threads);
-        if let Some(threads) = threads.as_ref() {
-            let ours = [&threads.reader, &threads.writer];
-            let me = thread::current().id();
-            // On a pipe thread the flags are enough: it leaves when this
-            // call returns.
-            if ours.iter().all(|t| t.thread().id() != me) {
-                super::process::cancel_blocked_read(&ours);
-            }
-        }
     }
 
     fn read_loop(broker: &Weak<Self>, mut from: impl BufRead) {

@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -95,11 +95,9 @@ impl Chromium {
         let pipes = attach(&mut cmd).map_err(|e| Failure::Fatal(format!("cdp pipe: {e}")))?;
         apply_child_path(&mut cmd);
         ProcessSupervisor::prepare(&mut cmd);
-        let spawned = cmd.spawn();
-        // Close our copies of Chromium's ends whatever happened: the pipes
-        // must end with the browser.
-        let (from_chromium, to_chromium) = pipes.spawned();
-        let mut child = spawned.map_err(|e| Failure::Binary(format!("cannot run: {e}")))?;
+        let (mut child, from_chromium, to_chromium) = pipes
+            .spawn(&mut cmd)
+            .map_err(|e| Failure::Binary(format!("cannot run: {e}")))?;
         let supervisor = ProcessSupervisor::attach(&child);
         let mut pid_path = profile.as_os_str().to_os_string();
         pid_path.push(".pid");
@@ -112,25 +110,11 @@ impl Chromium {
                 Broker::start(from_chromium, to_chromium)
                     .map_err(|e| Failure::Fatal(format!("cdp pipe reader: {e}")))
             });
-        // The end of Chromium's stderr closes the broker: the process tree
-        // is gone even if the pipe never reports its end (on Windows another
-        // process can inherit the pipe's ends). Weak: the drain thread must
-        // not keep the connection alive.
-        let watched = broker.as_ref().ok().map(Arc::downgrade);
-        let stderr = child.stderr.take().map(|stderr| {
-            StderrTail::drain(stderr, move || {
-                if let Some(broker) = watched.as_ref().and_then(Weak::upgrade) {
-                    broker.close();
-                }
-            })
-        });
+        let stderr = child.stderr.take().map(StderrTail::drain);
 
         let started = broker.and_then(|broker| match wait_for_browser(&mut child, &broker) {
             Ok(()) => Ok(broker),
             Err(failure) => {
-                // Here, before the kill: a pipe thread holding the broker
-                // for a moment would otherwise close it on that thread,
-                // which cannot cancel the other's blocked I/O.
                 broker.close();
                 Err(failure)
             }

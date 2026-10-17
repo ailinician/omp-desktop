@@ -1,20 +1,26 @@
 //! The pipe pair a launched Chromium speaks CDP over
 //! (`--remote-debugging-pipe`): Chromium reads commands from one and writes
 //! replies and events to the other, and opens no debugging port. Only this
-//! process holds the far ends, so no other local process — of this user or
-//! another — can reach the browser except through the broker.
+//! process and Chromium hold the pipe ends, so no other local process — of
+//! this user or another, our own children included — can reach the browser
+//! except through the broker, and the pipe ends with Chromium.
 //!
 //! Unix: Chromium reads fd 3 and writes fd 4; the child's ends are moved
-//! there between fork and exec. Windows: Chromium takes the two handle
-//! values from `--remote-debugging-io-pipes=<read>,<write>`; the child's
-//! ends are made inheritable for the spawn and closed here right after it.
+//! there between fork and exec, and are close-on-exec everywhere else.
+//! Windows: Chromium takes the two handle values from
+//! `--remote-debugging-io-pipes=<read>,<write>`, so its ends must be
+//! inheritable while its process is created — and every child created in
+//! that moment inherits every inheritable handle. [`CdpPipes::spawn`] makes
+//! them inheritable only under the exclusive spawn gate
+//! ([`crate::spawn_gate`]) and closes them before releasing it.
 
 use std::io::{self, PipeReader, PipeWriter};
-use std::process::Command;
-use std::thread::JoinHandle;
+use std::process::{Child, Command};
+
+use crate::spawn_gate;
 
 /// Our ends of a launched Chromium's CDP pipes, and the ends its process
-/// takes over, until [`spawned`](Self::spawned).
+/// takes over, until [`spawn`](Self::spawn).
 pub struct CdpPipes {
     from_chromium: PipeReader,
     to_chromium: PipeWriter,
@@ -23,17 +29,28 @@ pub struct CdpPipes {
 }
 
 impl CdpPipes {
-    /// The spawn is done (or failed): close our copies of the child's ends,
-    /// so the pipes end when Chromium does, and hand over ours: what
-    /// Chromium writes, what it reads.
-    pub fn spawned(self) -> (PipeReader, PipeWriter) {
+    /// Start `cmd` (set up by [`attach`]) with Chromium's ends, then close
+    /// our copies of them, so the pipes end when Chromium does, and hand
+    /// over ours: what Chromium writes, what it reads. Waits for every other
+    /// spawn in flight (the gate).
+    #[allow(clippy::disallowed_methods)] // the gate is held exclusively
+    pub fn spawn(self, cmd: &mut Command) -> io::Result<(Child, PipeReader, PipeWriter)> {
         let Self {
             from_chromium,
             to_chromium,
             child,
         } = self;
-        drop(child);
-        (from_chromium, to_chromium)
+        let spawned = {
+            let _gate = spawn_gate::exclusive();
+            #[cfg(windows)]
+            let spawned = make_inheritable(&child.0, &child.1).and_then(|()| cmd.spawn());
+            #[cfg(unix)]
+            let spawned = cmd.spawn();
+            // Closed, inheritable as they are, before another spawn may run.
+            drop(child);
+            spawned
+        };
+        Ok((spawned?, from_chromium, to_chromium))
     }
 }
 
@@ -42,7 +59,7 @@ pub fn attach(cmd: &mut Command) -> io::Result<CdpPipes> {
     let (child_reads, to_chromium) = io::pipe()?;
     let (from_chromium, child_writes) = io::pipe()?;
     cmd.arg("--remote-debugging-pipe");
-    hand_over(cmd, &child_reads, &child_writes)?;
+    hand_over(cmd, &child_reads, &child_writes);
     Ok(CdpPipes {
         from_chromium,
         to_chromium,
@@ -50,10 +67,8 @@ pub fn attach(cmd: &mut Command) -> io::Result<CdpPipes> {
     })
 }
 
-/// Infallible here; the signature is the Windows one's.
 #[cfg(unix)]
-#[allow(clippy::unnecessary_wraps)]
-fn hand_over(cmd: &mut Command, reads: &PipeReader, writes: &PipeWriter) -> io::Result<()> {
+fn hand_over(cmd: &mut Command, reads: &PipeReader, writes: &PipeWriter) {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
 
@@ -61,11 +76,11 @@ fn hand_over(cmd: &mut Command, reads: &PipeReader, writes: &PipeWriter) -> io::
     // SAFETY: the closure runs in the forked child before exec and calls
     // only async-signal-safe functions (`fcntl`, `dup2`, `close`) on fds
     // that are open in the child: `reads`/`writes` stay open in this process
-    // until `CdpPipes::spawned`, which comes after the spawn returned. The
-    // copies above 9 keep `dup2` from clobbering one end with the other when
-    // either already is fd 3 or 4; `dup2` clears close-on-exec on 3 and 4,
-    // while the originals (opened close-on-exec by `io::pipe`) and the
-    // closed copies do not reach Chromium.
+    // until `CdpPipes::spawn` has spawned. The copies above 9 keep `dup2`
+    // from clobbering one end with the other when either already is fd 3 or
+    // 4; `dup2` clears close-on-exec on 3 and 4, while the originals (opened
+    // close-on-exec by `io::pipe`) and the closed copies do not reach
+    // Chromium.
     unsafe {
         cmd.pre_exec(move || {
             let r = libc::fcntl(reads, libc::F_DUPFD, 10);
@@ -78,11 +93,25 @@ fn hand_over(cmd: &mut Command, reads: &PipeReader, writes: &PipeWriter) -> io::
             Ok(())
         });
     }
-    Ok(())
 }
 
 #[cfg(windows)]
-fn hand_over(cmd: &mut Command, reads: &PipeReader, writes: &PipeWriter) -> io::Result<()> {
+fn hand_over(cmd: &mut Command, reads: &PipeReader, writes: &PipeWriter) {
+    use std::os::windows::io::AsRawHandle;
+
+    // An inherited handle keeps its value in the child. Handle values fit
+    // in 32 bits (Chromium parses them as such).
+    cmd.arg(format!(
+        "--remote-debugging-io-pipes={},{}",
+        reads.as_raw_handle() as usize,
+        writes.as_raw_handle() as usize
+    ));
+}
+
+/// Let Chromium inherit its ends. Only under the exclusive gate: from here
+/// until they are closed, every child created inherits them.
+#[cfg(windows)]
+fn make_inheritable(reads: &PipeReader, writes: &PipeWriter) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
 
@@ -96,79 +125,66 @@ fn hand_over(cmd: &mut Command, reads: &PipeReader, writes: &PipeWriter) -> io::
             return Err(io::Error::last_os_error());
         }
     }
-    // An inherited handle keeps its value in the child. Handle values fit
-    // in 32 bits (Chromium parses them as such).
-    cmd.arg(format!(
-        "--remote-debugging-io-pipes={},{}",
-        reads.as_raw_handle() as usize,
-        writes.as_raw_handle() as usize
-    ));
     Ok(())
 }
-
-/// Wake `threads` when they are blocked reading or writing a CDP pipe, and
-/// wait for them to end, so a broker that closed does not keep its pipe
-/// threads. Windows only: there, another process spawned while Chromium's
-/// ends were inheritable can hold a copy of them, so the pipe need not end
-/// with Chromium. On Unix the ends are never inheritable, and the pipe ends
-/// once Chromium is gone.
-///
-/// A cancel that lands just before a thread enters its blocking call is
-/// lost, so it is repeated every 10 ms until every thread has finished, for
-/// about a second at most. Never call it on one of `threads`.
-#[cfg(windows)]
-pub fn cancel_blocked_read(threads: &[&JoinHandle<()>]) {
-    use std::time::{Duration, Instant};
-
-    const RETRY: Duration = Duration::from_millis(10);
-    const GIVE_UP: Duration = Duration::from_secs(1);
-
-    let deadline = Instant::now() + GIVE_UP;
-    loop {
-        let mut running = false;
-        for thread in threads.iter().filter(|thread| !thread.is_finished()) {
-            running = true;
-            cancel_synchronous_io(thread);
-        }
-        if !running || Instant::now() >= deadline {
-            return;
-        }
-        std::thread::sleep(RETRY);
-    }
-}
-
-#[cfg(windows)]
-fn cancel_synchronous_io(thread: &JoinHandle<()>) {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::HANDLE;
-    use windows_sys::Win32::System::IO::CancelSynchronousIo;
-
-    // SAFETY: the join handle keeps the thread handle open; cancelling I/O
-    // of a thread that is not blocked (or already finished) is a no-op
-    // that fails with ERROR_NOT_FOUND, which is ignored.
-    unsafe {
-        CancelSynchronousIo(thread.as_raw_handle() as HANDLE);
-    }
-}
-
-#[cfg(unix)]
-pub const fn cancel_blocked_read(_threads: &[&JoinHandle<()>]) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// A stand-in for Chromium that exits at once.
+    fn exiting() -> Command {
+        if cfg!(windows) {
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/C", "exit"]);
+            cmd
+        } else {
+            Command::new("true")
+        }
+    }
+
+    /// A child of ours that outlives the test's reads unless killed.
+    fn bystander() -> Child {
+        #[cfg(windows)]
+        let mut cmd = Command::new("ping");
+        #[cfg(windows)]
+        cmd.args(["-n", "30", "127.0.0.1"]);
+        #[cfg(unix)]
+        let mut cmd = Command::new("sleep");
+        #[cfg(unix)]
+        cmd.arg("30");
+        cmd.stdin(Stdio::null()).stdout(Stdio::null());
+        spawn_gate::spawn(&mut cmd).unwrap()
+    }
+
+    /// Read `from_chromium` to its end on a thread: whether that came
+    /// within `limit` (no process but the exited stand-in held its far end).
+    fn ends_within(mut from_chromium: PipeReader, limit: Duration) -> bool {
+        let (tx, ended) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut rest = Vec::new();
+            tx.send(from_chromium.read_to_end(&mut rest).map(|_| rest))
+                .unwrap();
+        });
+        matches!(ended.recv_timeout(limit), Ok(Ok(rest)) if rest.is_empty())
+    }
 
     #[test]
-    fn attach_asks_for_the_pipe_and_spawned_closes_the_child_ends() {
-        let mut cmd = Command::new("chromium");
+    fn attach_asks_for_the_pipe_and_spawn_closes_the_child_ends() {
+        let mut cmd = exiting();
         let pipes = attach(&mut cmd).unwrap();
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(args[0], "--remote-debugging-pipe");
+        let pipe_flag = args.iter().position(|a| a == "--remote-debugging-pipe");
+        let pipe_flag = pipe_flag.expect("--remote-debugging-pipe");
         if cfg!(windows) {
-            let handles = args[1]
+            let handles = args[pipe_flag + 1]
                 .strip_prefix("--remote-debugging-io-pipes=")
                 .unwrap();
             let (r, w) = handles.split_once(',').unwrap();
@@ -177,25 +193,65 @@ mod tests {
                 "{handles}"
             );
         }
-        let (mut from_chromium, _to_chromium) = pipes.spawned();
-        // With the child's write end closed, our read end sees EOF.
-        let mut buf = [0u8; 1];
+        let (mut child, from_chromium, _to_chromium) = pipes.spawn(&mut cmd).unwrap();
+        child.wait().unwrap();
+        // With the child gone and our copy of its write end closed, our
+        // read end sees EOF.
+        assert!(ends_within(from_chromium, Duration::from_secs(5)));
+    }
+
+    /// The bug this guards against: Chromium's ends were inheritable from
+    /// `attach` on, and a child spawned before Chromium inherited them, so
+    /// the pipe outlived the browser and that child could drive it.
+    #[test]
+    fn a_child_spawned_meanwhile_does_not_inherit_the_ends() {
+        let mut cmd = exiting();
+        let pipes = attach(&mut cmd).unwrap();
+        let mut before = bystander();
+        let (mut child, from_chromium, _to_chromium) = pipes.spawn(&mut cmd).unwrap();
+        let mut after = bystander();
+        child.wait().unwrap();
+        let ended = ends_within(from_chromium, Duration::from_secs(5));
+        for bystander in [&mut before, &mut after] {
+            let _ = bystander.kill();
+            let _ = bystander.wait();
+        }
+        assert!(ended, "the pipe ended with Chromium");
+    }
+
+    /// Chromium's ends are made inheritable only once every spawn in flight
+    /// is done (Windows: elsewhere the gate does nothing).
+    #[cfg(windows)]
+    #[test]
+    fn spawn_waits_for_spawns_in_flight() {
+        let mut cmd = exiting();
+        let pipes = attach(&mut cmd).unwrap();
+        let in_flight = spawn_gate::shared();
+        let (tx, spawned) = mpsc::channel();
+        let launch = std::thread::spawn(move || {
+            let (mut child, _, _) = pipes.spawn(&mut cmd).unwrap();
+            tx.send(()).unwrap();
+            child.wait().unwrap();
+        });
         assert_eq!(
-            std::io::Read::read(&mut from_chromium, &mut buf).unwrap(),
-            0
+            spawned.recv_timeout(Duration::from_millis(200)),
+            Err(mpsc::RecvTimeoutError::Timeout),
+            "Chromium's spawn waits for the one in flight"
         );
+        drop(in_flight);
+        assert_eq!(spawned.recv_timeout(Duration::from_secs(5)), Ok(()));
+        launch.join().unwrap();
     }
 
     /// The child really gets the pipes on the descriptors Chromium uses.
     #[cfg(unix)]
     #[test]
     fn a_unix_child_reads_fd_3_and_writes_fd_4() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "read line <&3; printf '%s!' \"$line\" >&4"]);
         let pipes = attach(&mut cmd).unwrap();
-        let mut child = cmd.spawn().unwrap();
-        let (mut from_chromium, mut to_chromium) = pipes.spawned();
+        let (mut child, mut from_chromium, mut to_chromium) = pipes.spawn(&mut cmd).unwrap();
         to_chromium.write_all(b"hello\n").unwrap();
         let mut got = String::new();
         from_chromium.read_to_string(&mut got).unwrap();

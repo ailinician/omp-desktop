@@ -27,10 +27,8 @@ pub struct StderrTail {
 }
 
 impl StderrTail {
-    /// Drain `stderr` on a thread; `on_end` runs there once the pipe ends
-    /// (the browser's whole process tree closed it). Never runs when no
-    /// thread could be started.
-    pub fn drain(mut stderr: ChildStderr, on_end: impl FnOnce() + Send + 'static) -> Self {
+    /// Drain `stderr` on a thread.
+    pub fn drain(mut stderr: ChildStderr) -> Self {
         let kept = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&kept);
         let reader = std::thread::Builder::new()
@@ -40,7 +38,6 @@ impl StderrTail {
                 while let Ok(n @ 1..) = stderr.read(&mut chunk) {
                     keep(&mut lock(&sink), &chunk[..n]);
                 }
-                on_end();
             });
         Self {
             kept,
@@ -90,7 +87,6 @@ fn tail_text(bytes: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use std::process::{Command, Stdio};
-    use std::sync::mpsc;
 
     #[test]
     fn the_tail_keeps_the_last_whole_lines() {
@@ -159,22 +155,13 @@ mod tests {
             .unwrap()
     }
 
-    /// `on_end` runs once stderr ends, not before; the tail is still kept.
+    /// The tail is read once the process ends: settle waits for the reader.
     #[test]
-    fn the_end_callback_runs_when_stderr_ends() {
+    fn the_tail_is_kept_until_stderr_ends() {
         let mut child = waiting_child();
-        let (tx, ended) = mpsc::channel();
-        let tail = StderrTail::drain(child.stderr.take().unwrap(), move || {
-            tx.send(()).unwrap();
-        });
-        assert_eq!(
-            ended.recv_timeout(Duration::from_millis(300)),
-            Err(mpsc::RecvTimeoutError::Timeout),
-            "stderr still open"
-        );
+        let tail = StderrTail::drain(child.stderr.take().unwrap());
         drop(child.stdin.take());
         child.wait().unwrap();
-        assert_eq!(ended.recv_timeout(Duration::from_secs(5)), Ok(()));
         assert_eq!(tail.settle(), Some("hi".into()));
     }
 }

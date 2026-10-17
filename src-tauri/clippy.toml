@@ -1,0 +1,13 @@
+# Every child process goes through `src/spawn_gate.rs`, so none but Chromium
+# can inherit Chromium's CDP pipe ends (Windows). A call that must stay holds
+# `spawn_gate::shared()` and allows the lint with a comment.
+disallowed-methods = [
+    { path = "std::process::Command::spawn", reason = "use spawn_gate::spawn" },
+    { path = "std::process::Command::output", reason = "use spawn_gate::output" },
+    { path = "std::process::Command::status", reason = "use spawn_gate::status" },
+    { path = "portable_pty::SlavePty::spawn_command", reason = "hold spawn_gate::shared() around it" },
+    { path = "open::that_detached", reason = "hold spawn_gate::shared() around it" },
+    { path = "open::that", reason = "hold spawn_gate::shared() around it" },
+    { path = "gix::discover", reason = "hold spawn_gate::shared(): gix may run git" },
+    { path = "gix::open", reason = "hold spawn_gate::shared(): gix may run git" },
+]
