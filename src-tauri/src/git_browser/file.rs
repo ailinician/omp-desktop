@@ -182,7 +182,9 @@ fn read_worktree(repo: &gix::Repository, work_dir: &Path, rel: &str) -> Result<S
     })
 }
 
-fn is_binary(bytes: &[u8]) -> bool {
+/// Whether `bytes` look binary: a NUL in the first [`BINARY_SNIFF_BYTES`]
+/// (also the file preview's test, `project_file.rs`).
+pub fn is_binary(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0)
 }
 
