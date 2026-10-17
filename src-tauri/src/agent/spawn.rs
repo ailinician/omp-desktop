@@ -1,5 +1,5 @@
 use crate::approval_mode::ApprovalMode;
-use crate::child_path::{child_path_dirs, join_dirs};
+use crate::child_path::{child_path_dirs, find_program, join_dirs};
 use crate::program_setting::is_executable_file;
 use std::ffi::{OsStr, OsString};
 #[cfg(windows)]
@@ -86,17 +86,6 @@ impl Omp {
             .output()
             .map_err(|e| format!("failed to run {}: {e}", self.binary.display()))
     }
-}
-
-/// The first `name` that `is_executable` accepts in `dirs`, in order.
-fn find_program(
-    dirs: &[PathBuf],
-    name: &str,
-    is_executable: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    dirs.iter()
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable(candidate))
 }
 
 /// Run `omp <args>` to completion (see [`Omp::output`]). Used by
@@ -389,30 +378,10 @@ pub(super) fn spawn_omp(
 #[cfg(test)]
 mod tests {
     use super::{
-        find_program, fmt_version, omp_args, parse_version_line, resolve_cwd, sanitize_child_env,
+        fmt_version, omp_args, parse_version_line, resolve_cwd, sanitize_child_env,
         version_refusal, ApprovalMode, Command, MIN_OMP_VERSION,
     };
-    use crate::program_setting::is_executable_file;
-    use crate::test_support::{executable, TempDir};
     use std::path::Path;
-
-    #[test]
-    fn find_program_takes_the_first_absolute_folder_holding_it() {
-        let dir = TempDir::new("spawn", "find-program");
-        let [none, first, second] = ["a", "b", "c"].map(|name| dir.path().join(name));
-        std::fs::create_dir_all(&none).unwrap();
-        let found = executable(&first.join("omp-test"), "");
-        executable(&second.join("omp-test"), "");
-        let dirs = [none, first, second];
-        assert_eq!(
-            find_program(&dirs, "omp-test", is_executable_file),
-            Some(found)
-        );
-        assert_eq!(
-            find_program(&dirs[..1], "omp-test", is_executable_file),
-            None
-        );
-    }
 
     /// The desktop's default mode; the `omp_args` tests below are about
     /// the other flags.
