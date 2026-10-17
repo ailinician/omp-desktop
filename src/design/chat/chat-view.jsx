@@ -119,6 +119,44 @@ const JobRow = React.memo(function JobRow({ msg, idx, highlighted }) {
 // `collapseAfter` are the tweaks, `collapseOverrides` this tab's
 // `_id → collapsed` toggles, and `onToggleCollapse(id, collapsed)` flips one
 // (app/chat-collapse.js).
+// ── Pure Turn-Rail helpers (extracted for isolated testability) ─────────────
+const TURN_POP_PAD_Y = 88;
+
+function extractUserTurns(messages, isHidden, tr = _t) {
+  const out = [];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (!m || m.kind !== "user" || isHidden(m)) continue;
+    const raw = (m.text || "").replace(/\s+/g, " ").trim();
+    const text = raw || (m.images?.length ? `[${tr("image")} ×${m.images.length}]` : tr("(empty)"));
+    out.push({ turnNum: out.length + 1, msgIdx: i, id: m._id ?? i, text, time: m.time || "" });
+  }
+  return out;
+}
+
+function clampPopY(centerY, wrapHeight) {
+  return Math.max(TURN_POP_PAD_Y, Math.min(wrapHeight - TURN_POP_PAD_Y, centerY));
+}
+
+function stepTurn(hoverTurn, total, deltaY) {
+  if (hoverTurn === null || total < 2 || deltaY === 0) return hoverTurn;
+  const dir = deltaY > 0 ? 1 : -1;
+  return Math.max(0, Math.min(total - 1, hoverTurn + dir));
+}
+
+function fisheyeWindow(userTurns, hoverTurn) {
+  if (hoverTurn === null || !userTurns[hoverTurn]) return [];
+  const slice = [];
+  for (let offset = -1; offset <= 1; offset++) {
+    const idx = hoverTurn + offset;
+    const item = userTurns[idx];
+    if (!item) continue;
+    const posClass = offset === 0 ? "is-focus" : (offset < 0 ? "is-neighbor is-prev" : "is-neighbor is-next");
+    slice.push({ idx, offset, item, posClass });
+  }
+  return slice;
+}
+
 function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, onAskAnswer, onAskDialogAnswer, onConfirmAsk, onCancelAsk, onGrantApproval, onStopRetry, hasProjectPath, onInspectSubagent, onOpenFile, foldModes, collapseAfter, collapseOverrides, onToggleCollapse }) {
   const scrollRef   = React.useRef(null);
   const pinnedRef   = React.useRef(true);   // assume start pinned to bottom
@@ -141,17 +179,10 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
   const flashTimerRef               = React.useRef(null);
   const wrapRef                     = React.useRef(null);
 
-  const userTurns = React.useMemo(() => {
-    const out = [];
-    for (let i = 0; i < messages.length; i++) {
-      const m = messages[i];
-      if (!m || m.kind !== "user" || window.OMP_TURN_STATUS.isHidden(m)) continue;
-      const raw = (m.text || "").replace(/\s+/g, " ").trim();
-      const text = raw || (m.images?.length ? `[图片 ×${m.images.length}]` : "（空消息）");
-      out.push({ turnNum: out.length + 1, msgIdx: i, id: m._id ?? i, text, time: m.time || "" });
-    }
-    return out;
-  }, [messages]);
+  const userTurns = React.useMemo(
+    () => extractUserTurns(messages, window.OMP_TURN_STATUS.isHidden, _t),
+    [messages],
+  );
 
   const syncActiveTurn = React.useCallback((el) => {
     if (!el || !userTurns.length) return;
@@ -236,6 +267,10 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+  React.useEffect(() => () => {
+    clearTimeout(hideTimerRef.current);
+    clearTimeout(flashTimerRef.current);
+  }, []);
 
   // Only the last completed assistant message is annotatable in plan mode
   let lastAsstIdx = -1;
@@ -268,8 +303,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
     if (!targetEl) return;
     const dotRect = targetEl.getBoundingClientRect();
     const centerY = dotRect.top - wrapRect.top + dotRect.height / 2;
-    const clamped = Math.max(88, Math.min(wrapRect.height - 88, centerY));
-    setPopY(clamped);
+    setPopY(clampPopY(centerY, wrapRect.height));
   };
 
   const onEnterDot = (k, e) => {
@@ -279,14 +313,11 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
   };
 
   const onRailWheel = (e) => {
-    if (hoverTurn === null || userTurns.length < 2) return;
+    const next = stepTurn(hoverTurn, userTurns.length, e.deltaY);
+    if (next === hoverTurn || next === null) return;
     e.preventDefault();
-    const dir = e.deltaY > 0 ? 1 : -1;
-    const next = Math.max(0, Math.min(userTurns.length - 1, hoverTurn + dir));
-    if (next !== hoverTurn) {
-      setHoverTurn(next);
-      updatePopYForTurn(next, null);
-    }
+    setHoverTurn(next);
+    updatePopYForTurn(next, null);
   };
 
   const jumpToTurn = (k) => {
@@ -308,6 +339,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
   };
 
   const hoveredTurnMsgIdx = hoverTurn !== null ? userTurns[hoverTurn]?.msgIdx : null;
+  const fisheyeCards = fisheyeWindow(userTurns, hoverTurn);
   return (
     <div className="chat-wrap" ref={wrapRef}>
       <div className="chat-scroll selectable" ref={scrollRef} onScroll={onScroll}>
@@ -365,30 +397,24 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
               );
             })}
           </div>
-          {hoverTurn !== null && userTurns[hoverTurn] && (
+          {fisheyeCards.length > 0 && (
             <div className="turn-pop" style={{ top: `${popY}px` }}>
-              {[-1, 0, 1].map((offset) => {
-                const idx = hoverTurn + offset;
-                const item = userTurns[idx];
-                if (!item) return null;
-                const posClass = offset === 0 ? "is-focus" : (offset < 0 ? "is-neighbor is-prev" : "is-neighbor is-next");
-                return (
-                  <div
-                    key={item.id}
-                    className={`turn-card ${posClass}`}
-                    onClick={() => jumpToTurn(idx)}
-                  >
-                    <div className="turn-card-hd">
-                      <span className="turn-card-badge mono">
-                        #{item.turnNum}{offset === 0 ? ` / ${userTurns.length}` : ""}
-                      </span>
-                      {item.time && <span className="turn-card-time mono">{item.time}</span>}
-                      {offset === 0 && <span className="turn-card-hint">{_t("点击定位")}</span>}
-                    </div>
-                    <div className="turn-card-text">{item.text}</div>
+              {fisheyeCards.map(({ idx, offset, item, posClass }) => (
+                <div
+                  key={item.id}
+                  className={`turn-card ${posClass}`}
+                  onClick={() => jumpToTurn(idx)}
+                >
+                  <div className="turn-card-hd">
+                    <span className="turn-card-badge mono">
+                      #{item.turnNum}{offset === 0 ? ` / ${userTurns.length}` : ""}
+                    </span>
+                    {item.time && <span className="turn-card-time mono">{item.time}</span>}
+                    {offset === 0 && <span className="turn-card-hint">{_t("click to jump")}</span>}
                   </div>
-                );
-              })}
+                  <div className="turn-card-text">{item.text}</div>
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -403,4 +429,4 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
   );
 }
 
-Object.assign(window, { ChatView });
+Object.assign(window, { ChatView, OMP_TURN_RAIL: Object.freeze({ extractUserTurns, clampPopY, stepTurn, fisheyeWindow }) });

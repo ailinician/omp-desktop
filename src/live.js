@@ -165,7 +165,9 @@
     "running": "运行中",
     "before": "压缩前",
     "Jump to prompt #": "跳转到提示词 #",
-    "点击定位": "点击定位",
+    "click to jump": "点击定位",
+    "image": "图片",
+    "(empty)": "（空消息）",
     "Jump to latest": "回到底部",
 
     // Terminal Tweaks
