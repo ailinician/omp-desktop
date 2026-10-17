@@ -1,0 +1,62 @@
+# Manual cloud build for Windows x64 (`dev` branch).
+#
+# Purpose:
+#   Compiles a fresh Windows x64 `omp-desktop.exe` (and installers) on GitHub's
+#   cloud runners when upstream changes Rust code (`src-tauri/`) or when a
+#   frontend asset outgrows its pre-allocated PHF slot in the local binary,
+#   avoiding any local Rust/MSVC toolchain installation.
+#
+# Usage:
+#   gh workflow run build-windows.yml --repo ailinician/omp-desktop --ref dev
+#   gh run watch --repo ailinician/omp-desktop
+#   gh run download --repo ailinician/omp-desktop -n omp-desktop-windows-x64
+
+name: Build Windows (Custom Dev)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: build-windows-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: build · windows-x64
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artefacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: custom-win-x64
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build Windows binary and installers (unsigned updater)
+        run: npx tauri build --config src-tauri/tauri.dist.conf.json
+
+      - name: Upload omp-desktop.exe + installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: omp-desktop-windows-x64
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            src-tauri/target/release/omp-desktop.exe
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/msi/*.msi
