@@ -565,16 +565,10 @@
   gap: 2px;
   max-height: calc(100% - 48px);
   padding: 6px 2px 6px 8px;
-  border-radius: 999px;
   overflow-y: auto;
   scrollbar-width: none;
-  transition: background 140ms var(--ease-out);
 }
 .turn-rail-track::-webkit-scrollbar { display: none; }
-.turn-rail.is-open .turn-rail-track {
-  background: color-mix(in oklab, var(--bg-elevated) 72%, transparent);
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
-}
 .turn-dot-btn {
   appearance: none;
   border: 0;
