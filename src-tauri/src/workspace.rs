@@ -13,7 +13,8 @@
 //! APIs, and `git add` / `git checkout` / `git reset` already implement
 //! safe, atomic index and worktree mutation.
 
-use crate::child_path::apply_child_path;
+use crate::child_path::{child_path_dirs, find_program, join_dirs};
+use crate::program_setting::is_executable_file;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -161,23 +162,46 @@ pub fn weakly_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
 ///   index refresh a read like `git diff` would otherwise perform). Mutating
 ///   commands still take the locks they genuinely require, so this is safe
 ///   to apply uniformly.
-/// - [`apply_child_path`] — a per-user `git` (winget `--scope user`, scoop)
-///   is on the user PATH, which an MSI-update relaunch doesn't carry (#34).
+/// - the binary by absolute path — the first `git` in the absolute folders
+///   of the child PATH ([`child_path_dirs`]; a per-user `git` from winget
+///   `--scope user` or scoop is on the user PATH, which an MSI-update
+///   relaunch doesn't carry, #34). Never a bare `git`: started in the
+///   project, that would be looked up through an empty or relative PATH
+///   entry *there*, so a project could ship its own `git`. The PATH is
+///   those same folders (the
+///   [`crate::child_path::trusted_child_path`]), for the helpers git itself
+///   starts (credential helpers, ssh, an editor).
 ///
 /// Every `git` invocation in this module goes through here. Subcommand-level
-/// flags (`--cached`, `-M`, …) stay at their call sites.
-fn git(work_dir: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    apply_child_path(&mut cmd);
-    cmd.current_dir(work_dir)
-        .args(["--literal-pathspecs", "--no-optional-locks"]);
-    cmd
+/// flags (`--cached`, `-M`, …) stay at their call sites. `Err` when no `git`
+/// is found.
+fn git(work_dir: &Path) -> Result<Command, String> {
+    git_in(&child_path_dirs(), work_dir)
 }
+
+/// [`git`] with the PATH folders it searches given.
+fn git_in(dirs: &[PathBuf], work_dir: &Path) -> Result<Command, String> {
+    let binary = find_program(dirs, GIT_FILE, is_executable_file).ok_or_else(|| {
+        "git was not found in any absolute PATH folder (relative entries are ignored). \
+         Make sure git is installed and on PATH."
+            .to_string()
+    })?;
+    let mut cmd = Command::new(binary);
+    cmd.env("PATH", join_dirs(dirs))
+        .current_dir(work_dir)
+        .args(["--literal-pathspecs", "--no-optional-locks"]);
+    Ok(cmd)
+}
+
+/// `git`'s file name in a PATH folder. Windows: only `git.exe`, what a bare
+/// `git` resolved to (Git for Windows, winget, and scoop's shim all ship
+/// one).
+const GIT_FILE: &str = if cfg!(windows) { "git.exe" } else { "git" };
 
 /// Run a `git` subcommand and return its stdout, mapping both a spawn
 /// failure and a non-zero exit into a `label`-prefixed error string.
 fn git_output(work_dir: &Path, args: &[&str], label: &str) -> Result<Vec<u8>, String> {
-    let output = git(work_dir)
+    let output = git(work_dir)?
         .args(args)
         .output()
         .map_err(|e| format!("failed to run git {label}: {e}"))?;
@@ -196,7 +220,7 @@ fn git_output(work_dir: &Path, args: &[&str], label: &str) -> Result<Vec<u8>, St
 /// failure — printing their stderr would surface spurious-looking
 /// "fatal:" lines for perfectly normal code paths.
 fn git_succeeds(work_dir: &Path, args: &[&str], label: &str) -> Result<bool, String> {
-    git(work_dir)
+    git(work_dir)?
         .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -405,7 +429,9 @@ fn find_rename_source(
 
 #[cfg(test)]
 mod tests {
-    use super::{accept, reject, validate_relative_path};
+    use super::{accept, git, git_in, reject, validate_relative_path, GIT_FILE};
+    use crate::child_path::absolute_dirs;
+    use crate::test_support::TempDir;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -464,6 +490,74 @@ mod tests {
         run_git(&dir, &["add", "."]);
         run_git(&dir, &["commit", "-q", "-m", "init"]);
         Some(dir)
+    }
+
+    // ── git resolution ───────────────────────────────────────────────────
+
+    /// The attack: a project shipping its own `git`, reached through an
+    /// empty or relative PATH entry (`execvp` resolves those in the child's
+    /// working directory, the project). Only the absolute folder's `git`
+    /// is ever picked, by absolute path, with only that folder as PATH.
+    #[test]
+    fn git_never_runs_a_project_supplied_git() {
+        let dir = TempDir::new("workspace", "git-lookup");
+        let project = dir.path().join("project");
+        let trusted = dir.path().join("bin");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&trusted).unwrap();
+        let planted = project.join(GIT_FILE);
+        let real = trusted.join(GIT_FILE);
+        // Symlinks to existing binaries, not freshly written scripts: those
+        // can fail to exec with "text file busy" while another test forks.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/bin/sh", &planted).unwrap();
+            std::os::unix::fs::symlink("/bin/echo", &real).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&planted, "").unwrap();
+            std::fs::write(&real, "").unwrap();
+        }
+
+        let relative_only = std::env::join_paths(["", ".", "project"]).unwrap();
+        let relative_only: Vec<_> = absolute_dirs(&relative_only).collect();
+        let err = git_in(&relative_only, &project).unwrap_err();
+        assert!(err.contains("git was not found"), "{err}");
+
+        let path =
+            std::env::join_paths([Path::new(""), Path::new("."), trusted.as_path()]).unwrap();
+        let dirs: Vec<_> = absolute_dirs(&path).collect();
+        let cmd = git_in(&dirs, &project).unwrap();
+        assert_eq!(Path::new(cmd.get_program()), real);
+        let child_path = cmd.get_envs().find(|(key, _)| *key == "PATH");
+        assert_eq!(child_path.and_then(|(_, v)| v), Some(trusted.as_os_str()));
+
+        #[cfg(unix)]
+        {
+            let mut cmd = cmd;
+            let out = cmd.arg("ran").output().unwrap();
+            assert!(out.status.success());
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                "--literal-pathspecs --no-optional-locks ran\n"
+            );
+        }
+    }
+
+    /// The real environment: `git` resolves to an absolute binary that runs.
+    #[test]
+    fn git_runs_the_installed_git_by_absolute_path() {
+        if !git_available() {
+            eprintln!("git binary not available; skipping");
+            return;
+        }
+        let dir = TempDir::new("workspace", "git-installed");
+        let mut cmd = git(dir.path()).unwrap();
+        assert!(Path::new(cmd.get_program()).is_absolute());
+        let out = cmd.arg("--version").output().unwrap();
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).starts_with("git version"));
     }
 
     // ── validate_relative_path ───────────────────────────────────────────

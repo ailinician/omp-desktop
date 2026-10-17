@@ -120,7 +120,7 @@ Rename detection between HEAD and the index follows the repo's config (`status.r
 
 ### Why gix, and where `git` still runs
 
-Reads go through gix (0.87, default features: `status`, `blob-diff`, `revision`, `dirwalk`, `index`, `attributes`, `excludes`): no process per refresh, no output parsing, no dependence on the user's `git` version, PATH or config aliases. The `git` binary still runs for **`workspace::accept` / `reject` only** (`git add` / `git checkout`, through `child_path`): gix has no mature index add or worktree restore.
+Reads go through gix (0.87, default features: `status`, `blob-diff`, `revision`, `dirwalk`, `index`, `attributes`, `excludes`): no process per refresh, no output parsing, no dependence on the user's `git` version, PATH or config aliases. The `git` binary still runs for **`workspace::accept` / `reject` only** (`git add` / `git checkout`): gix has no mature index add or worktree restore. `workspace::git` runs it by absolute path, the first `git` (`git.exe`) in the absolute folders of the child PATH (`child_path::child_path_dirs` + `find_program`), with those folders as its PATH; never a bare `git`, which an empty or relative PATH entry would resolve inside the project. No `git` there is the command's `Err`.
 
 ## Frontend
 

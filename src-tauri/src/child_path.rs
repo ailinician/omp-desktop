@@ -1,6 +1,7 @@
 //! The PATH a child that must find a user-installed binary (omp, `git`) is
 //! spawned with: the inherited one, plus the directories the process that
-//! launched us left out.
+//! launched us left out — and the lookup of such a binary by absolute path
+//! ([`find_program`]), for a child started in an untrusted project folder.
 //!
 //! - Unix: GUI launchers (Finder, Dock, `.desktop` files) hand a bundled app
 //!   a minimal PATH, so the common install dirs are appended.
@@ -59,7 +60,7 @@ fn full_child_path() -> Option<OsString> {
 
 /// The absolute folders of `path`. A relative one is dropped: it would
 /// resolve against the working directory.
-fn absolute_dirs(path: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+pub fn absolute_dirs(path: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
     std::env::split_paths(path).filter(|dir| dir.is_absolute())
 }
 
@@ -78,6 +79,20 @@ where
     // `split_paths` strips the quotes `join_paths` would reject, so joining
     // its own output cannot fail; an empty PATH is the safe answer if it did.
     std::env::join_paths(dirs).unwrap_or_default()
+}
+
+/// The first `name` that `is_executable` accepts in `dirs` ([`child_path_dirs`]),
+/// in order. A child started in a project folder is spawned by this absolute
+/// path, never by a bare name: that would be looked up through any empty or
+/// relative PATH entry *there*, so a project could ship its own program.
+pub fn find_program(
+    dirs: &[PathBuf],
+    name: &str,
+    is_executable: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    dirs.iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable(candidate))
 }
 
 /// Override the child command's PATH with [`child_path`]. `Command`
@@ -212,7 +227,9 @@ fn path_key(dir: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute_dirs, absolute_entries, merged_path};
+    use super::{absolute_dirs, absolute_entries, find_program, merged_path};
+    use crate::program_setting::is_executable_file;
+    use crate::test_support::{executable, TempDir};
 
     fn entries(path: &std::ffi::OsStr) -> Vec<String> {
         std::env::split_paths(path)
@@ -353,6 +370,24 @@ mod tests {
         assert_eq!(
             absolute_dirs(&path).collect::<Vec<_>>(),
             [std::path::PathBuf::from(bin)]
+        );
+    }
+
+    #[test]
+    fn find_program_takes_the_first_absolute_folder_holding_it() {
+        let dir = TempDir::new("child-path", "find-program");
+        let [none, first, second] = ["a", "b", "c"].map(|name| dir.path().join(name));
+        std::fs::create_dir_all(&none).unwrap();
+        let found = executable(&first.join("omp-test"), "");
+        executable(&second.join("omp-test"), "");
+        let dirs = [none, first, second];
+        assert_eq!(
+            find_program(&dirs, "omp-test", is_executable_file),
+            Some(found)
+        );
+        assert_eq!(
+            find_program(&dirs[..1], "omp-test", is_executable_file),
+            None
         );
     }
 
