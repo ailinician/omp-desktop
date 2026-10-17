@@ -431,7 +431,7 @@ fn find_rename_source(
 mod tests {
     use super::{accept, git, git_in, reject, validate_relative_path, GIT_FILE};
     use crate::child_path::absolute_dirs;
-    use crate::test_support::TempDir;
+    use crate::test_support::{executable, TempDir};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -503,22 +503,8 @@ mod tests {
         let dir = TempDir::new("workspace", "git-lookup");
         let project = dir.path().join("project");
         let trusted = dir.path().join("bin");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&trusted).unwrap();
-        let planted = project.join(GIT_FILE);
-        let real = trusted.join(GIT_FILE);
-        // Symlinks to existing binaries, not freshly written scripts: those
-        // can fail to exec with "text file busy" while another test forks.
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink("/bin/sh", &planted).unwrap();
-            std::os::unix::fs::symlink("/bin/echo", &real).unwrap();
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(&planted, "").unwrap();
-            std::fs::write(&real, "").unwrap();
-        }
+        executable(&project.join(GIT_FILE), "");
+        let real = executable(&trusted.join(GIT_FILE), "");
 
         let relative_only = std::env::join_paths(["", ".", "project"]).unwrap();
         let relative_only: Vec<_> = absolute_dirs(&relative_only).collect();
@@ -532,17 +518,10 @@ mod tests {
         assert_eq!(Path::new(cmd.get_program()), real);
         let child_path = cmd.get_envs().find(|(key, _)| *key == "PATH");
         assert_eq!(child_path.and_then(|(_, v)| v), Some(trusted.as_os_str()));
-
-        #[cfg(unix)]
-        {
-            let mut cmd = cmd;
-            let out = cmd.arg("ran").output().unwrap();
-            assert!(out.status.success());
-            assert_eq!(
-                String::from_utf8_lossy(&out.stdout),
-                "--literal-pathspecs --no-optional-locks ran\n"
-            );
-        }
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            ["--literal-pathspecs", "--no-optional-locks"]
+        );
     }
 
     /// The real environment: `git` resolves to an absolute binary that runs.
