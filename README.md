@@ -126,7 +126,13 @@ Grab the latest build from [Releases](https://github.com/apoc/omp-desktop/releas
 | macOS Apple Silicon / Intel | `*_aarch64.dmg` / `*_x64.dmg` |
 | Linux x64 | `*.AppImage`, `*.deb`, `*.rpm` |
 
-The installers are not code-signed yet (no Authenticode signature, no Apple notarisation), so SmartScreen and Gatekeeper will warn the first time you run the app. Updates are still verified against the app's own minisign key.
+The installers are not code-signed with a publisher certificate yet (no Authenticode signature, no Apple notarisation). On Windows, SmartScreen warns the first time you run the app. The macOS app is only ad-hoc signed, so on first launch macOS says it "could not verify" OMP Desktop: open **System Settings → Privacy & Security** and click **Open Anyway**. Updates are still verified against the app's own minisign key.
+
+macOS releases up to 0.10.0 are not signed at all, and on Apple Silicon macOS refuses to open them with "OMP Desktop is damaged and can't be opened". The app is not damaged; remove the download's quarantine flag and open it again:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/OMP Desktop.app"
+```
 
 ## Usage
 

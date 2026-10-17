@@ -56,9 +56,12 @@
 # 5. Code signing (optional but recommended):
 #    Windows  →  configure windows.certificateThumbprint in tauri.conf.json
 #                (and the certificate secrets it needs) for Authenticode.
-#    macOS    →  add APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD,
-#                APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD,
-#                APPLE_TEAM_ID for notarisation.
+#    macOS    →  without secrets the bundle is signed ad hoc
+#                (bundle.macOS.signingIdentity "-" in tauri.conf.json): an
+#                unsigned bundle is "damaged" on Apple Silicon (#60). For
+#                notarisation add APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD,
+#                APPLE_SIGNING_IDENTITY (overrides the "-"), APPLE_ID,
+#                APPLE_PASSWORD, APPLE_TEAM_ID.
 # ──────────────────────────────────────────────────────────────────────────────
 
 name: Release
