@@ -25,13 +25,15 @@ function AskBubble({ msg, idx, highlighted, onAnswer, onAnswerDialog, onConfirm,
     onAnswer(msg.id, value);
   };
 
-  // Grant a standing rule for `tool`, then answer this prompt as approved
-  // — remembering for next time shouldn't require a second click on
-  // "Approve" for the request that's already in front of the user.
+  // Approve this prompt and remember the tool for next time — that
+  // shouldn't require a second click on "Approve" for the request that's
+  // already in front of the user. One bridge call does both: the grant names
+  // this prompt, not the tool (Rust reads the tool and the project from what
+  // the prompt's own process asked, and only while it is unanswered), so the
+  // bridge settles the bubble at once and answers after the grant.
   const grant = (scope) => {
     if (done || !tool) return;
-    onGrant?.(tool, scope);
-    submit("Approve");
+    onGrant?.(msg, scope);
   };
 
   const confirm = (value) => {

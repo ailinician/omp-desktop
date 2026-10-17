@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Typography on Windows: interface text now uses Segoe UI Variable (Segoe UI on Windows 10) and code uses Cascadia Mono, Cascadia Code or Consolas, instead of falling through the macOS-only fonts to Arial and Consolas. Chinese and Japanese characters still take Windows' fallback font for the display language.
 - Windows title-bar buttons (minimize, maximize, close) were coloured red, yellow and green by leftover prototype rules. They now use the theme's text colour, draw as line icons instead of text glyphs, and sit flush with no gaps or rounded corners.
+- "Allow for this session" / "Always allow in this project" on a tool-approval prompt now always applies to the tab and project whose agent asked. A prompt that reached another tab during a fast tab switch could create the standing rule for the tab you had just switched to. A tab now ignores events from a session it has already switched away from, and the app grants a rule only for an approval prompt that tab's agent is still waiting on, with the tool and project that agent asked about.
 
 ## [0.10.1] - 2026-10-16
 
