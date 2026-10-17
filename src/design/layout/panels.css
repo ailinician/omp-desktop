@@ -10,7 +10,8 @@
    border, radius or shadow can't apply to some panels and miss others. */
 .rules-panel,
 .stats-panel,
-.update-panel {
+.update-panel,
+.close-confirm-panel {
   background: var(--bg-elevated);
   border: 1px solid var(--line-bright);
   border-radius: 14px;
@@ -20,7 +21,8 @@
 }
 .rules-head,
 .stats-head,
-.update-head {
+.update-head,
+.close-confirm-head {
   display: flex; align-items: center; gap: 8px;
   height: 40px; padding: 0 14px;
   border-bottom: 1px solid var(--line);
@@ -112,6 +114,9 @@
 }
 .mode-seg button[data-mode="inherit"] { color: var(--fg-4); font-style: italic; }
 .mode-seg button[aria-checked="true"][data-mode="inherit"] { color: var(--fg-2); }
+/* The remove-override button, or an empty slot of its width, so the
+   segments of every row line up. */
+.mode-rm { flex: none; width: 22px; }
 .mode-note {
   font-size: var(--d-text-sm); color: var(--fg-3); line-height: 1.5;
   padding: 7px 10px;
@@ -245,3 +250,36 @@
 }
 /* Focused programmatically on open (keyboard reach), not a control. */
 .update-panel:focus { outline: none; }
+
+/* ── Busy-close confirmation (#37, design/confirm-close.jsx) ─────────── */
+.close-confirm-panel {
+  width: min(440px, calc(100vw - 40px));
+}
+.close-confirm-panel:focus { outline: none; }
+.close-confirm-body {
+  padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 10px;
+  color: var(--fg-2);
+  font-size: var(--d-text-sm);
+}
+.close-confirm-tabs {
+  margin: 0; padding: 0;
+  list-style: none;
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 180px; overflow-y: auto;
+}
+.close-confirm-tab {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: var(--d-text-xs);
+}
+.close-confirm-tab-name {
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--fg);
+}
+.close-confirm-tab-state { color: var(--amber); white-space: nowrap; }
+.close-confirm-foot {
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+}

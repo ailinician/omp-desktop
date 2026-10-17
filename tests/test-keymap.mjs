@@ -62,6 +62,10 @@ check("canonicalChord: missing base returns empty string", () =>
 check("canonicalChord: whitespace-only returns empty string", () =>
   assert.equal(K.canonicalChord("   "), ""));
 
+check("canonicalChord: comma base survives (settings: ctrl+,)", () =>
+  assert.equal(K.canonicalChord("Ctrl+,"), "ctrl+,"));
+
+
 // ── chordFromEvent ────────────────────────────────────────────────────────────
 
 check("chordFromEvent: ctrl+shift+p from event", () =>
@@ -127,6 +131,12 @@ check("chordFromEvent: key=Unidentified with an unmapped code still yields no ch
 
 check("chordFromEvent: key=Unidentified with no code at all still yields no chord", () =>
   assert.equal(K.chordFromEvent({ key: "Unidentified", ctrlKey: false, shiftKey: true, altKey: false, metaKey: false }), null));
+
+check("chordFromEvent: Ctrl+, and Cmd+, give the comma chords", () => {
+  assert.equal(K.chordFromEvent({ key: ",", code: "Comma", ctrlKey: true, shiftKey: false, altKey: false, metaKey: false }), "ctrl+,");
+  assert.equal(K.chordFromEvent({ key: ",", code: "Comma", ctrlKey: false, shiftKey: false, altKey: false, metaKey: true }), "super+,");
+});
+
 
 // ── resolve ───────────────────────────────────────────────────────────────────
 
@@ -292,7 +302,7 @@ const MAC = true;
 const bypass = (e, isMac = LINUX) => K.guestShouldBypass(e, isMac);
 
 check("guest: bound super chords bypass on every platform", () => {
-  for (const k of ["t", "w", "k", "h", "b", "/", "`"]) {
+  for (const k of ["t", "w", "k", "h", "b", "/", "`", ","]) {
     assert.equal(bypass(ev(k, "m"), LINUX), true, `super+${k}`);
     assert.equal(bypass(ev(k, "m"), MAC), true, `super+${k} (mac)`);
   }

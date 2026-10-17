@@ -67,10 +67,11 @@ const key = (type, k) => {
   return e;
 };
 
-function make({ restart = () => false } = {}) {
+function make({ restart = () => false, scrollback } = {}) {
   const seen = { data: [], resize: [], restarts: 0 };
   const made = X.createXterm({
     fontSize: 14,
+    scrollback,
     theme: { background: "#000" },
     tryRestart: () => { const ok = restart(); if (ok) seen.restarts++; return ok; },
     onData: (d) => seen.data.push(d),
@@ -84,13 +85,28 @@ check("createXterm: options, OSC 8 swallowed, fit addon, wiring", () => {
   assert.equal(term.options.fontSize, 14);
   assert.deepEqual(term.options.theme, { background: "#000" });
   assert.equal(term.options.allowProposedApi, false);
-  assert.equal(term.options.scrollback, 5000);
+  assert.equal(term.options.scrollback, 5000, "no pref: the default");
   assert.equal(term.osc.get(8)("id=1;https://x"), true, "OSC 8 handled (dropped)");
   assert.ok(fit instanceof FakeFit && term.addons.includes(fit));
   term.data("ls\r");
   term.resize({ cols: 90, rows: 20 });
   assert.deepEqual(seen.data, ["ls\r"]);
   assert.deepEqual(seen.resize, [{ cols: 90, rows: 20 }]);
+});
+
+check("createXterm: scrollback from the terminalScrollback tweak", () => {
+  assert.equal(make({ scrollback: 50000 }).term.options.scrollback, 50000);
+  assert.equal(make({ scrollback: 1000 }).term.options.scrollback, 1000);
+});
+
+check("scrollbackLines: whole lines in 0..100000, the default for junk", () => {
+  assert.equal(X.scrollbackLines(10000), 10000);
+  assert.equal(X.scrollbackLines(1234.6), 1235);
+  assert.equal(X.scrollbackLines(-5), 0);
+  assert.equal(X.scrollbackLines(1e9), 100000);
+  assert.equal(X.scrollbackLines(undefined), 5000);
+  assert.equal(X.scrollbackLines("5000"), 5000);
+  assert.equal(X.scrollbackLines(NaN), 5000);
 });
 
 check("a restarting Enter never reaches the shell, not even as keypress", () => {

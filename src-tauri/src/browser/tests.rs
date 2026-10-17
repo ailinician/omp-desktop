@@ -327,7 +327,7 @@ fn a_configured_browser_that_vanished_is_an_error_not_a_fallback() {
     let Err(err) = m.chromium("s1") else {
         panic!("a vanished browser launched");
     };
-    assert!(err.contains("Tweaks → Browser"), "{err}");
+    assert!(err.contains("Settings → Browser"), "{err}");
     assert_eq!(launch_count(&dir), 0);
     assert!(
         m.profile_dir_for_test("s1").is_none(),

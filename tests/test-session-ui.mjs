@@ -19,6 +19,10 @@ for (const file of ["src/app/session-ui.js", "src/app/prompt-history.js"]) {
   // eslint-disable-next-line no-new-func
   new Function("window", readFileSync(join(root, file), "utf8"))(win);
 }
+// constants.js: isSubmitKey, the composer's send chord.
+const constants = {};
+// eslint-disable-next-line no-new-func
+new Function("window", readFileSync(join(root, "src/app/constants.js"), "utf8"))(constants);
 const S = win.OMP_SESSION_UI;
 const { step } = win.OMP_PROMPT_HISTORY;
 const { PLAN_IDLE, DRAFT_IDLE } = S;
@@ -110,6 +114,23 @@ check("the last tab closing leaves nothing behind", () => {
   assert.deepEqual(S.pruneEntries(onPlan({}, "A", S.enterPlan), []), {});
 });
 
+check("seedEntries: a new tab starts on the defaultSide; open tabs keep theirs", () => {
+  const sides = { A: "tree" };
+  const seeded = S.seedEntries(sides, ["A", "B"], "rail", "browser");
+  assert.deepEqual(seeded, { A: "tree", B: "browser" });
+  assert.equal(sides.B, undefined, "input untouched");
+  assert.equal(S.entryOf(seeded, "B", "rail"), "browser");
+});
+
+check("seedEntries: the idle value (rail) or no fresh tab stores nothing", () => {
+  const sides = { A: "tree" };
+  assert.equal(S.seedEntries(sides, ["B"], "rail", "rail"), sides);
+  assert.equal(S.seedEntries(sides, [], "rail", "tree"), sides);
+  assert.equal(S.seedEntries(sides, ["A"], "rail", "browser"), sides);
+  assert.equal(S.seedEntries(sides, ["B"], "rail", undefined), sides);
+  assert.equal(S.seedEntries(sides, [""], "rail", "tree"), sides, "no tab id");
+});
+
 // ── Prompt-history recall in a tab's draft ───────────────────────────────
 
 const typed = text => ({ ...DRAFT_IDLE, text });
@@ -189,6 +210,40 @@ check("collapse thresholds: more than 5 lines or more than 500 characters", () =
   assert.equal(S.shouldCollapsePaste("x".repeat(500)), false);
   assert.equal(S.shouldCollapsePaste("x".repeat(501)), true);
   assert.equal(collapse(DRAFT_IDLE, "x".repeat(600), 0, 0).draft.text, "[paste #1 +1 line]");
+});
+
+check("collapse threshold follows the pasteCollapseLines tweak, clamped to 2..50", () => {
+  assert.equal(S.shouldCollapsePaste(lines(10), 10), false);
+  assert.equal(S.shouldCollapsePaste(lines(11), 10), true);
+  assert.equal(S.shouldCollapsePaste(lines(2), 1), false, "below 2 clamps to 2");
+  assert.equal(S.shouldCollapsePaste(lines(3), 1), true);
+  assert.equal(S.shouldCollapsePaste(lines(50), 999), false, "above 50 clamps to 50");
+  assert.equal(S.shouldCollapsePaste(lines(51), 999), true);
+  assert.equal(S.shouldCollapsePaste(lines(6), undefined), true, "missing pref = 5");
+  assert.equal(S.shouldCollapsePaste(lines(6), null), true, "null pref = 5");
+  assert.equal(S.shouldCollapsePaste(lines(5), "x"), false, "non-number pref = 5");
+  assert.equal(S.shouldCollapsePaste("x".repeat(501), 50), true, "the 500-char cap stays");
+  assert.equal(collapse(DRAFT_IDLE, lines(8), 0, 0).draft.text, "[paste #1 +8 lines]", "token shape unchanged");
+});
+
+// ── Send chord of multi-line fields (constants.js isSubmitKey) ────────────
+
+check("isSubmitKey: \"enter\" sends on Enter without Shift, \"ctrl+enter\" on Ctrl/Cmd+Enter", () => {
+  const key = (mods = {}) => ({ key: "Enter", keyCode: 13, nativeEvent: { isComposing: false }, ...mods });
+  const { isSubmitKey } = constants;
+  assert.equal(isSubmitKey(key()), true, "default is enter");
+  assert.equal(isSubmitKey(key(), "enter"), true);
+  assert.equal(isSubmitKey(key({ shiftKey: true }), "enter"), false, "Shift+Enter is a newline");
+  assert.equal(isSubmitKey(key({ ctrlKey: true }), "enter"), true, "unchanged pre-#37 behaviour");
+  assert.equal(isSubmitKey(key(), "ctrl+enter"), false, "plain Enter is a newline");
+  assert.equal(isSubmitKey(key({ ctrlKey: true }), "ctrl+enter"), true);
+  assert.equal(isSubmitKey(key({ metaKey: true }), "ctrl+enter"), true);
+  assert.equal(isSubmitKey(key({ ctrlKey: true, shiftKey: true }), "ctrl+enter"), false);
+  assert.equal(isSubmitKey(key({ ctrlKey: true, altKey: true }), "ctrl+enter"), false);
+  assert.equal(isSubmitKey(key(), "bogus"), true, "unknown pref behaves as enter");
+  assert.equal(isSubmitKey({ key: "a" }, "enter"), false);
+  assert.equal(isSubmitKey(key({ nativeEvent: { isComposing: true } }), "enter"), false, "IME guard");
+  assert.equal(isSubmitKey(key({ ctrlKey: true, keyCode: 229 }), "ctrl+enter"), false, "IME guard (229)");
 });
 
 check("Windows and old-Mac line endings become the textarea's LF", () => {

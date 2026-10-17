@@ -157,7 +157,7 @@ impl Serialize for PluginView {
 }
 
 /// The active session and the plugins applicable to it (enabled, approved,
-/// matching; visibility and hidden toggles ignored) — what the Tweaks panel
+/// matching; visibility and hidden toggles ignored) — what the Settings page
 /// offers toggles for. Emitted as `widgets://active` whenever it changes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

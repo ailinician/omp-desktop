@@ -13,7 +13,7 @@ _Create, run, dismiss, retry — primary verbs_
 |---|---|---|
 | <img src="svg/plus.svg" width="20" height="20"> | `plus` | Create new — new tab, new session, new task in plan. |
 | <img src="svg/minus.svg" width="20" height="20"> | `minus` | Remove / collapse. Pair with plus on a stepper. |
-| <img src="svg/close.svg" width="20" height="20"> | `close` | Dismiss. Close a tab, modal, command bridge, or tweaks panel. |
+| <img src="svg/close.svg" width="20" height="20"> | `close` | Dismiss. Close a tab, modal, command bridge, or settings tab. |
 | <img src="svg/check.svg" width="20" height="20"> | `check` | Done / completed. Tool call success, plan task finished, approval. |
 | <img src="svg/play.svg" width="20" height="20"> | `play` | Run / approve & ship. Kicks off plan execution or replays a tool call. |
 | <img src="svg/pause.svg" width="20" height="20"> | `pause` | Pause the agent. Holds the loop without killing context. |

@@ -14,7 +14,7 @@ Internals (scheduler, IPC, invariants) are in [`architecture/widgets.md`](archit
    chmod +x ~/.omp-desktop/widgets/*
    ```
 
-2. Copy `examples/widgets/widgets.example.json` to `<app config>/widgets.json`. The path is shown under Tweaks → Rail, in the `plugins` row:
+2. Copy `examples/widgets/widgets.example.json` to `<app config>/widgets.json`. The path is shown under Settings → Rail, in the `Plugin config` row:
 
    | OS | `<app config>` |
    |---|---|
@@ -30,7 +30,7 @@ Internals (scheduler, IPC, invariants) are in [`architecture/widgets.md`](archit
    ] }
    ```
 
-3. Click "reload widgets" in the same Tweaks row. An approval card for "Hello" appears in the rail. It lists the exact command. Check it, then click **Approve**.
+3. Click "Reload widgets" in the same Settings row. An approval card for "Hello" appears in the rail. It lists the exact command. Check it, then click **Approve**.
 4. The card runs and shows the context it was given. From now on it refreshes on its own (see [When a plugin runs](#when-a-plugin-runs)).
 
 A ten-line shell script works the same way:
@@ -50,13 +50,13 @@ PY
 Widget cards sit in the ambient rail **between the Subagents card and the Minimap**, in this order:
 
 1. Error cards about `widgets.json` itself.
-2. **Approval cards**, in `widgets.json` order: one for every enabled plugin that is not approved yet, or that changed since you approved it. They show in every tab, whatever the plugin's `match` says, so you can approve a plugin before you open a project it applies to. An approval card whose Tweaks toggle is off is hidden too.
+2. **Approval cards**, in `widgets.json` order: one for every enabled plugin that is not approved yet, or that changed since you approved it. They show in every tab, whatever the plugin's `match` says, so you can approve a plugin before you open a project it applies to. An approval card whose Settings toggle is off is hidden too.
 3. **Result cards**, in `widgets.json` order, for the approved plugins that apply to the active tab (their `match` fits its project and remote). A card shows as idle until its first run.
 4. **omp extension cards** of the active tab (see [omp extension widgets](#omp-extension-widgets)): one card for the extensions' status lines, then one per widget, marked `extension`.
 
 A disabled plugin (`"enabled": false`) gets no card.
 
-Tweaks → Rail has one toggle per enabled plugin, next to the toggles for the built-in cards (`showContext`, `showRadar`, `showSubagents`, `showMinimap`). A plugin's toggle is stored as the tweak `widget:plugin:<id>`, so the choice survives restarts (toggles saved by earlier builds under `widget:<id>` are not carried over). **A hidden card never runs.** The same goes for the whole rail: while the rail is hidden (focus layout, or the conversation tree is open), no plugin starts. Closing the rail with its × button stays available even when every card is hidden.
+Settings → Rail has one toggle per enabled plugin, under the toggles for the built-in cards (`showContext`, `showRadar`, `showSubagents`, `showMinimap`). A plugin's toggle is stored as the tweak `widget:plugin:<id>`, so the choice survives restarts (toggles saved by earlier builds under `widget:<id>` are not carried over). **A hidden card never runs.** The same goes for the whole rail: while the rail is hidden (focus layout, or the conversation tree is open), no plugin starts. Closing the rail with its × button stays available even when every card is hidden.
 
 ## Config reference
 
@@ -84,14 +84,14 @@ Tweaks → Rail has one toggle per enabled plugin, next to the toggles for the b
 | Field | Required | Meaning |
 |---|---|---|
 | `version` | yes | Must be `1`. Anything else rejects the whole file: one error card, no plugin runs. |
-| `id` | yes | `[a-z0-9-]{1,32}`, unique. Also names the plugin's Tweaks toggle (`widget:plugin:<id>`) and its approval. |
+| `id` | yes | `[a-z0-9-]{1,32}`, unique. Also names the plugin's Settings toggle (`widget:plugin:<id>`) and its approval. |
 | `title` | no | Shown in the card head. Defaults to `id`. |
 | `command` | yes | An argv array. Element 0 is either a bare program name (looked up on `PATH`) or an absolute path. A relative path such as `./x` or `bin/x` is rejected, because the working directory is the untrusted project. There is no shell. A leading `~/` in any element is expanded to your home directory (`$HOME`, or `%USERPROFILE%` on Windows); `~user` and a bare `~` are left as they are. If there is no home directory, the entry is reported as an error. |
 | `match` | no | Every key is optional, and every key you give must match. `path` matches when the project path starts with this prefix, on a directory boundary (`~/` is expanded). `remote` matches when the default remote's fetch URL contains this substring. Without `match`, the plugin applies to every project. Typical use: work widgets under `~/GIT/work`, personal ones under `~/GIT/private`. |
 | `triggers` | no | Any of `activate`, `turn_end` and `branch`. All three are the default; `[]` means the plugin runs only from its refresh button (and `intervalMs`). The refresh button (`manual`) always works, so listing `manual` is allowed but changes nothing. `interval` is not accepted here: set `intervalMs` instead. |
 | `timeoutMs` | no | Default 10000, clamped to 1000..60000. |
 | `intervalMs` | no | Periodic refresh. Absent or `0` means none. Clamped to 15000..3600000 (15 s to 1 h). |
-| `enabled` | no | Default `true`. A disabled plugin is never offered for approval and never runs, and it has no Tweaks toggle. |
+| `enabled` | no | Default `true`. A disabled plugin is never offered for approval and never runs, and it has no Settings toggle. |
 | `scope` | no | `"tab"` (default) or `"global"`; anything else rejects the entry. A `tab` plugin keeps one result per tab. A `global` plugin keeps one result for the whole app, computed with the active tab's context. |
 
 How the file is read:
@@ -366,7 +366,7 @@ Both cards carry an `extension` chip and the accent border. They have no refresh
 
 **Per tab.** Each tab shows what its own omp process published, including what a background tab published while you were elsewhere. A tab's statuses and widgets stay through `/new`, branch and fork, as in omp's terminal UI (extensions that care refresh them on `session_switch`, and on `session_branch` for a branch), and go away when its omp process ends or is restarted (profile switch).
 
-**Hiding.** Tweaks → Rail lists `extension: status lines` and `extension: <key>` for what the active tab has published, stored as `widget:ext-status` and `widget:ext:<key>` next to the plugins' `widget:plugin:<id>`. A hidden card's updates are still kept, so it comes back current.
+**Hiding.** Settings → Rail lists `extension: status lines` and `extension: <key>` for what the active tab has published, stored as `widget:ext-status` and `widget:ext:<key>` next to the plugins' `widget:plugin:<id>`. A hidden card's updates are still kept, so it comes back current.
 
 **Trust.** The code runs inside omp, with the trust you already give an installed omp extension; the desktop runs none of it and needs no approval. It only displays the text.
 

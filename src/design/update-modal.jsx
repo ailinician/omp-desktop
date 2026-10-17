@@ -23,14 +23,9 @@ function UpdateModal({ updater, busyTabs }) {
   const panelRef = React.useRef(null);
 
   // Take focus on open (so Tab walks the modal's buttons, not the composer
-  // underneath) and hand it back on close — same pattern as
-  // prompt-history-modal.jsx. Nothing is focused by default: Enter must not
-  // install and restart by accident.
-  React.useEffect(() => {
-    const restore = document.activeElement;
-    requestAnimationFrame(() => panelRef.current?.focus());
-    return () => { restore?.focus?.(); };
-  }, []);
+  // underneath) and hand it back on close (ui/use-modal-focus.js). Nothing
+  // is focused by default: Enter must not install and restart by accident.
+  window.useModalFocus(panelRef);
 
   // Capture phase on `window`, not the panel's own onKeyDown: focus can
   // leave the panel while it is open — the composer refocuses itself when

@@ -118,8 +118,8 @@
 }
 
 /* ── Annotations ───────────────────────────────────────────────────── */
-/* On the accent, text takes the window colour (the `.twk-btn` precedent):
-   it follows the theme, as `.btn.primary`'s per-theme overrides do. */
+/* On the accent, text takes the window colour (as accent-filled buttons
+   do): it follows the theme, as `.btn.primary`'s per-theme overrides do. */
 .browser-marker {
   position: absolute; z-index: 1;
   display: flex; align-items: center; justify-content: center;

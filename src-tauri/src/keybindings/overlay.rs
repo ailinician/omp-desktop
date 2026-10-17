@@ -89,7 +89,7 @@ impl OverlayStore {
         }
         // Validate and canonicalise in one pass, de-duplicating by simple
         // linear scan rather than a `BTreeSet` — `keys` is a couple of
-        // chords at most (one rebind, or the Shortcuts modal's "+ chord"
+        // chords at most (one rebind, or Settings → Shortcuts' "+ chord"
         // append), so `Vec::contains` costs nothing and needs no clone to
         // check membership before pushing.
         let mut canonical: Vec<String> = Vec::with_capacity(keys.len());

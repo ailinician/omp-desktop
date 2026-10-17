@@ -12,7 +12,7 @@ User-facing behaviour: [`docs/widgets.md` § omp extension widgets](../widgets.m
 | `src-tauri/src/lib.rs` | `extension_ui_state` command |
 | `src/app/extension-widgets.js` | pure: `apply`, `fromSnapshot`, `isFireAndForget`, `cards`, `toggles` (`window.OMP_EXT_WIDGETS`); test `tests/test-extension-widgets.mjs` |
 | `src/live.js` | per-tab `state.extWidgets`: live frames, snapshot/restore, the dropped-replay load, lifecycle |
-| `src/app-live.jsx` | the cards (after the plugin cards) and the Tweaks → Rail rows |
+| `src/app-live.jsx` | the cards (after the plugin cards) and `extToggles`, the Settings → Rail toggles (rendered by `design/settings/rows-layout.jsx`) |
 | `src/design/widgets/widget-card.jsx` | `WidgetCard`'s `source` prop: chip + `wdg-pushed` accent border instead of run timing |
 
 ## Wire frames

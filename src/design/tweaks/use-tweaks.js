@@ -39,4 +39,10 @@ function useTweaks(defaults) {
 }
 
 window.useTweaks = useTweaks;
+// The stored tweaks merged over `defaults` (TWEAK_DEFAULTS when omitted),
+// for code outside React that needs a value before any component mounts:
+// live.js reads the session prefs at load, before the boot tab restore.
+window.OMP_TWEAKS_STORE = Object.freeze({
+  read(defaults = window.TWEAK_DEFAULTS) { return _load(defaults); },
+});
 })();

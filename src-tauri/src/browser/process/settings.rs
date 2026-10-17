@@ -118,7 +118,7 @@ impl SettingsStore {
                 out
             });
         Err(format!(
-            "no Chromium found{skipped}: install Google Chrome or Chromium, or choose a browser in Tweaks → Browser"
+            "no Chromium found{skipped}: install Google Chrome or Chromium, or choose a browser in Settings → Browser"
         ))
     }
 }
@@ -130,7 +130,7 @@ fn configured(path: &str) -> Result<PathBuf, String> {
         Ok(binary.to_path_buf())
     } else {
         Err(format!(
-            "the browser {path:?} set in Tweaks → Browser is not an absolute path to an executable file"
+            "the browser {path:?} set in Settings → Browser is not an absolute path to an executable file"
         ))
     }
 }
@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(reloaded.path(), bin.display().to_string());
         std::fs::remove_file(&bin).unwrap();
         let err = reloaded.launch_candidates().unwrap_err();
-        assert!(err.contains("Tweaks → Browser"), "{err}");
+        assert!(err.contains("Settings → Browser"), "{err}");
         let settings = reloaded.settings();
         assert_eq!(
             settings.path,

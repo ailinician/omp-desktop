@@ -11,6 +11,8 @@
 // - `copySelection(term)`: the selection to the clipboard (ctrl+shift+c,
 //   the panel's right-click).
 // - `theme()`: xterm colours from the active theme's CSS variables.
+// - `scrollbackLines(pref)`: the `terminalScrollback` tweak as xterm's
+//   `scrollback` option.
 // - `exitLine(code)`, `failLine(error)`, `SKIPPED_LINE`: what the xterm shows
 //   for an exited shell, a failed start, and output Rust's ring dropped.
 //
@@ -42,6 +44,16 @@
       cursor: v("--accent", "#8AF0C8"),
       selectionBackground: v("--accent-soft", "rgba(138, 240, 200, 0.25)"),
     };
+  }
+
+  const SCROLLBACK_DEFAULT = 5000;
+  const SCROLLBACK_MAX = 100000;
+
+  /** The `terminalScrollback` tweak as xterm's `scrollback` (lines): a
+   *  whole number in 0..100000, the default for anything else. */
+  function scrollbackLines(pref) {
+    if (typeof pref !== "number" || !Number.isFinite(pref)) return SCROLLBACK_DEFAULT;
+    return Math.min(SCROLLBACK_MAX, Math.max(0, Math.round(pref)));
   }
 
   /**
@@ -92,10 +104,10 @@
    * copy the selection and paste; `preventDefault` keeps the keymap and the
    * WebView's own paste out of them. macOS keeps native ⌘C / ⌘V.
    */
-  function createXterm({ fontSize, theme: colours, tryRestart, onData, onResize }) {
+  function createXterm({ fontSize, scrollback, theme: colours, tryRestart, onData, onResize }) {
     const T = window.OMP_TERMINAL;
     const term = new window.Terminal({
-      scrollback: 5000, fontSize, theme: colours, allowProposedApi: false, cursorBlink: true,
+      scrollback: scrollbackLines(scrollback), fontSize, theme: colours, allowProposedApi: false, cursorBlink: true,
     });
     // OSC 8 hyperlinks are on by default in xterm 6, and every one a program
     // prints keeps an invisible link entry for as long as its cells live —
@@ -135,6 +147,7 @@
     exitLine,
     failLine,
     theme,
+    scrollbackLines,
     applyWindowsPty,
     createXterm,
     copySelection,
