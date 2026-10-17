@@ -522,19 +522,15 @@
 
   // Undo a local `_settleAsk` whose answer never reached omp: the bubble
   // with this id that reads answered (and was not cancelled by omp since)
-  // takes input again. Returns whether one matched.
+  // takes input again. The caller publishes.
   function _reopenAsk(id) {
-    let reopened = false;
     state.messages = state.messages.map(m => {
       if (m.kind === "ask" && m.id === id && m.answered && !m.cancelled) {
-        reopened = true;
         const { answered: _a, answer: _v, ...open } = m;
         return open;
       }
       return m;
     });
-    if (reopened) notify();
-    return reopened;
   }
 
   // Resolve a pending ask bubble: settle it, then send `payload` back to

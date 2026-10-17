@@ -9,6 +9,6 @@ disallowed-methods = [
     { path = "portable_pty::SlavePty::spawn_command", reason = "hold spawn_gate::shared() around it" },
     { path = "open::that_detached", reason = "hold spawn_gate::shared() around it" },
     { path = "open::that", reason = "hold spawn_gate::shared() around it" },
-    { path = "gix::discover", reason = "hold spawn_gate::shared(): gix may run git" },
+    { path = "gix::discover", reason = "use spawn_gate::discover: gix may run git" },
     { path = "gix::open", reason = "hold spawn_gate::shared(): gix may run git" },
 ]

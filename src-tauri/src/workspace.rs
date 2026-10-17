@@ -13,8 +13,7 @@
 //! APIs, and `git add` / `git checkout` / `git reset` already implement
 //! safe, atomic index and worktree mutation.
 
-use crate::child_path::{child_path_dirs, find_program, join_dirs};
-use crate::program_setting::is_executable_file;
+use crate::child_path::{child_path_dirs, locate_program, TrustedProgram};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -181,22 +180,13 @@ fn git(work_dir: &Path) -> Result<Command, String> {
 
 /// [`git`] with the PATH folders it searches given.
 fn git_in(dirs: &[PathBuf], work_dir: &Path) -> Result<Command, String> {
-    let binary = find_program(dirs, GIT_FILE, is_executable_file).ok_or_else(|| {
-        "git was not found in any absolute PATH folder (relative entries are ignored). \
-         Make sure git is installed and on PATH."
-            .to_string()
-    })?;
+    let TrustedProgram { binary, path } = locate_program(dirs, "git")?;
     let mut cmd = Command::new(binary);
-    cmd.env("PATH", join_dirs(dirs))
+    cmd.env("PATH", path)
         .current_dir(work_dir)
         .args(["--literal-pathspecs", "--no-optional-locks"]);
     Ok(cmd)
 }
-
-/// `git`'s file name in a PATH folder. Windows: only `git.exe`, what a bare
-/// `git` resolved to (Git for Windows, winget, and scoop's shim all ship
-/// one).
-const GIT_FILE: &str = if cfg!(windows) { "git.exe" } else { "git" };
 
 /// Run a `git` subcommand and return its stdout, mapping both a spawn
 /// failure and a non-zero exit into a `label`-prefixed error string.
@@ -232,17 +222,17 @@ fn git_succeeds(work_dir: &Path, args: &[&str], label: &str) -> Result<bool, Str
 /// pattern as [`crate::git::probe`]) and return it with its working-tree
 /// root — the root every project-relative path is resolved against —
 /// failing clearly for bare repositories or paths that aren't inside a git
-/// repository at all. Shared with [`crate::git_browser`]. Holds the spawn
-/// gate: gix may run `git` to find its installation config.
-pub fn discover(path: &Path) -> Result<(gix::Repository, PathBuf), String> {
-    let _gate = crate::spawn_gate::shared();
-    #[allow(clippy::disallowed_methods)] // under the gate
-    let repo = gix::discover(path).map_err(|e| format!("not a git repository: {e}"))?;
+/// repository at all. Shared with [`crate::git_browser`]. Discovered through
+/// [`crate::spawn_gate::discover`]: the guard comes back with the repository.
+pub fn discover(
+    path: &Path,
+) -> Result<(crate::spawn_gate::Shared, gix::Repository, PathBuf), String> {
+    let (gate, repo) = crate::spawn_gate::discover(path)?;
     let work_dir = repo
         .workdir()
         .map(Path::to_path_buf)
         .ok_or_else(|| "repository has no working tree".to_string())?;
-    Ok((repo, work_dir))
+    Ok((gate, repo, work_dir))
 }
 
 // ── accept / reject ─────────────────────────────────────────────────────────
@@ -258,7 +248,7 @@ fn resolve_file_target(
     repo_root: &Path,
     rel_path: &str,
 ) -> Result<(PathBuf, PathBuf, String), String> {
-    let (_, work_dir) = discover(repo_root)?;
+    let (_, _, work_dir) = discover(repo_root)?;
     let (abs, rel_norm) = validate_relative_path(&work_dir, rel_path)?;
     if std::fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
         return Err(format!("{rel_norm} is a directory, not a file"));
@@ -431,8 +421,7 @@ fn find_rename_source(
 
 #[cfg(test)]
 mod tests {
-    use super::{accept, git, git_in, reject, validate_relative_path, GIT_FILE};
-    use crate::child_path::absolute_dirs;
+    use super::{accept, git, git_in, reject, validate_relative_path};
     use crate::test_support::{executable, TempDir};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -505,18 +494,16 @@ mod tests {
         let dir = TempDir::new("workspace", "git-lookup");
         let project = dir.path().join("project");
         let trusted = dir.path().join("bin");
-        executable(&project.join(GIT_FILE), "");
-        let real = executable(&trusted.join(GIT_FILE), "");
+        let git_file = format!("git{}", std::env::consts::EXE_SUFFIX);
+        executable(&project.join(&git_file), "");
+        let real = executable(&trusted.join(&git_file), "");
 
-        let relative_only = std::env::join_paths(["", ".", "project"]).unwrap();
-        let relative_only: Vec<_> = absolute_dirs(&relative_only).collect();
-        let err = git_in(&relative_only, &project).unwrap_err();
+        // `child_path_dirs` has already dropped the empty and relative PATH
+        // entries (`child_path`'s tests), so only the trusted folder is left.
+        let err = git_in(&[], &project).unwrap_err();
         assert!(err.contains("git was not found"), "{err}");
 
-        let path =
-            std::env::join_paths([Path::new(""), Path::new("."), trusted.as_path()]).unwrap();
-        let dirs: Vec<_> = absolute_dirs(&path).collect();
-        let cmd = git_in(&dirs, &project).unwrap();
+        let cmd = git_in(std::slice::from_ref(&trusted), &project).unwrap();
         assert_eq!(Path::new(cmd.get_program()), real);
         let child_path = cmd.get_envs().find(|(key, _)| *key == "PATH");
         assert_eq!(child_path.and_then(|(_, v)| v), Some(trusted.as_os_str()));

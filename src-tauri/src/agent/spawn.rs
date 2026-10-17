@@ -1,6 +1,5 @@
 use crate::approval_mode::ApprovalMode;
-use crate::child_path::{child_path_dirs, find_program, join_dirs};
-use crate::program_setting::is_executable_file;
+use crate::child_path::{child_path_dirs, locate_program, TrustedProgram};
 use std::ffi::{OsStr, OsString};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -19,10 +18,6 @@ use std::sync::Mutex;
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// omp's file name in a PATH folder. Windows: only `omp.exe` — `Command`
-/// appended `.exe` to a bare `omp` anyway, so nothing else ever ran.
-const OMP_FILE: &str = if cfg!(windows) { "omp.exe" } else { "omp" };
-
 /// The omp binary every run uses, and the PATH it runs with.
 ///
 /// Located once per run as an absolute path and spawned by that path, never
@@ -40,16 +35,8 @@ struct Omp {
 
 impl Omp {
     fn locate() -> Result<Self, String> {
-        let dirs = child_path_dirs();
-        let binary = find_program(&dirs, OMP_FILE, is_executable_file).ok_or_else(|| {
-            "omp was not found in any absolute PATH folder (relative entries are ignored). \
-             Make sure omp is installed and on PATH."
-                .to_string()
-        })?;
-        Ok(Self {
-            binary,
-            path: join_dirs(&dirs),
-        })
+        let TrustedProgram { binary, path } = locate_program(&child_path_dirs(), "omp")?;
+        Ok(Self { binary, path })
     }
 
     /// A `Command` for this binary with every cross-cutting concern a run of

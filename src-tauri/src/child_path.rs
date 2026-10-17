@@ -1,7 +1,7 @@
 //! The PATH a child that must find a user-installed binary (omp, `git`) is
 //! spawned with: the inherited one, plus the directories the process that
 //! launched us left out — and the lookup of such a binary by absolute path
-//! ([`find_program`]), for a child started in an untrusted project folder.
+//! ([`locate_program`]), for a child started in an untrusted project folder.
 //!
 //! - Unix: GUI launchers (Finder, Dock, `.desktop` files) hand a bundled app
 //!   a minimal PATH, so the common install dirs are appended.
@@ -16,6 +16,7 @@
 //! Inherited entries always come first, so a PATH set on purpose (a terminal,
 //! `tauri dev`) still wins.
 
+use crate::program_setting::is_executable_file;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,7 +61,7 @@ fn full_child_path() -> Option<OsString> {
 
 /// The absolute folders of `path`. A relative one is dropped: it would
 /// resolve against the working directory.
-pub fn absolute_dirs(path: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+fn absolute_dirs(path: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
     std::env::split_paths(path).filter(|dir| dir.is_absolute())
 }
 
@@ -71,7 +72,7 @@ fn absolute_entries(path: &OsStr) -> OsString {
 
 /// Folders split from a PATH ([`child_path_dirs`]) joined back into one: the
 /// [`trusted_child_path`] for a child found by searching those folders.
-pub fn join_dirs<I>(dirs: I) -> OsString
+fn join_dirs<I>(dirs: I) -> OsString
 where
     I: IntoIterator,
     I::Item: AsRef<OsStr>,
@@ -81,11 +82,40 @@ where
     std::env::join_paths(dirs).unwrap_or_default()
 }
 
+/// A user-installed program a child started in a project folder runs:
+/// [`locate_program`]'s answer.
+pub struct TrustedProgram {
+    /// The absolute path to spawn.
+    pub binary: PathBuf,
+    /// The PATH to spawn it with: the folders the lookup searched, joined
+    /// (the [`trusted_child_path`]), so what the program itself starts (a
+    /// `#!/usr/bin/env` interpreter, git's helpers) isn't resolved inside
+    /// the project either.
+    pub path: OsString,
+}
+
+/// Locate program `name` in `dirs` ([`child_path_dirs`]) with
+/// [`find_program`]. Windows: only `<name>.exe`, what `Command` resolved a
+/// bare name to anyway. `Err` names the program when no folder holds it.
+pub fn locate_program(dirs: &[PathBuf], name: &str) -> Result<TrustedProgram, String> {
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    let binary = find_program(dirs, &file, is_executable_file).ok_or_else(|| {
+        format!(
+            "{name} was not found in any absolute PATH folder (relative entries are ignored). \
+             Make sure {name} is installed and on PATH."
+        )
+    })?;
+    Ok(TrustedProgram {
+        binary,
+        path: join_dirs(dirs),
+    })
+}
+
 /// The first `name` that `is_executable` accepts in `dirs` ([`child_path_dirs`]),
 /// in order. A child started in a project folder is spawned by this absolute
 /// path, never by a bare name: that would be looked up through any empty or
 /// relative PATH entry *there*, so a project could ship its own program.
-pub fn find_program(
+fn find_program(
     dirs: &[PathBuf],
     name: &str,
     is_executable: impl Fn(&Path) -> bool,

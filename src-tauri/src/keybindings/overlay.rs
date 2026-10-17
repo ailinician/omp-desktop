@@ -21,11 +21,10 @@
 //! app run and no file is read or written.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-use crate::json_store;
+use crate::config_file::ConfigFile;
 use crate::keybindings::{chord, Bindings, ACTION_IDS};
 
 // ── on-disk representation ────────────────────────────────────────────────────
@@ -46,52 +45,32 @@ struct OverlayFile {
 /// Manages `<app config dir>/keybindings.json`, the desktop-private overlay
 /// that stores user rebinds for actions in the desktop's own registry.
 pub struct OverlayStore {
-    backing: Backing,
-}
-
-enum Backing {
-    /// The overlay file and `path.with_extension("lock")`, computed once at
-    /// construction rather than allocated on every `set`/`remove` — same
-    /// precedent as `ProfileStore::load`'s own `lock` field.
-    File { path: PathBuf, lock: PathBuf },
-    /// No app config folder: rebinds last for the app run.
-    Memory(Mutex<Bindings>),
+    /// The overlay file, or memory (no app config folder: rebinds last for
+    /// the app run).
+    backing: ConfigFile,
 }
 
 impl OverlayStore {
     /// Create a store pointing at `path` (the file need not exist yet), or
     /// a memory-only one for `None`.
     pub fn new(path: Option<PathBuf>) -> Self {
-        let backing = path.map_or_else(
-            || Backing::Memory(Mutex::default()),
-            |path| Backing::File {
-                lock: path.with_extension("lock"),
-                path,
-            },
-        );
-        Self { backing }
+        Self {
+            backing: ConfigFile::new(path),
+        }
     }
 
     /// The absolute path of the overlay file (used by the Shortcuts footer);
     /// `None` for a memory-only store.
     pub fn path(&self) -> Option<&Path> {
-        match &self.backing {
-            Backing::File { path, .. } => Some(path),
-            Backing::Memory(_) => None,
-        }
+        self.backing.path()
     }
 
     /// Read the current overlay. A missing file returns an empty map; a
     /// malformed or unreadable file returns `Err`.
     pub fn read(&self) -> Result<Bindings, String> {
-        match &self.backing {
-            Backing::File { path, .. } => {
-                json_store::read_strict::<OverlayFile>(path).map(|f| f.bindings)
-            }
-            // The caller owns its map (it goes into the IPC payload) while
-            // the store keeps its own.
-            Backing::Memory(bindings) => Ok(locked(bindings).clone()),
-        }
+        self.backing
+            .read_strict::<OverlayFile>()
+            .map(|f| f.bindings)
     }
 
     /// Set `action` → `keys` in the overlay and return the updated map.
@@ -149,27 +128,11 @@ impl OverlayStore {
     /// rewrite the file (or create it, for a fresh install) with identical
     /// content.
     fn mutate(&self, f: impl FnOnce(&mut Bindings) -> bool) -> Result<Bindings, String> {
-        match &self.backing {
-            Backing::File { path, lock } => json_store::update_strict(
-                path,
-                lock,
-                |file: &mut OverlayFile| f(&mut file.bindings),
-                |file| file.bindings,
-            ),
-            Backing::Memory(bindings) => {
-                let mut bindings = locked(bindings);
-                f(&mut bindings);
-                // Same as `read`: the caller's copy for the payload.
-                Ok(bindings.clone())
-            }
-        }
+        self.backing.update_strict(
+            |file: &mut OverlayFile| f(&mut file.bindings),
+            |file| file.bindings,
+        )
     }
-}
-
-/// A memory-only overlay. Every change is a single map operation, so the
-/// map is consistent even after a panic elsewhere: poison is ignored.
-fn locked(bindings: &Mutex<Bindings>) -> MutexGuard<'_, Bindings> {
-    bindings.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ mod approval;
 mod approval_mode;
 mod browser;
 mod child_path;
+mod config_file;
 mod conversation_tree;
 mod external_open;
 mod files;
@@ -1243,6 +1244,7 @@ fn setup(app: &tauri::App) {
     }
     // Every store below is memory-only without it (see `config_dir`).
     let resolved_config_dir = config_dir(app.path().app_config_dir());
+    let config_file = |name: &str| resolved_config_dir.as_deref().map(|dir| dir.join(name));
     // Rail widget plugins: <app_config_dir>/widgets.json and the approvals in
     // <app_config_dir>/widget-approvals.json. No temp-dir fallback: a
     // `widgets.json` in a shared temp dir could be planted by another user,
@@ -1254,28 +1256,22 @@ fn setup(app: &tauri::App) {
     // Terminal tabs and the shell setting: <app_config_dir>/terminal.json.
     // No temp-dir fallback either: another account could plant the shell
     // this one runs; without a config dir the setting stays in memory.
-    app.manage(Arc::new(terminal::TerminalManager::new(
-        resolved_config_dir
-            .as_deref()
-            .map(|dir| dir.join("terminal.json")),
-    )));
+    app.manage(Arc::new(terminal::TerminalManager::new(config_file(
+        "terminal.json",
+    ))));
     // Approval mode: <app_config_dir>/approval-mode.json. No temp-dir
     // fallback: another account could plant a `yolo` there; without a config
     // dir the choice stays in memory.
-    app.manage(Arc::new(ApprovalModeStore::load(
-        resolved_config_dir
-            .as_deref()
-            .map(|dir| dir.join("approval-mode.json")),
-    )));
+    app.manage(Arc::new(ApprovalModeStore::load(config_file(
+        "approval-mode.json",
+    ))));
     // The browser panel's Chromium setting: <app_config_dir>/browser.json.
     // No temp-dir fallback: another account could plant the browser this one
     // runs; without a config dir the setting stays in memory. An
     // unresolvable home only loses the candidates under it (omp's Chrome for
     // Testing cache, macOS `~/Applications`).
     let browser_store = Arc::new(browser::SettingsStore::load(
-        resolved_config_dir
-            .as_deref()
-            .map(|dir| dir.join("browser.json")),
+        config_file("browser.json"),
         app.path().home_dir().ok(),
     ));
     app.manage(Arc::clone(&browser_store));
@@ -1320,16 +1316,12 @@ fn setup(app: &tauri::App) {
     // Profile list: <app_config_dir>/profiles.json. No temp-dir fallback for
     // it or the stores below: another account could plant the profile tabs
     // start in, a rebind, or the folders the next launch opens.
-    app.manage(Arc::new(profiles::ProfileStore::load(
-        resolved_config_dir
-            .as_deref()
-            .map(|dir| dir.join("profiles.json")),
-    )));
+    app.manage(Arc::new(profiles::ProfileStore::load(config_file(
+        "profiles.json",
+    ))));
     // Keybinding overlay: <app_config_dir>/keybindings.json.
     app.manage(Arc::new(keybindings::overlay::OverlayStore::new(
-        resolved_config_dir
-            .as_deref()
-            .map(|dir| dir.join("keybindings.json")),
+        config_file("keybindings.json"),
     )));
     // Widget scheduler thread; it loads the config and approvals itself.
     // Each run executes private copies of the plugin's scripts under
@@ -1345,14 +1337,12 @@ fn setup(app: &tauri::App) {
     )));
     // Recently opened projects: <app_config_dir>/recent-projects.json.
     app.manage(Arc::new(recent_projects::RecentProjectsStore::new(
-        resolved_config_dir
-            .as_deref()
-            .map(|dir| dir.join("recent-projects.json")),
+        config_file("recent-projects.json"),
     )));
     // Open-tab layout for the next launch: <app_config_dir>/open-tabs.json.
-    app.manage(Arc::new(open_tabs::OpenTabsStore::new(
-        resolved_config_dir.map(|dir| dir.join("open-tabs.json")),
-    )));
+    app.manage(Arc::new(open_tabs::OpenTabsStore::new(config_file(
+        "open-tabs.json",
+    ))));
 
     // A cold start *is* how Windows and Linux file managers open a
     // folder, so the launch argv is the third delivery path into the

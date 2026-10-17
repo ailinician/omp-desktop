@@ -198,11 +198,7 @@ impl AgentBridge {
             })?
             .ok_or_else(|| format!("session '{session_id}' not found"))??;
 
-        let answer = serde_json::json!({
-            "type": "extension_ui_response", "id": request_id, "value": "Approve",
-        })
-        .to_string();
-        if let Err(err) = write_command(&stdin, &answer, None) {
+        if let Err(err) = write_command(&stdin, &approve_answer(request_id), None) {
             if let Ok(mut pending) = open.lock() {
                 pending.track(request_id.to_owned(), tool);
             }
@@ -227,10 +223,18 @@ impl AgentBridge {
     }
 }
 
+/// The answer that approves omp's prompt `request_id`.
+fn approve_answer(request_id: &str) -> String {
+    serde_json::json!({
+        "type": "extension_ui_response", "id": request_id, "value": "Approve",
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::tests::{approval_prompt as prompt, idle_inner};
+    use crate::agent::tests::{approval_prompt as prompt, idle_inner, Broken};
     use crate::test_support::TempDir;
     use serde_json::json;
     use std::path::Path;
@@ -348,10 +352,7 @@ mod tests {
 
     /// The bytes an "Approve" for `id` puts on omp's stdin.
     fn approve_line(id: &str) -> String {
-        format!(
-            "{}\n",
-            json!({"type": "extension_ui_response", "id": id, "value": "Approve"})
-        )
+        format!("{}\n", approve_answer(id))
     }
 
     fn written(pipe: &Pipe) -> String {
@@ -447,15 +448,6 @@ mod tests {
 
     #[test]
     fn an_answer_omp_never_received_saves_no_grant_and_keeps_the_prompt() {
-        struct Broken;
-        impl Write for Broken {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::ErrorKind::BrokenPipe.into())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
         let dir = TempDir::new("approvals", "approve-broken");
         let book = RuleBook::new(dir.path().join("rules"));
         let bridge = bridge_with_prompts(dir.path());

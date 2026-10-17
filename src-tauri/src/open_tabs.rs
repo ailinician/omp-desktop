@@ -24,11 +24,10 @@
 //! starts without tabs.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-use crate::json_store;
+use crate::config_file::ConfigFile;
 
 /// Tabs kept per layout; a restore drops any beyond this. Every restored tab
 /// is an omp process spawned at launch, so the cap bounds that too.
@@ -76,66 +75,33 @@ pub struct Restore {
 
 /// Manages `<app config dir>/open-tabs.json`.
 pub struct OpenTabsStore {
-    backing: Backing,
-}
-
-enum Backing {
-    /// The file and `path.with_extension("lock")`, computed once (same as
-    /// `OverlayStore`).
-    File { path: PathBuf, lock: PathBuf },
-    /// No app config folder: the bytes the file would hold, for the app run
-    /// (empty until the first save). Bytes rather than a `Layout`, so a load
-    /// takes the file's exact path back through [`restorable`].
-    Memory(Mutex<Vec<u8>>),
+    /// The file, or memory (no app config folder: the layout lasts for the
+    /// app run, and a load still takes it through [`restorable`]).
+    backing: ConfigFile,
 }
 
 impl OpenTabsStore {
     /// Create a store pointing at `path` (the file need not exist yet), or
     /// a memory-only one for `None`.
     pub fn new(path: Option<PathBuf>) -> Self {
-        let backing = path.map_or_else(
-            || Backing::Memory(Mutex::default()),
-            |path| Backing::File {
-                lock: path.with_extension("lock"),
-                path,
-            },
-        );
-        Self { backing }
+        Self {
+            backing: ConfigFile::new(path),
+        }
     }
 
     /// The saved layout, checked against the file system (see
-    /// [`restorable`]). File-backed: unlocked for the same reason as
+    /// [`restorable`]). Unlocked for the same reason as
     /// `RecentProjectsStore::list` (`write_atomic` never exposes a
-    /// half-written file). Memory-only: read under the bytes' mutex.
+    /// half-written file).
     pub fn load(&self) -> Restore {
-        restorable(match &self.backing {
-            Backing::File { path, .. } => json_store::read_or_default(path),
-            // Nothing saved yet (empty) parses as nothing to restore.
-            Backing::Memory(bytes) => serde_json::from_slice(&locked(bytes)).unwrap_or_default(),
-        })
+        restorable(self.backing.read_or_default())
     }
 
     /// Replace the saved layout with `layout`. Written as is: the file is
     /// untrusted anyway, so [`restorable`] sanitises it on the way back.
     pub fn save(&self, layout: &Layout) -> Result<(), String> {
-        let bytes = serde_json::to_vec_pretty(layout).map_err(|e| e.to_string())?;
-        match &self.backing {
-            Backing::File { path, lock } => json_store::with_lock_str(lock, || {
-                json_store::write_atomic(path, &bytes)
-                    .map_err(|e| format!("write {}: {e}", path.display()))
-            }),
-            Backing::Memory(saved) => {
-                *locked(saved) = bytes;
-                Ok(())
-            }
-        }
+        self.backing.write(layout)
     }
-}
-
-/// A memory-only layout. Every save replaces the whole value, so poison is
-/// ignored.
-fn locked(bytes: &Mutex<Vec<u8>>) -> MutexGuard<'_, Vec<u8>> {
-    bytes.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Cap to [`MAX_TABS`], drop an `active` index that points past the end,

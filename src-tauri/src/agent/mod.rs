@@ -707,19 +707,22 @@ mod tests {
 
     #[test]
     fn an_answer_omp_never_received_leaves_the_prompt_open() {
-        struct Broken;
-        impl Write for Broken {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::ErrorKind::BrokenPipe.into())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
         let open = open_prompt("req-1");
         let line = r#"{"type":"extension_ui_response","id":"req-1","value":"Approve"}"#;
         assert!(write_command(&Mutex::new(Broken), line, Some(("req-1", &open))).is_err());
         assert_eq!(open.lock().unwrap().tool("req-1"), Some("bash"));
+    }
+
+    /// A stdin whose every write fails, as a pipe omp closed does.
+    pub(super) struct Broken;
+
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     /// omp's tool-approval prompt `id` for `tool`, as the reader sees it.

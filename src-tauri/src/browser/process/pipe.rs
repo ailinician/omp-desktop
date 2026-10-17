@@ -147,13 +147,7 @@ mod tests {
 
     /// A stand-in for Chromium that exits at once.
     fn exiting() -> Command {
-        if cfg!(windows) {
-            let mut cmd = Command::new("cmd");
-            cmd.args(["/C", "exit"]);
-            cmd
-        } else {
-            Command::new("true")
-        }
+        crate::test_support::shell("exit")
     }
 
     /// A child of ours that outlives the test's reads unless killed.

@@ -49,8 +49,7 @@ use std::path::{Path, PathBuf};
 /// the spawn gate ([`crate::spawn_gate`]) and must live as long as the
 /// reads on the repository.
 fn open(path: &Path) -> Result<(crate::spawn_gate::Shared, gix::Repository, PathBuf), String> {
-    let gate = crate::spawn_gate::shared();
-    let (mut repo, work_dir) = crate::workspace::discover(path)?;
+    let (gate, mut repo, work_dir) = crate::workspace::discover(path)?;
     // Collected first: the read borrows the config the removal replaces.
     let local: Vec<_> = repo
         .config_snapshot()

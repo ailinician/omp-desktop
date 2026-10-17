@@ -38,6 +38,7 @@
 //! not run clippy) rejects a new spawn site that misses the gate.
 
 use std::io;
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
@@ -138,23 +139,24 @@ pub fn status(cmd: &mut Command) -> io::Result<ExitStatus> {
     spawn(cmd)?.wait()
 }
 
+/// `gix::discover` through the gate, returned with the repository: gix may
+/// run `git` to find its installation config, and later reads through its
+/// filter pipeline run drivers, so keep the guard for as long as the reads.
+/// `Err`: "not a git repository: …".
+pub fn discover(path: &Path) -> Result<(Shared, gix::Repository), String> {
+    let gate = shared();
+    #[allow(clippy::disallowed_methods)] // under the gate
+    gix::discover(path)
+        .map(|repo| (gate, repo))
+        .map_err(|e| format!("not a git repository: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::shell;
     use std::sync::mpsc;
     use std::time::Duration;
-
-    fn shell(script: &str) -> Command {
-        #[cfg(windows)]
-        let mut cmd = Command::new("cmd");
-        #[cfg(windows)]
-        cmd.args(["/C", script]);
-        #[cfg(unix)]
-        let mut cmd = Command::new("sh");
-        #[cfg(unix)]
-        cmd.args(["-c", script]);
-        cmd
-    }
 
     /// An exclusive hold taken on a thread of its own; the receiver says
     /// when it is held, and dropping the sender releases it.

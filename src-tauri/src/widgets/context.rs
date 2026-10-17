@@ -44,9 +44,7 @@ pub fn session_ctx(project: Option<&Path>) -> SessionCtx {
     let Some(project) = project.filter(|p| !p.as_os_str().is_empty()) else {
         return SessionCtx::default();
     };
-    let _gate = crate::spawn_gate::shared();
-    #[allow(clippy::disallowed_methods)] // under the gate
-    let Ok(repo) = gix::discover(project) else {
+    let Ok((_gate, repo)) = crate::spawn_gate::discover(project) else {
         return SessionCtx {
             project: project.to_string_lossy().into_owned(),
             ..SessionCtx::default()

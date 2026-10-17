@@ -19,12 +19,11 @@
 //! run and no file is read or written.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::json_store;
+use crate::config_file::ConfigFile;
 
 /// Entries kept per profile; older ones are dropped on the next touch.
 pub const MAX_PER_PROFILE: usize = 20;
@@ -54,42 +53,27 @@ pub struct RecentProject {
 
 /// Manages `<app config dir>/recent-projects.json`.
 pub struct RecentProjectsStore {
-    backing: Backing,
-}
-
-enum Backing {
-    /// The file and `path.with_extension("lock")`, computed once (same as
-    /// `OverlayStore`).
-    File { path: PathBuf, lock: PathBuf },
-    /// No app config folder: the list lasts for the app run.
-    Memory(Mutex<RecentFile>),
+    /// The file, or memory (no app config folder: the list lasts for the
+    /// app run).
+    backing: ConfigFile,
 }
 
 impl RecentProjectsStore {
     /// Create a store pointing at `path` (the file need not exist yet), or
     /// a memory-only one for `None`.
     pub fn new(path: Option<PathBuf>) -> Self {
-        let backing = path.map_or_else(
-            || Backing::Memory(Mutex::default()),
-            |path| Backing::File {
-                lock: path.with_extension("lock"),
-                path,
-            },
-        );
-        Self { backing }
+        Self {
+            backing: ConfigFile::new(path),
+        }
     }
 
     /// `profile`'s recent folders, newest first, minus folders that no
     /// longer exist.
     ///
-    /// File-backed: unlocked, since `write_atomic` never exposes a
-    /// half-written file and a read racing a write only sees the previous
-    /// list. Memory-only: read under the list's mutex.
+    /// Unlocked, since `write_atomic` never exposes a half-written file and
+    /// a read racing a write only sees the previous list.
     pub fn list(&self, profile: &str) -> Vec<RecentProject> {
-        match &self.backing {
-            Backing::File { path, .. } => entries_for(json_store::read_or_default(path), profile),
-            Backing::Memory(file) => copied_entries_for(&locked(file), profile),
-        }
+        entries_for(self.backing.read_or_default(), profile)
     }
 
     /// Record `path` (already canonical) as opened now under `profile` and
@@ -115,35 +99,14 @@ impl RecentProjectsStore {
     }
 
     /// Locked read-modify-write; returns `profile`'s list after `f`.
-    /// `with_lock_str` creates the parent directory before locking. Missing
-    /// or unreadable ⇒ empty (see [`json_store::read_or_default`]).
+    /// Missing or unreadable ⇒ empty (see [`ConfigFile::update`]).
     fn mutate(
         &self,
         profile: &str,
         f: impl FnOnce(&mut RecentFile),
     ) -> Result<Vec<RecentProject>, String> {
-        match &self.backing {
-            Backing::File { path, lock } => json_store::with_lock_str(lock, || {
-                let mut file = json_store::read_or_default(path);
-                f(&mut file);
-                let bytes = serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())?;
-                json_store::write_atomic(path, &bytes)
-                    .map_err(|e| format!("write {}: {e}", path.display()))?;
-                Ok(entries_for(file, profile))
-            }),
-            Backing::Memory(file) => {
-                let mut file = locked(file);
-                f(&mut file);
-                Ok(copied_entries_for(&file, profile))
-            }
-        }
+        self.backing.update(f, |file| entries_for(file, profile))
     }
-}
-
-/// A memory-only list. Every change is a single `Vec` operation, so the
-/// list is consistent even after a panic elsewhere: poison is ignored.
-fn locked(file: &Mutex<RecentFile>) -> MutexGuard<'_, RecentFile> {
-    file.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Current time in Unix epoch milliseconds; `0` for a clock before 1970.
@@ -182,30 +145,12 @@ fn upsert(file: &mut RecentFile, profile: &str, path: String, now_ms: u64) {
 fn entries_for(file: RecentFile, profile: &str) -> Vec<RecentProject> {
     file.entries
         .into_iter()
-        .filter(|e| listed(e, profile))
+        .filter(|e| e.profile == profile && Path::new(&e.path).is_dir())
         .map(|e| RecentProject {
             path: e.path,
             opened_at: e.opened_at,
         })
         .collect()
-}
-
-/// [`entries_for`] over a list the store keeps (memory-only): each path is
-/// copied, since the reply leaves for the frontend while the entry stays.
-fn copied_entries_for(file: &RecentFile, profile: &str) -> Vec<RecentProject> {
-    file.entries
-        .iter()
-        .filter(|e| listed(e, profile))
-        .map(|e| RecentProject {
-            path: e.path.clone(),
-            opened_at: e.opened_at,
-        })
-        .collect()
-}
-
-/// Whether `e` belongs in `profile`'s list as shown: its folder still exists.
-fn listed(e: &Entry, profile: &str) -> bool {
-    e.profile == profile && Path::new(&e.path).is_dir()
 }
 
 #[cfg(test)]
@@ -249,10 +194,7 @@ mod tests {
     impl RecentProjectsStore {
         /// The file of a [`scratch_store`] store.
         fn file(&self) -> &Path {
-            match &self.backing {
-                Backing::File { path, .. } => path,
-                Backing::Memory(_) => panic!("a file-backed store"),
-            }
+            self.backing.path().expect("a file-backed store")
         }
     }
 
@@ -368,7 +310,7 @@ mod tests {
         fs::remove_dir(&b).expect("delete b");
 
         assert_eq!(paths(&store.list("default")), vec![a.as_str()]);
-        let file: RecentFile = json_store::read_or_default(store.file());
+        let file: RecentFile = crate::json_store::read_or_default(store.file());
         assert_eq!(file.entries.len(), 2);
     }
 
