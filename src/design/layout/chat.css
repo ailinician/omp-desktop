@@ -700,17 +700,16 @@
   display: inline-flex; align-items: center; gap: 5px;
   height: 26px; padding: 0 10px;
   border-radius: 999px;
-  background: var(--bg-elev);
-  border: 1px solid color-mix(in oklab, var(--accent) 45%, var(--line));
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  background: var(--bg-elevated);
+  border: 1px solid color-mix(in oklab, var(--accent) 55%, var(--line-bright));
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(0, 0, 0, 0.45);
   color: var(--fg);
   font-size: var(--d-text-xs);
   cursor: pointer;
   user-select: none;
-  animation: fade-up 120ms var(--ease-out);
 }
 .sel-quote-pop:hover {
-  background: var(--bg-hover);
+  background: var(--bg-active);
   border-color: var(--accent);
   color: var(--accent);
 }
