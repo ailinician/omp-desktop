@@ -88,10 +88,25 @@ function WindowChrome({
 }
 
 // ── Project tabs ─────────────────────────────────────────────────────
+// A tab's click props: select on click, close on middle-click, as in
+// browsers (#24). WebKit before Safari 18.2 / WebKitGTK 2.46 has no
+// `auxclick` and reports it as a `click` with button 1, hence the check in
+// onClick too; newer engines never send `click` for button 1, so this
+// can't double-fire. Swallowing the middle-button mousedown stops Windows
+// autoscroll and Linux primary-selection paste from firing on the tab.
+function tabClickProps(onSelect, onClose) {
+  return {
+    onClick: e => (e.button === 1 ? onClose?.() : onSelect?.()),
+    onMouseDown: e => { if (e.button === 1) e.preventDefault(); },
+    onAuxClick: e => { if (e.button === 1) { e.preventDefault(); onClose?.(); } },
+  };
+}
+
 function TabBar({
   projects, activeId, onSelect, onClose, onRename, onNew, onHistory, onNewInProject, onReorder,
   sidebarOpen, onToggleSidebar,
   profiles = [], appVersion, updateVersion, onUpdate, onCheckUpdate,
+  settings, onSelectSettings, onCloseSettings,
 }) {
   // Tabs can run under different profiles, so a tab whose profile is not the
   // built-in one is labelled with it — otherwise two tabs on the same folder
@@ -136,15 +151,7 @@ function TabBar({
           <div key={p.id}
             {...reorder.itemProps("projects", group.key, "x")}
             className={`tab ${active ? "active" : ""}${reorder.dropClass("projects", group.key)}`}
-            // Middle-click closes, as in browsers (#24). WebKit before
-            // Safari 18.2 / WebKitGTK 2.46 has no `auxclick` and reports it as
-            // a `click` with button 1, hence the check here too; newer engines
-            // never send `click` for button 1, so this can't double-fire.
-            // Swallowing the middle-button mousedown stops Windows autoscroll
-            // and Linux primary-selection paste from firing on the tab.
-            onClick={e => (e.button === 1 ? onClose?.(p.id) : onSelect(p.id))}
-            onMouseDown={e => { if (e.button === 1) e.preventDefault(); }}
-            onAuxClick={e => { if (e.button === 1) { e.preventDefault(); onClose?.(p.id); } }}
+            {...tabClickProps(() => onSelect(p.id), () => onClose?.(p.id))}
             // The first click of the pair already selected the tab.
             onDoubleClick={e => { if (onRename && !e.target.closest(".tab-close")) setRenaming(p.id); }}>
             <span className="tab-bar-mark" style={{ background: active ? p.color : "transparent" }} />
@@ -164,6 +171,24 @@ function TabBar({
           </div>
         );
       })}
+      {/* The Settings app tab (#37): pinned after the projects, never
+          dragged; `changed` counts settings off their default. */}
+      {settings?.open && (
+        <div className={`tab app-tab ${settings.active ? "active" : ""}`}
+          title={`${_t("Settings")} (${hintFor("desktop.settings.open", "Ctrl+,")})`}
+          {...tabClickProps(onSelectSettings, onCloseSettings)}>
+          <span className="tab-bar-mark" style={{ background: settings.active ? "var(--fg-3)" : "transparent" }} />
+          <Icon name="cog" size={12} />
+          <span className="tab-name">{_t("Settings")}</span>
+          {settings.changed > 0 && (
+            <span className="tab-count" title={`${settings.changed} ${_t("changed from default")}`}>{settings.changed}</span>
+          )}
+          <button className="tab-close" title={`${_t("close")} (${hintFor("desktop.tab.close", "Ctrl+W")})`}
+            onClick={e => { e.stopPropagation(); onCloseSettings?.(); }}>
+            <Icon name="close" size={9} />
+          </button>
+        </div>
+      )}
       <button className="tab-add" title={_t("open project")} onClick={onNew}>
         <Icon name="plus" size={11} />
       </button>
@@ -190,7 +215,7 @@ function TabBar({
 // pills below the prompt box show (and change) both. It spans the window
 // under the workspace; the st-ctx meter, st-cost and st-tps cells (each
 // with its separator) drop out when the window is narrow (layout/rail.css).
-function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRules, approvalMode, onStats, onTree, onTerminal, terminalOpen, onBrowser, browserOpen = false, autosave, onAutosave }) {
+function StatusBar({ ctx, todoDone, todoTotal, onTodo, onSettings, settingsActive = false, onChanges, onRules, approvalMode, onStats, onTree, onTerminal, terminalOpen, onBrowser, browserOpen = false }) {
   return (
     <div className="status">
       <span className="status-cell"><span className="dot live" /> {_t("connected")}</span>
@@ -210,13 +235,6 @@ function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRu
       <button className="status-cell btn ghost" onClick={onTodo} style={{ height: 20, padding: "0 6px" }}>
         <Icon name="plan" size={11} color="var(--accent)" />
         <span style={{ color: "var(--accent)" }}>{_t("todo")} {todoDone}/{todoTotal}</span>
-      </button>
-      <span className="status-sep">·</span>
-      <button className="status-cell btn ghost" onClick={() => onAutosave?.(!autosave)}
-        style={{ height: 20, padding: "0 6px" }} title={_t("toggle autosave")}>
-        <span className="mono" style={{ color: autosave ? "var(--fg-3)" : "var(--fg-5)" }}>
-          {_t("autosave")} {autosave ? _t("on") : _t("off")}
-        </span>
       </button>
       <span className="status-sep">·</span>
       <button className="status-cell btn ghost" onClick={onChanges} title={_t("git browser")} style={{ height: 20, padding: "0 6px" }}>
@@ -245,8 +263,10 @@ function StatusBar({ ctx, todoDone, todoTotal, onTodo, onTweaks, onChanges, onRu
         <Icon name="terminal" size={11} color={terminalOpen ? "var(--accent)" : "var(--fg-3)"} />
       </button>
       <span className="status-sep">·</span>
-      <button className="status-cell btn ghost" onClick={onTweaks} title={_t("tweaks")} style={{ height: 20, padding: "0 6px" }}>
-        <Icon name="cog" size={11} color="var(--fg-3)" />
+      <button className={`status-cell btn ghost ${settingsActive ? "on" : ""}`} onClick={onSettings}
+        title={`${_t("Settings")} (${hintFor("desktop.settings.open", "Ctrl+,")})`}
+        aria-pressed={settingsActive} style={{ height: 20, padding: "0 6px" }}>
+        <Icon name="cog" size={11} color={settingsActive ? "var(--accent)" : "var(--fg-3)"} />
       </button>
     </div>
   );
@@ -372,11 +392,11 @@ function SessionMinimap({ messages, hoveredIdx, onHover, onClick }) {
 
 // ── Right rail: ambient peripherals stacked ──────────────────────────
 // `show`: { context, radar, subagents, minimap } — false hides that card
-// (Tweaks → Rail, keys showContext/showRadar/showSubagents/showMinimap);
+// (Settings → Rail, keys showContext/showRadar/showSubagents/showMinimap);
 // `children` (widget plugin cards) sit between subagents and the minimap.
 function AmbientRail({
   ctx, activity, messages, microcopy, onClose, sparklineValues, hoveredMsgIdx, onMinimapHover, onMinimapClick,
-  subagents, subagentPaneOpen, onOpenSubagent, onToggleSubagentPane, onOpenTree,
+  subagents, subagentPaneOpen, onOpenSubagent, onToggleSubagentPane, onOpenTree, onCompact, canCompact, compacting,
   show = {}, children,
 }) {
   // Use live tps samples. Before the first turn, sparklineValues is all zeros
@@ -400,6 +420,18 @@ function AmbientRail({
 
       {(show.context ?? true) && (
         <div className="rail-card glass">
+          <div className="rail-card-head">
+            <Icon name="context" size={11} color="var(--lilac)" />
+            <span className="mono" style={{ color: "var(--fg-2)" }}>{_t("context window")}</span>
+            {onCompact && (
+              <button className="btn ghost" onClick={onCompact} disabled={!canCompact}
+                style={{ marginLeft: "auto", height: 20, padding: "0 7px", fontSize: "var(--d-text-xs)", gap: 4, border: "1px solid var(--line)" }}
+                title={_t("compact context window")}>
+                <Icon name="context" size={10} color={compacting ? "var(--lilac)" : "var(--fg-3)"} />
+                <span>{compacting ? _t("compacting…") : _t("compact context")}</span>
+              </button>
+            )}
+          </div>
           <TokenGauge used={ctx.used} total={ctx.total} pct={ctx.pct}
             label={ctx.label} sub={`${_t("cost")} ${ctx.cost} · ${ctx.tokensPerSec} t/s`} />
           <div className="rail-spark">

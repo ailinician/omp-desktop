@@ -15,11 +15,13 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const win = {};
 const load = (path) => new Function("window", readFileSync(join(root, path), "utf8"))(win); // eslint-disable-line no-new-func
 // constants.js: truncateText; session-ui.js: the per-tab chip map;
-// project-nav.js + path-setting.js: pathMenu's names and rows.
+// project-nav.js + path-setting.js: pathMenu's names and rows;
+// layout-widths.js: the chat minimum clampWidth keeps.
 load("src/app/constants.js");
 load("src/app/session-ui.js");
 load("src/app/project-nav.js");
 load("src/app/path-setting.js");
+load("src/app/layout-widths.js");
 new Function("window", readFileSync(join(root, "src/app/image-attach.js"), "utf8"))(win);
 new Function("window", readFileSync(join(root, "src/app/marked-setup.js"), "utf8"))(win);
 new Function("window", readFileSync(join(root, "src/app/slash-commands.js"), "utf8"))(win);
@@ -475,6 +477,8 @@ check("clampWidth bounds the panel to 360 .. stage - 420", () => {
   assert.equal(B.clampWidth(0, 1001), 501, "default half rounds to a whole px");
   assert.equal(B.clampWidth(0, 600), 360, "a narrow stage keeps the minimum");
   assert.equal(B.clampWidth(NaN, 1400), 700);
+  assert.equal(B.maxWidth(1400), 980, "the widest clampWidth allows");
+  assert.equal(B.maxWidth(600), 360, "never under the minimum");
 });
 
 check("popoverTop: below the pick, else above, else pinned inside the view", () => {

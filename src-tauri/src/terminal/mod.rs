@@ -176,6 +176,13 @@ impl TerminalManager {
         self.tabs().keys().cloned().collect()
     }
 
+    /// The project folder `start_session` registered for `id`; `None` for
+    /// an unknown tab or one opened without a folder.
+    pub fn folder(&self, id: &str) -> Option<PathBuf> {
+        // Owned: the caller reads the disk under it after the lock is gone.
+        self.tabs().get(id).and_then(|tab| tab.folder.clone())
+    }
+
     /// Start the tab's shell and return its status. While one is starting or
     /// running, returns that one's status instead (no second spawn); an
     /// exited one is replaced, and its leftovers are killed. `emit` becomes

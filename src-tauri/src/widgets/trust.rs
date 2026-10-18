@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{ErrorKind, Read};
+use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -28,14 +28,40 @@ use crate::widgets::config::PluginEntry;
 const DOMAIN: &[u8] = b"omp-widget-v1\0";
 /// Scripts larger than this contribute `len + mtime` instead of their bytes,
 /// so a huge interpreter binary named in argv never costs a full read per run.
-const MAX_HASHED_FILE_BYTES: u64 = 8 * 1024 * 1024;
-/// Read chunk for streaming a script into the hash.
-const CHUNK_BYTES: usize = 16 * 1024;
+pub(super) const MAX_HASHED_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// Read chunk for streaming a script into the hash, and for comparing it
+/// with its stored copy (`snapshot.rs`): one chunk, one read of the copy.
+pub(super) const CHUNK_BYTES: usize = 16 * 1024;
 const APPROVALS_VERSION: u32 = 1;
+/// Length of [`fingerprint`]'s lowercase hex digest.
+const FINGERPRINT_HEX_LEN: usize = 64;
 
 /// Hex SHA-256 over the argv and every regular file an absolute argv element
-/// names. See the module docs for what it protects.
+/// names. See the module docs for what it protects. A run hashes through
+/// `snapshot.rs` instead, which computes the same value from the bytes it
+/// copies for the run.
 pub fn fingerprint(entry: &PluginEntry) -> String {
+    let mut hasher = hash_argv(entry);
+    for (index, arg) in entry.command.iter().enumerate() {
+        if let Some((path, _)) = hash_file_header(&mut hasher, index, arg) {
+            // An unreadable file hashed a marker instead; nothing to report.
+            let _ = hash_contents(path, &mut hasher, |_| Ok(()));
+        }
+    }
+    finish(hasher)
+}
+
+/// Whether `s` has the shape of a [`fingerprint`]: 64 lowercase hex digits.
+/// What comes from the webview or the approvals file is checked with this
+/// before it is compared, or used as a directory name (`snapshot.rs`).
+pub fn is_fingerprint(s: &str) -> bool {
+    s.len() == FINGERPRINT_HEX_LEN
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A hasher fed the domain separator and the argv.
+pub(super) fn hash_argv(entry: &PluginEntry) -> Sha256 {
     let mut hasher = Sha256::new();
     hasher.update(DOMAIN);
     hasher.update(len_bytes(entry.command.len()));
@@ -43,33 +69,41 @@ pub fn fingerprint(entry: &PluginEntry) -> String {
         hasher.update(arg.as_bytes());
         hasher.update([0]);
     }
-    for (index, arg) in entry.command.iter().enumerate() {
-        let path = Path::new(arg);
-        if !path.is_absolute() {
-            continue;
-        }
-        // `metadata` follows symlinks: the target's contents are what runs.
-        let Ok(meta) = fs::metadata(path) else {
-            continue;
-        };
-        if !meta.is_file() {
-            continue;
-        }
-        hasher.update(len_bytes(index));
-        hasher.update(meta.len().to_le_bytes());
-        if meta.len() > MAX_HASHED_FILE_BYTES {
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_nanos());
-            hasher.update(b"large\0");
-            hasher.update(mtime.to_le_bytes());
-        } else {
-            hasher.update(b"file\0");
-            hash_file(path, &mut hasher);
-        }
+    hasher
+}
+
+/// Hash what argv element `index` contributes besides its text, if it is an
+/// absolute path to a regular file. `Some` means its contents go in next,
+/// through [`hash_contents`]; a file over [`MAX_HASHED_FILE_BYTES`] is
+/// complete after its size and mtime.
+pub(super) fn hash_file_header<'a>(
+    hasher: &mut Sha256,
+    index: usize,
+    arg: &'a str,
+) -> Option<(&'a Path, fs::Metadata)> {
+    let path = Path::new(arg);
+    if !path.is_absolute() {
+        return None;
     }
+    // `metadata` follows symlinks: the target's contents are what runs.
+    let meta = fs::metadata(path).ok().filter(fs::Metadata::is_file)?;
+    hasher.update(len_bytes(index));
+    hasher.update(meta.len().to_le_bytes());
+    if meta.len() > MAX_HASHED_FILE_BYTES {
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos());
+        hasher.update(b"large\0");
+        hasher.update(mtime.to_le_bytes());
+        return None;
+    }
+    hasher.update(b"file\0");
+    Some((path, meta))
+}
+
+pub(super) fn finish(hasher: Sha256) -> String {
     json_store::hex_lower(&hasher.finalize())
 }
 
@@ -77,14 +111,17 @@ fn len_bytes(n: usize) -> [u8; 8] {
     u64::try_from(n).unwrap_or(u64::MAX).to_le_bytes()
 }
 
-/// Stream `path` into `hasher` one chunk at a time, then the byte count
-/// actually read (the file may change between `metadata` and the read). An
-/// unreadable file hashes a marker instead, so it never matches its content.
-fn hash_file(path: &Path, hasher: &mut Sha256) {
-    let Ok(mut file) = File::open(path) else {
-        hasher.update(b"unreadable\0");
-        return;
-    };
+/// Stream `path` into `hasher` one chunk at a time, handing each chunk to
+/// `sink` as it is hashed, then the byte count actually read (the file may
+/// change between `metadata` and the read). An unreadable file hashes a
+/// marker instead, so it never matches its content, and is an error; so is a
+/// failing `sink`, which leaves the hash unfinished.
+pub(super) fn hash_contents(
+    path: &Path,
+    hasher: &mut Sha256,
+    mut sink: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut file = File::open(path).inspect_err(|_| hasher.update(b"unreadable\0"))?;
     let mut buf = [0u8; CHUNK_BYTES];
     let mut total: u64 = 0;
     loop {
@@ -92,16 +129,18 @@ fn hash_file(path: &Path, hasher: &mut Sha256) {
             Ok(0) => break,
             Ok(n) => {
                 hasher.update(&buf[..n]);
+                sink(&buf[..n])?;
                 total = total.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
             }
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(_) => {
+            Err(e) => {
                 hasher.update(b"unreadable\0");
-                return;
+                return Err(e);
             }
         }
     }
     hasher.update(total.to_le_bytes());
+    Ok(())
 }
 
 /// Approval state of one plugin's current fingerprint.
@@ -168,6 +207,11 @@ impl ApprovalStore {
     /// The fingerprint `id` was approved under, if any.
     pub fn approved(&self, id: &str) -> Option<&str> {
         self.approved.get(id).map(String::as_str)
+    }
+
+    /// Whether some plugin is approved under `fingerprint`.
+    pub fn holds(&self, fingerprint: &str) -> bool {
+        self.approved.values().any(|fp| fp == fingerprint)
     }
 
     pub fn status(&self, id: &str, fingerprint: &str) -> Approval {
@@ -248,7 +292,7 @@ fn write(path: &Path, approved: &BTreeMap<String, String>) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::config::{Scope, Trigger};
+    use crate::widgets::config::test_entry;
 
     /// A scratch directory removed on drop.
     struct Scratch(PathBuf);
@@ -269,34 +313,19 @@ mod tests {
         }
     }
 
-    fn entry(command: &[&str]) -> PluginEntry {
-        PluginEntry {
-            id: "probe".to_owned(),
-            title: "Probe".to_owned(),
-            command: command.iter().map(|s| (*s).to_owned()).collect(),
-            match_path: None,
-            match_remote: None,
-            triggers: vec![Trigger::Activate],
-            timeout_ms: 10_000,
-            interval_ms: None,
-            enabled: true,
-            scope: Scope::Tab,
-        }
-    }
-
     #[test]
     fn fingerprint_is_stable_and_follows_argv() {
-        let a = entry(&["sh", "-c", "echo {}"]);
+        let a = test_entry(&["sh", "-c", "echo {}"]);
         assert_eq!(fingerprint(&a), fingerprint(&a));
         assert_eq!(fingerprint(&a).len(), 64);
         assert_ne!(
             fingerprint(&a),
-            fingerprint(&entry(&["sh", "-c", "echo []"]))
+            fingerprint(&test_entry(&["sh", "-c", "echo []"]))
         );
         // NUL termination keeps the argument boundaries in the hash.
         assert_ne!(
-            fingerprint(&entry(&["ab", "c"])),
-            fingerprint(&entry(&["a", "bc"]))
+            fingerprint(&test_entry(&["ab", "c"])),
+            fingerprint(&test_entry(&["a", "bc"]))
         );
     }
 
@@ -305,7 +334,7 @@ mod tests {
         let dir = Scratch::new("content");
         let script = dir.0.join("plugin.sh");
         fs::write(&script, "echo '{\"v\":1}'\n").unwrap();
-        let e = entry(&["sh", script.to_str().unwrap()]);
+        let e = test_entry(&["sh", script.to_str().unwrap()]);
         let before = fingerprint(&e);
         assert_eq!(
             before,
@@ -330,7 +359,7 @@ mod tests {
     fn fingerprint_ignores_directories_and_missing_paths() {
         let dir = Scratch::new("dirs");
         let missing = dir.0.join("missing.sh");
-        let e = entry(&["sh", missing.to_str().unwrap()]);
+        let e = test_entry(&["sh", missing.to_str().unwrap()]);
         let before = fingerprint(&e);
         fs::create_dir(&missing).unwrap();
         assert_eq!(before, fingerprint(&e), "a directory contributes nothing");
@@ -368,7 +397,7 @@ mod tests {
         let dir = Scratch::new("stale");
         let script = dir.0.join("plugin.sh");
         fs::write(&script, "echo {}\n").unwrap();
-        let e = entry(&["sh", script.to_str().unwrap()]);
+        let e = test_entry(&["sh", script.to_str().unwrap()]);
         let shown = fingerprint(&e);
         fs::write(&script, "rm -rf ~\n").unwrap();
 

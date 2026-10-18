@@ -1,6 +1,7 @@
 //! The PATH a child that must find a user-installed binary (omp, `git`) is
 //! spawned with: the inherited one, plus the directories the process that
-//! launched us left out.
+//! launched us left out — and the lookup of such a binary by absolute path
+//! ([`locate_program`]), for a child started in an untrusted project folder.
 //!
 //! - Unix: GUI launchers (Finder, Dock, `.desktop` files) hand a bundled app
 //!   a minimal PATH, so the common install dirs are appended.
@@ -15,6 +16,7 @@
 //! Inherited entries always come first, so a PATH set on purpose (a terminal,
 //! `tauri dev`) still wins.
 
+use crate::program_setting::is_executable_file;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -31,22 +33,96 @@ pub fn child_path() -> Option<OsString> {
 
 /// The absolute folders of [`child_path`] (the inherited PATH when that
 /// can't be built), in lookup order: where a search for a user-installed
-/// program looks (the terminal's shell list, Chromium discovery). Blocking
-/// on Windows (registry reads).
+/// program looks (omp, the terminal's shell list, Chromium discovery).
+/// Blocking on Windows (registry reads).
 pub fn child_path_dirs() -> Vec<PathBuf> {
-    absolute_dirs(
-        &child_path()
-            .or_else(|| std::env::var_os("PATH"))
-            .unwrap_or_default(),
-    )
+    full_child_path().map_or_else(Vec::new, |path| absolute_dirs(&path).collect())
+}
+
+/// [`child_path`] without its empty and relative entries (the inherited
+/// PATH when that can't be built); `None` when there is no PATH at all. The
+/// PATH for a child started in an untrusted project folder: there such an
+/// entry resolves a program name — the child's own, or a `#!/usr/bin/env`
+/// interpreter's — inside the project.
+pub fn trusted_child_path() -> Option<OsString> {
+    full_child_path().map(|path| absolute_entries(&path))
+}
+
+/// Set the child command's PATH to [`trusted_child_path`].
+pub fn apply_trusted_child_path(cmd: &mut Command) {
+    if let Some(path) = trusted_child_path() {
+        cmd.env("PATH", path);
+    }
+}
+
+fn full_child_path() -> Option<OsString> {
+    child_path().or_else(|| std::env::var_os("PATH"))
 }
 
 /// The absolute folders of `path`. A relative one is dropped: it would
-/// resolve against the app's working directory.
-fn absolute_dirs(path: &OsStr) -> Vec<PathBuf> {
-    std::env::split_paths(path)
-        .filter(|dir| dir.is_absolute())
-        .collect()
+/// resolve against the working directory.
+fn absolute_dirs(path: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+    std::env::split_paths(path).filter(|dir| dir.is_absolute())
+}
+
+/// `path` with every empty or relative entry removed.
+fn absolute_entries(path: &OsStr) -> OsString {
+    join_dirs(absolute_dirs(path))
+}
+
+/// Folders split from a PATH ([`child_path_dirs`]) joined back into one: the
+/// [`trusted_child_path`] for a child found by searching those folders.
+fn join_dirs<I>(dirs: I) -> OsString
+where
+    I: IntoIterator,
+    I::Item: AsRef<OsStr>,
+{
+    // `split_paths` strips the quotes `join_paths` would reject, so joining
+    // its own output cannot fail; an empty PATH is the safe answer if it did.
+    std::env::join_paths(dirs).unwrap_or_default()
+}
+
+/// A user-installed program a child started in a project folder runs:
+/// [`locate_program`]'s answer.
+pub struct TrustedProgram {
+    /// The absolute path to spawn.
+    pub binary: PathBuf,
+    /// The PATH to spawn it with: the folders the lookup searched, joined
+    /// (the [`trusted_child_path`]), so what the program itself starts (a
+    /// `#!/usr/bin/env` interpreter, git's helpers) isn't resolved inside
+    /// the project either.
+    pub path: OsString,
+}
+
+/// Locate program `name` in `dirs` ([`child_path_dirs`]) with
+/// [`find_program`]. Windows: only `<name>.exe`, what `Command` resolved a
+/// bare name to anyway. `Err` names the program when no folder holds it.
+pub fn locate_program(dirs: &[PathBuf], name: &str) -> Result<TrustedProgram, String> {
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    let binary = find_program(dirs, &file, is_executable_file).ok_or_else(|| {
+        format!(
+            "{name} was not found in any absolute PATH folder (relative entries are ignored). \
+             Make sure {name} is installed and on PATH."
+        )
+    })?;
+    Ok(TrustedProgram {
+        binary,
+        path: join_dirs(dirs),
+    })
+}
+
+/// The first `name` that `is_executable` accepts in `dirs` ([`child_path_dirs`]),
+/// in order. A child started in a project folder is spawned by this absolute
+/// path, never by a bare name: that would be looked up through any empty or
+/// relative PATH entry *there*, so a project could ship its own program.
+fn find_program(
+    dirs: &[PathBuf],
+    name: &str,
+    is_executable: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    dirs.iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable(candidate))
 }
 
 /// Override the child command's PATH with [`child_path`]. `Command`
@@ -181,7 +257,9 @@ fn path_key(dir: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute_dirs, merged_path};
+    use super::{absolute_dirs, absolute_entries, find_program, merged_path};
+    use crate::program_setting::is_executable_file;
+    use crate::test_support::{executable, TempDir};
 
     fn entries(path: &std::ffi::OsStr) -> Vec<String> {
         std::env::split_paths(path)
@@ -311,10 +389,49 @@ mod tests {
         );
     }
 
+    /// The issue's attack: a project folder holding an executable `omp`,
+    /// reached through an empty or relative PATH entry once the session's
+    /// cwd is that folder. Only absolute folders are searched, even when the
+    /// relative entries come first.
     #[test]
     fn only_absolute_path_folders_are_searched() {
         let bin = if cfg!(windows) { r"C:\bin" } else { "/bin" };
-        let path = std::env::join_paths(["relative", "", bin]).unwrap();
-        assert_eq!(absolute_dirs(&path), [std::path::PathBuf::from(bin)]);
+        let path = std::env::join_paths([".", "relative", "", bin]).unwrap();
+        assert_eq!(
+            absolute_dirs(&path).collect::<Vec<_>>(),
+            [std::path::PathBuf::from(bin)]
+        );
+    }
+
+    #[test]
+    fn find_program_takes_the_first_absolute_folder_holding_it() {
+        let dir = TempDir::new("child-path", "find-program");
+        let [none, first, second] = ["a", "b", "c"].map(|name| dir.path().join(name));
+        std::fs::create_dir_all(&none).unwrap();
+        let found = executable(&first.join("omp-test"), "");
+        executable(&second.join("omp-test"), "");
+        let dirs = [none, first, second];
+        assert_eq!(
+            find_program(&dirs, "omp-test", is_executable_file),
+            Some(found)
+        );
+        assert_eq!(
+            find_program(&dirs[..1], "omp-test", is_executable_file),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_path_keeps_only_absolute_entries() {
+        let got = absolute_entries(std::ffi::OsStr::new("/usr/bin::.:bin:/bin:"));
+        assert_eq!(got, std::ffi::OsString::from("/usr/bin:/bin"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn trusted_path_keeps_only_absolute_entries() {
+        let got = absolute_entries(std::ffi::OsStr::new(r"C:\Windows;;.;bin;\rooted;C:\x;"));
+        assert_eq!(got, std::ffi::OsString::from(r"C:\Windows;C:\x"));
     }
 }

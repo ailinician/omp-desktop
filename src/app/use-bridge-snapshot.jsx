@@ -36,6 +36,7 @@ function useBridgeSnapshot(bridge, setters) {
       setters.setNoTabProfileId(snap.noTabProfileId ?? _UB_DEFAULT_PROFILE_ID);
       setters.setWorkspaceNotes(snap.workspaceNotes ?? []);
       setters.setApprovalModes(snap.approvalModes ?? null);
+      setters.setCloseConfirm(snap.closeConfirm ?? null);
       if (snap.activeSessionId) setters.setActiveSessionId(snap.activeSessionId);
     });
     return unsub;
@@ -51,7 +52,17 @@ function useThemeEffect(t) {
     root.classList.add(`density-${t.density}`);
     if (t.monoChat) root.classList.add("mono-chat");
     else            root.classList.remove("mono-chat");
-    if (t.accent)   root.style.setProperty("--accent", t.accent);
+    // The accent override and its three derived tokens (app/accent.js), so
+    // focus rings, glows and the xterm selection follow it. Cleared first:
+    // an accent equal to the theme's own keeps the theme's hand-tuned set.
+    const A = window.OMP_ACCENT;
+    for (const name of A.TOKEN_NAMES) root.style.removeProperty(name);
+    const tokens = t.accent ? A.accentTokens(t.accent) : null;
+    if (tokens && !A.sameColor(getComputedStyle(root).getPropertyValue("--accent").trim(), t.accent)) {
+      for (const [name, value] of Object.entries(tokens)) root.style.setProperty(name, value);
+    } else if (t.accent && !tokens) {
+      root.style.setProperty("--accent", t.accent);
+    }
     if (t.fontSize) root.style.fontSize = `${t.fontSize}%`;
   }, [t.theme, t.density, t.accent, t.monoChat, t.fontSize]);
 }

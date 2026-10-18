@@ -1,4 +1,4 @@
-//! Annotate state and capture against a fake CDP endpoint, and the overlay
+//! Annotate state and capture against a fake Chromium, and the overlay
 //! against a real Chromium (skipped when none is installed).
 
 use std::collections::HashMap;
@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 
 use crate::test_support::eventually;
 
+use super::super::broker::BrokerClient;
 use super::super::cdp::CdpClient;
 use super::super::tests::{cdp_error, cdp_result, fake_cdp, mouse, panel, CHROMIUM};
 use super::super::view::{BrowserEmit, Core, Frame, Pick, Rect, TabInfo, View, ViewState};
@@ -61,13 +62,13 @@ impl BrowserEmit for Probe {
     }
 }
 
-/// A view core reporting to a probe, connected to `url` if given.
-fn core(url: Option<&str>) -> (Arc<Core>, Arc<Probe>) {
+/// A view core reporting to a probe, connected through `client` if given.
+fn core(client: Option<BrokerClient>) -> (Arc<Core>, Arc<Probe>) {
     let probe = Arc::new(Probe::default());
     let core = Arc::new(Core::new("s1", Arc::clone(&probe) as Arc<dyn BrowserEmit>));
     assert!(probe.core.set(Arc::downgrade(&core)).is_ok());
-    if let Some(url) = url {
-        let client = CdpClient::connect(url, Box::new(|_, _, _| {})).unwrap();
+    if let Some(client) = client {
+        let client = CdpClient::connect(client, Box::new(|_, _, _| {})).unwrap();
         assert!(core.client.set(client).is_ok());
     }
     (core, probe)
@@ -237,18 +238,18 @@ fn viewport(request: &Value) -> Value {
     )
 }
 
-/// A fake CDP endpoint answering with `reply`, the requests it saw, and the
+/// A fake Chromium answering with `reply`, the requests it saw, and the
 /// view's probe.
 fn fake(
     mut reply: impl FnMut(&Value) -> Value + Send + 'static,
 ) -> (Arc<Core>, Arc<Mutex<Vec<Value>>>, Arc<Probe>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&seen);
-    let url = fake_cdp(move |request| {
+    let client = fake_cdp(move |request| {
         lock(&log).push(request.clone()); // the test inspects what was sent
         Some(vec![reply(request)])
     });
-    let (core, probe) = core(Some(&url));
+    let (core, probe) = core(Some(client));
     picked(&core);
     (core, seen, probe)
 }

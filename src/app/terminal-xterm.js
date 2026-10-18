@@ -11,6 +11,8 @@
 // - `copySelection(term)`: the selection to the clipboard (ctrl+shift+c,
 //   the panel's right-click).
 // - `theme()`, `fontFamily()`: xterm colours and `--font-mono` stack from the active theme's CSS variables.
+// - `scrollbackLines(pref)`: the `terminalScrollback` tweak as xterm's
+//   `scrollback` option.
 // - `exitLine(code)`, `failLine(error)`, `SKIPPED_LINE`: what the xterm shows
 //   for an exited shell, a failed start, and output Rust's ring dropped.
 //
@@ -51,6 +53,16 @@
     if (typeof document === "undefined" || !document.documentElement) return DEFAULT_FONT_FAMILY;
     const css = getComputedStyle(document.documentElement);
     return css.getPropertyValue("--font-mono").trim() || DEFAULT_FONT_FAMILY;
+  }
+
+  const SCROLLBACK_DEFAULT = 5000;
+  const SCROLLBACK_MAX = 100000;
+
+  /** The `terminalScrollback` tweak as xterm's `scrollback` (lines): a
+   *  whole number in 0..100000, the default for anything else. */
+  function scrollbackLines(pref) {
+    if (typeof pref !== "number" || !Number.isFinite(pref)) return SCROLLBACK_DEFAULT;
+    return Math.min(SCROLLBACK_MAX, Math.max(0, Math.round(pref)));
   }
 
   /**
@@ -101,10 +113,10 @@
    * copy the selection and paste; `preventDefault` keeps the keymap and the
    * WebView's own paste out of them. macOS keeps native ⌘C / ⌘V.
    */
-  function createXterm({ fontSize, fontFamily: family = fontFamily(), theme: colours, tryRestart, onData, onResize }) {
+  function createXterm({ fontSize, fontFamily: family = fontFamily(), scrollback, theme: colours, tryRestart, onData, onResize }) {
     const T = window.OMP_TERMINAL;
     const term = new window.Terminal({
-      scrollback: 5000, fontSize, fontFamily: family, theme: colours, allowProposedApi: false, cursorBlink: true,
+      scrollback: scrollbackLines(scrollback), fontSize, fontFamily: family, theme: colours, allowProposedApi: false, cursorBlink: true,
     });
     // OSC 8 hyperlinks are on by default in xterm 6, and every one a program
     // prints keeps an invisible link entry for as long as its cells live —
@@ -145,6 +157,7 @@
     failLine,
     theme,
     fontFamily,
+    scrollbackLines,
     applyWindowsPty,
     createXterm,
     copySelection,

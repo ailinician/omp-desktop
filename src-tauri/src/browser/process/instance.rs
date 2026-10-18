@@ -5,19 +5,11 @@
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use super::reap;
+pub use crate::private_fs::remove_dir_retrying;
+use crate::private_fs::{pid_dirs, private_dirs};
 use crate::supervisor::pid_is_alive;
-
-/// A directory builder that creates `0700` directories (unix).
-pub fn private_dirs(recursive: bool) -> std::fs::DirBuilder {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(recursive);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder
-}
 
 /// Create `path` exclusively with `contents`, private to the user (unix
 /// `0600`). `O_EXCL` never follows a symlink nor reuses a file somebody else
@@ -88,48 +80,18 @@ pub fn prepare_instance_dir(root: &Path) -> io::Result<PathBuf> {
 /// stuck browser: call off the main thread.
 pub fn prune_dead(root: &Path) {
     let own = std::process::id();
-    for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
-        let dead = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<u32>().ok())
-            .is_some_and(|pid| pid != own && !pid_is_alive(pid));
-        if dead && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            let path = entry.path();
-            if reap::before_pruning(&path) {
-                let _ = remove_dir_retrying(&path);
-            }
+    for (pid, path) in pid_dirs(root) {
+        if pid != own && !pid_is_alive(pid) && reap::before_pruning(&path) {
+            let _ = remove_dir_retrying(&path);
         }
     }
 }
 
-/// `remove_dir_all`, retried on Windows for about a second: a killed
-/// Chromium's GPU, network and crashpad processes can hold profile files open
-/// for a moment after the browser process has exited (what puppeteer and omp
-/// retry for, too). A missing directory is success.
-pub fn remove_dir_retrying(path: &Path) -> io::Result<()> {
-    const ATTEMPTS: u32 = if cfg!(windows) { 10 } else { 1 };
-    const BACKOFF: Duration = Duration::from_millis(100);
-    let mut attempt = 1;
-    loop {
-        match std::fs::remove_dir_all(path) {
-            Ok(()) => return Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(e) if attempt >= ATTEMPTS => return Err(e),
-            Err(_) => {
-                attempt += 1;
-                std::thread::sleep(BACKOFF);
-            }
-        }
-    }
-}
-
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::browser::tests::tempdir;
 
-    #[cfg(unix)]
     #[test]
     fn private_files_are_exclusive_and_never_follow_a_symlink() {
         let dir = tempdir("private-file");
@@ -143,16 +105,5 @@ mod tests {
         std::os::unix::fs::symlink(&victim, &path).unwrap();
         assert!(create_private_file(&path, b"5678\n").is_err());
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
-    }
-
-    #[test]
-    fn removing_a_missing_directory_succeeds() {
-        let dir = tempdir("remove-missing");
-        assert!(remove_dir_retrying(&dir.join("gone")).is_ok());
-        let full = dir.join("full/deeper");
-        std::fs::create_dir_all(&full).unwrap();
-        std::fs::write(full.join("f"), "x").unwrap();
-        remove_dir_retrying(&dir.join("full")).unwrap();
-        assert!(!dir.join("full").exists());
     }
 }

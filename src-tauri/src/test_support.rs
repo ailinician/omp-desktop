@@ -22,6 +22,18 @@ pub fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> boo
     eventually(timeout, || condition().then_some(())).is_some()
 }
 
+/// `script` run by the platform shell: `cmd /C` on Windows, `sh -c` on unix.
+pub fn shell(script: &str) -> std::process::Command {
+    let (program, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    let mut cmd = std::process::Command::new(program);
+    cmd.args([flag, script]);
+    cmd
+}
+
 /// An executable stand-in at `path` holding `content` (unix: mode 0755),
 /// its folder created first.
 pub fn executable(path: &Path, content: &str) -> PathBuf {

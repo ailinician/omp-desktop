@@ -27,7 +27,10 @@ pub struct StderrTail {
 }
 
 impl StderrTail {
-    pub fn drain(mut stderr: ChildStderr) -> Self {
+    /// Drain `stderr` on a thread; `on_end` runs there once the pipe ends
+    /// (the browser's whole process tree closed it). Never runs when no
+    /// thread could be started.
+    pub fn drain(mut stderr: ChildStderr, on_end: impl FnOnce() + Send + 'static) -> Self {
         let kept = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&kept);
         let reader = std::thread::Builder::new()
@@ -37,6 +40,7 @@ impl StderrTail {
                 while let Ok(n @ 1..) = stderr.read(&mut chunk) {
                     keep(&mut lock(&sink), &chunk[..n]);
                 }
+                on_end();
             });
         Self {
             kept,
@@ -85,6 +89,8 @@ fn tail_text(bytes: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
 
     #[test]
     fn the_tail_keeps_the_last_whole_lines() {
@@ -130,5 +136,45 @@ mod tests {
         let mut bytes = b"earlier\n".to_vec();
         bytes.extend_from_slice("z".repeat(3 * TAIL_BYTES).as_bytes());
         assert_eq!(tail_text(&bytes), Some("z".repeat(TAIL_BYTES)));
+    }
+
+    /// A child writing `hi` to stderr, then waiting for its stdin to end.
+    fn waiting_child() -> std::process::Child {
+        #[cfg(unix)]
+        let mut cmd = {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "echo hi >&2; cat"]);
+            cmd
+        };
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/C", "echo hi 1>&2 & findstr x"]);
+            cmd
+        };
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    /// `on_end` runs once stderr ends, not before; the tail is still kept.
+    #[test]
+    fn the_end_callback_runs_when_stderr_ends() {
+        let mut child = waiting_child();
+        let (tx, ended) = mpsc::channel();
+        let tail = StderrTail::drain(child.stderr.take().unwrap(), move || {
+            tx.send(()).unwrap();
+        });
+        assert_eq!(
+            ended.recv_timeout(Duration::from_millis(300)),
+            Err(mpsc::RecvTimeoutError::Timeout),
+            "stderr still open"
+        );
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert_eq!(ended.recv_timeout(Duration::from_secs(5)), Ok(()));
+        assert_eq!(tail.settle(), Some("hi".into()));
     }
 }

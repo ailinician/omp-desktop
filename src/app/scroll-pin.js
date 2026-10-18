@@ -1,8 +1,9 @@
 /* ═════════════════════════════════════════════════════════════════════
    app/scroll-pin.js — "stick to bottom" state machine for the chat view.
    Pure functions only; chat/chat-view.jsx owns the DOM side. Pinned means
-   the view follows new content; unpinned means the user is reading
-   history and nothing may move the viewport under them.
+   the view is at the latest line and, with the `followOutput` tweak on,
+   follows new content; unpinned means the user is reading history and
+   nothing may move the viewport under them.
    ═════════════════════════════════════════════════════════════════════ */
 (function () {
   // Scrolling *down* to within this distance of the bottom re-pins. Kept
@@ -43,6 +44,20 @@
     return last?.kind === "user" && !last.echo && last._id != null && last._id !== prevLastId;
   }
 
-  window.OMP_SCROLL_PIN = { nextPinned, shouldRepin };
+  // What a transcript update does to the view, with `m` measured after it
+  // rendered. `follow` is the `followOutput` tweak, `repin` an explicit
+  // "take me to the latest" moment (shouldRepin, or the view's first
+  // render). Returns { pinned, stick }: `stick` scrolls to the bottom.
+  //  - follow on: a pinned view follows the new content (pre-#37).
+  //  - follow off: nothing moves the viewport but a repin; a view the new
+  //    content pushed past the bottom unpins, so "Jump to latest" shows.
+  function afterOutput({ pinned, follow, repin }, m) {
+    if (repin) return { pinned: true, stick: true };
+    if (!pinned) return { pinned: false, stick: false };
+    if (follow) return { pinned: true, stick: true };
+    return { pinned: distanceFromBottom(m) <= REPIN_SLACK_PX, stick: false };
+  }
+
+  window.OMP_SCROLL_PIN = { nextPinned, shouldRepin, afterOutput };
 
 })();

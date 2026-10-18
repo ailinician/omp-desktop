@@ -13,7 +13,9 @@
 @import "./widgets.css";
 @import "./overlays.css";
 @import "./lightbox.css";
-@import "./shortcuts.css";
+@import "./file-preview.css";
+@import "./settings.css";
+@import "./settings-rows.css";
 @import "./panels.css";
 @import "./git.css";
 @import "./subagents.css";

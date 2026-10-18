@@ -16,12 +16,15 @@
 //! Replacing it would discard every rebind the user made. The error is
 //! surfaced to the Shortcuts screen; dispatch still works because the frontend
 //! falls back to omp + defaults.
+//!
+//! Without a resolvable config folder the overlay lives in memory for the
+//! app run and no file is read or written.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::json_store;
+use crate::config_file::ConfigFile;
 use crate::keybindings::{chord, Bindings, ACTION_IDS};
 
 // ── on-disk representation ────────────────────────────────────────────────────
@@ -42,29 +45,32 @@ struct OverlayFile {
 /// Manages `<app config dir>/keybindings.json`, the desktop-private overlay
 /// that stores user rebinds for actions in the desktop's own registry.
 pub struct OverlayStore {
-    path: PathBuf,
-    /// `path.with_extension("lock")`, computed once at construction rather
-    /// than allocated on every `set`/`remove` — same precedent as
-    /// `ProfileStore::load`'s own `lock` field.
-    lock: PathBuf,
+    /// The overlay file, or memory (no app config folder: rebinds last for
+    /// the app run).
+    backing: ConfigFile,
 }
 
 impl OverlayStore {
-    /// Create a store pointing at `path`. The file need not exist yet.
-    pub fn new(path: PathBuf) -> Self {
-        let lock = path.with_extension("lock");
-        Self { path, lock }
+    /// Create a store pointing at `path` (the file need not exist yet), or
+    /// a memory-only one for `None`.
+    pub fn new(path: Option<PathBuf>) -> Self {
+        Self {
+            backing: ConfigFile::new(path),
+        }
     }
 
-    /// The absolute path of the overlay file (used by the Shortcuts footer).
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// The absolute path of the overlay file (used by the Shortcuts footer);
+    /// `None` for a memory-only store.
+    pub fn path(&self) -> Option<&Path> {
+        self.backing.path()
     }
 
     /// Read the current overlay. A missing file returns an empty map; a
     /// malformed or unreadable file returns `Err`.
     pub fn read(&self) -> Result<Bindings, String> {
-        json_store::read_strict::<OverlayFile>(&self.path).map(|f| f.bindings)
+        self.backing
+            .read_strict::<OverlayFile>()
+            .map(|f| f.bindings)
     }
 
     /// Set `action` → `keys` in the overlay and return the updated map.
@@ -83,7 +89,7 @@ impl OverlayStore {
         }
         // Validate and canonicalise in one pass, de-duplicating by simple
         // linear scan rather than a `BTreeSet` — `keys` is a couple of
-        // chords at most (one rebind, or the Shortcuts modal's "+ chord"
+        // chords at most (one rebind, or Settings → Shortcuts' "+ chord"
         // append), so `Vec::contains` costs nothing and needs no clone to
         // check membership before pushing.
         let mut canonical: Vec<String> = Vec::with_capacity(keys.len());
@@ -122,9 +128,7 @@ impl OverlayStore {
     /// rewrite the file (or create it, for a fresh install) with identical
     /// content.
     fn mutate(&self, f: impl FnOnce(&mut Bindings) -> bool) -> Result<Bindings, String> {
-        json_store::update_strict(
-            &self.path,
-            &self.lock,
+        self.backing.update_strict(
             |file: &mut OverlayFile| f(&mut file.bindings),
             |file| file.bindings,
         )
@@ -164,7 +168,14 @@ mod tests {
             fs::create_dir_all(&dir).expect("create test dir");
         }
         let path = dir.join("keybindings.json");
-        (OverlayStore::new(path), Scratch(dir))
+        (OverlayStore::new(Some(path)), Scratch(dir))
+    }
+
+    impl OverlayStore {
+        /// The overlay file of a [`make_store`] store.
+        fn file(&self) -> &Path {
+            self.path().expect("a file-backed store")
+        }
     }
 
     #[test]
@@ -176,7 +187,7 @@ mod tests {
     #[test]
     fn empty_object_file_reads_as_empty() {
         let (store, _dir) = make_store(true);
-        fs::write(&store.path, b"{}").unwrap();
+        fs::write(store.file(), b"{}").unwrap();
         assert_eq!(store.read().unwrap().len(), 0);
     }
 
@@ -190,7 +201,7 @@ mod tests {
         // that contract while every `set`-based test stayed green.
         let (store, _dir) = make_store(true);
         fs::write(
-            &store.path,
+            store.file(),
             br#"{ "bindings": { "desktop.panel.changes": ["ctrl+g"], "app.plan.toggle": [] } }"#,
         )
         .unwrap();
@@ -202,12 +213,12 @@ mod tests {
     #[test]
     fn fresh_config_dir_is_created_on_first_set() {
         let (store, _dir) = make_store(false);
-        assert!(!store.path().exists());
+        assert!(!store.file().exists());
         let result = store
             .set("desktop.panel.changes", &["ctrl+g".to_string()])
             .unwrap();
         assert_eq!(result["desktop.panel.changes"], ["ctrl+g"]);
-        assert!(store.path().exists());
+        assert!(store.file().exists());
     }
 
     #[test]
@@ -258,13 +269,13 @@ mod tests {
         store
             .set("desktop.panel.changes", &["ctrl+g".to_string()])
             .unwrap();
-        let before = fs::read(&store.path).unwrap();
+        let before = fs::read(store.file()).unwrap();
         // Remove a key that was never set — must not error, must not disturb
         // others, and must not rewrite the file at all.
         store.remove("desktop.panel.todo").unwrap();
         assert!(store.read().unwrap().contains_key("desktop.panel.changes"));
         assert_eq!(
-            fs::read(&store.path).unwrap(),
+            fs::read(store.file()).unwrap(),
             before,
             "removing an absent action must not touch the file"
         );
@@ -275,7 +286,7 @@ mod tests {
         let (store, _dir) = make_store(false);
         store.remove("desktop.panel.changes").unwrap();
         assert!(
-            !store.path().exists(),
+            !store.file().exists(),
             "a no-op remove must not create the overlay file"
         );
     }
@@ -322,19 +333,19 @@ mod tests {
     #[test]
     fn corrupt_file_makes_read_and_set_error_without_rewriting() {
         let (store, _dir) = make_store(true);
-        fs::write(&store.path, b"this is not json").unwrap();
+        fs::write(store.file(), b"this is not json").unwrap();
         // read() must error.
         assert!(store.read().is_err());
-        let before = fs::read(&store.path).unwrap();
+        let before = fs::read(store.file()).unwrap();
         // set() must also error and leave the bytes unchanged.
         store
             .set("desktop.panel.changes", &["ctrl+g".to_string()])
             .unwrap_err();
-        let after = fs::read(&store.path).unwrap();
+        let after = fs::read(store.file()).unwrap();
         assert_eq!(before, after, "corrupt file must not be overwritten");
         // remove() must error too.
         store.remove("desktop.panel.changes").unwrap_err();
-        assert_eq!(fs::read(&store.path).unwrap(), before);
+        assert_eq!(fs::read(store.file()).unwrap(), before);
     }
 
     #[test]
@@ -345,5 +356,21 @@ mod tests {
             .unwrap();
         store.remove("desktop.panel.changes").unwrap();
         assert!(!store.read().unwrap().contains_key("desktop.panel.changes"));
+    }
+
+    #[test]
+    fn a_memory_only_store_keeps_rebinds_for_its_lifetime_only() {
+        let store = OverlayStore::new(None);
+        assert_eq!(store.path(), None);
+        assert_eq!(store.read().unwrap().len(), 0);
+        let set = store
+            .set("desktop.panel.changes", &["Ctrl+G".to_string()])
+            .unwrap();
+        assert_eq!(set["desktop.panel.changes"], ["ctrl+g"]);
+        assert_eq!(store.read().unwrap(), set);
+        assert!(store.set("not.an.action", &[]).is_err());
+        let removed = store.remove("desktop.panel.changes").unwrap();
+        assert!(removed.is_empty());
+        assert_eq!(OverlayStore::new(None).read().unwrap().len(), 0);
     }
 }

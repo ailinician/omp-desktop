@@ -8,12 +8,12 @@
 //! [`crate::git`]); the git browser's reads resolve paths through them too.
 //!
 //! [`accept`] and [`reject`] shell out to the `git` binary, invoked with a
-//! fully static argv (never a shell string) via [`std::process::Command`]:
+//! fully static argv (never a shell string) via [`crate::spawn_gate`]:
 //! gix's index-writing/checkout support is far less mature than its read
 //! APIs, and `git add` / `git checkout` / `git reset` already implement
 //! safe, atomic index and worktree mutation.
 
-use crate::child_path::apply_child_path;
+use crate::child_path::{child_path_dirs, locate_program, TrustedProgram};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -161,25 +161,37 @@ pub fn weakly_canonicalize(path: &Path) -> std::io::Result<PathBuf> {
 ///   index refresh a read like `git diff` would otherwise perform). Mutating
 ///   commands still take the locks they genuinely require, so this is safe
 ///   to apply uniformly.
-/// - [`apply_child_path`] — a per-user `git` (winget `--scope user`, scoop)
-///   is on the user PATH, which an MSI-update relaunch doesn't carry (#34).
+/// - the binary by absolute path — the first `git` in the absolute folders
+///   of the child PATH ([`child_path_dirs`]; a per-user `git` from winget
+///   `--scope user` or scoop is on the user PATH, which an MSI-update
+///   relaunch doesn't carry, #34). Never a bare `git`: started in the
+///   project, that would be looked up through an empty or relative PATH
+///   entry *there*, so a project could ship its own `git`. The PATH is
+///   those same folders (the
+///   [`crate::child_path::trusted_child_path`]), for the helpers git itself
+///   starts (credential helpers, ssh, an editor).
 ///
 /// Every `git` invocation in this module goes through here. Subcommand-level
-/// flags (`--cached`, `-M`, …) stay at their call sites.
-fn git(work_dir: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    apply_child_path(&mut cmd);
-    cmd.current_dir(work_dir)
+/// flags (`--cached`, `-M`, …) stay at their call sites. `Err` when no `git`
+/// is found.
+fn git(work_dir: &Path) -> Result<Command, String> {
+    git_in(&child_path_dirs(), work_dir)
+}
+
+/// [`git`] with the PATH folders it searches given.
+fn git_in(dirs: &[PathBuf], work_dir: &Path) -> Result<Command, String> {
+    let TrustedProgram { binary, path } = locate_program(dirs, "git")?;
+    let mut cmd = Command::new(binary);
+    cmd.env("PATH", path)
+        .current_dir(work_dir)
         .args(["--literal-pathspecs", "--no-optional-locks"]);
-    cmd
+    Ok(cmd)
 }
 
 /// Run a `git` subcommand and return its stdout, mapping both a spawn
 /// failure and a non-zero exit into a `label`-prefixed error string.
 fn git_output(work_dir: &Path, args: &[&str], label: &str) -> Result<Vec<u8>, String> {
-    let output = git(work_dir)
-        .args(args)
-        .output()
+    let output = crate::spawn_gate::output(git(work_dir)?.args(args))
         .map_err(|e| format!("failed to run git {label}: {e}"))?;
     if !output.status.success() {
         return Err(format!(
@@ -196,27 +208,31 @@ fn git_output(work_dir: &Path, args: &[&str], label: &str) -> Result<Vec<u8>, St
 /// failure — printing their stderr would surface spurious-looking
 /// "fatal:" lines for perfectly normal code paths.
 fn git_succeeds(work_dir: &Path, args: &[&str], label: &str) -> Result<bool, String> {
-    git(work_dir)
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .map_err(|e| format!("failed to run git {label}: {e}"))
+    crate::spawn_gate::status(
+        git(work_dir)?
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .map(|status| status.success())
+    .map_err(|e| format!("failed to run git {label}: {e}"))
 }
 
 /// Discover the repository containing `path` with gix (same discovery
 /// pattern as [`crate::git::probe`]) and return it with its working-tree
 /// root — the root every project-relative path is resolved against —
 /// failing clearly for bare repositories or paths that aren't inside a git
-/// repository at all. Shared with [`crate::git_browser`].
-pub fn discover(path: &Path) -> Result<(gix::Repository, PathBuf), String> {
-    let repo = gix::discover(path).map_err(|e| format!("not a git repository: {e}"))?;
+/// repository at all. Shared with [`crate::git_browser`]. Discovered through
+/// [`crate::spawn_gate::discover`]: the guard comes back with the repository.
+pub fn discover(
+    path: &Path,
+) -> Result<(crate::spawn_gate::Shared, gix::Repository, PathBuf), String> {
+    let (gate, repo) = crate::spawn_gate::discover(path)?;
     let work_dir = repo
         .workdir()
         .map(Path::to_path_buf)
         .ok_or_else(|| "repository has no working tree".to_string())?;
-    Ok((repo, work_dir))
+    Ok((gate, repo, work_dir))
 }
 
 // ── accept / reject ─────────────────────────────────────────────────────────
@@ -232,7 +248,7 @@ fn resolve_file_target(
     repo_root: &Path,
     rel_path: &str,
 ) -> Result<(PathBuf, PathBuf, String), String> {
-    let (_, work_dir) = discover(repo_root)?;
+    let (_, _, work_dir) = discover(repo_root)?;
     let (abs, rel_norm) = validate_relative_path(&work_dir, rel_path)?;
     if std::fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
         return Err(format!("{rel_norm} is a directory, not a file"));
@@ -405,7 +421,8 @@ fn find_rename_source(
 
 #[cfg(test)]
 mod tests {
-    use super::{accept, reject, validate_relative_path};
+    use super::{accept, git, git_in, reject, validate_relative_path};
+    use crate::test_support::{executable, TempDir};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -464,6 +481,51 @@ mod tests {
         run_git(&dir, &["add", "."]);
         run_git(&dir, &["commit", "-q", "-m", "init"]);
         Some(dir)
+    }
+
+    // ── git resolution ───────────────────────────────────────────────────
+
+    /// The attack: a project shipping its own `git`, reached through an
+    /// empty or relative PATH entry (`execvp` resolves those in the child's
+    /// working directory, the project). Only the absolute folder's `git`
+    /// is ever picked, by absolute path, with only that folder as PATH.
+    #[test]
+    fn git_never_runs_a_project_supplied_git() {
+        let dir = TempDir::new("workspace", "git-lookup");
+        let project = dir.path().join("project");
+        let trusted = dir.path().join("bin");
+        let git_file = format!("git{}", std::env::consts::EXE_SUFFIX);
+        executable(&project.join(&git_file), "");
+        let real = executable(&trusted.join(&git_file), "");
+
+        // `child_path_dirs` has already dropped the empty and relative PATH
+        // entries (`child_path`'s tests), so only the trusted folder is left.
+        let err = git_in(&[], &project).unwrap_err();
+        assert!(err.contains("git was not found"), "{err}");
+
+        let cmd = git_in(std::slice::from_ref(&trusted), &project).unwrap();
+        assert_eq!(Path::new(cmd.get_program()), real);
+        let child_path = cmd.get_envs().find(|(key, _)| *key == "PATH");
+        assert_eq!(child_path.and_then(|(_, v)| v), Some(trusted.as_os_str()));
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            ["--literal-pathspecs", "--no-optional-locks"]
+        );
+    }
+
+    /// The real environment: `git` resolves to an absolute binary that runs.
+    #[test]
+    fn git_runs_the_installed_git_by_absolute_path() {
+        if !git_available() {
+            eprintln!("git binary not available; skipping");
+            return;
+        }
+        let dir = TempDir::new("workspace", "git-installed");
+        let mut cmd = git(dir.path()).unwrap();
+        assert!(Path::new(cmd.get_program()).is_absolute());
+        let out = cmd.arg("--version").output().unwrap();
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).starts_with("git version"));
     }
 
     // ── validate_relative_path ───────────────────────────────────────────

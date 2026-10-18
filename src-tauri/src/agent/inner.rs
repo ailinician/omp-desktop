@@ -2,6 +2,7 @@ use std::process::{Child, ChildStdin};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+use super::approvals::PendingApprovals;
 use super::ext_ui::ExtUiState;
 use super::journal::EventJournal;
 use crate::supervisor::ProcessSupervisor;
@@ -33,6 +34,11 @@ pub(super) struct BridgeInner {
     /// reader and read by `extension_ui_state`. Dropped with the entry, so
     /// it never outlives this process — see [`crate::agent::ext_ui`].
     pub(super) ext_ui: Arc<Mutex<ExtUiState>>,
+    /// Approval prompts this process forwarded that are still unanswered,
+    /// written by the stdout reader, settled by an answer through `send`
+    /// and consumed by a grant — see [`crate::agent::approvals`]. Dropped
+    /// with the entry, like `ext_ui`.
+    pub(super) approvals: Arc<Mutex<PendingApprovals>>,
     /// Cleared (`store(false, ...)`) the instant this incarnation is
     /// superseded (a fresher `start_session` displaced it in the map) or
     /// reaped (`stop_session` removed it) — both callers clear it

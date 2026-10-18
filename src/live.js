@@ -15,6 +15,7 @@
   const { LOCAL_COMMANDS, adaptAvailableCommands, mergeSlashCommands, isCommandInvocation, queuedFrame } = window.OMP_SLASH;
   const SUB = window.OMP_SUBAGENTS;
   const STITLE = window.OMP_SESSION_TITLE;
+  const PREFS = window.OMP_SESSION_PREFS;
   const QUEUE = window.OMP_QUEUE;
   const ASK = window.OMP_ASK_DIALOG;
   const APPROVAL = window.OMP_APPROVAL;
@@ -176,7 +177,88 @@
     "open with new tab": "新建标签页时自动开启",
     "height": "面板高度",
 
-    // Tweaks Panel (app-live.jsx)
+    // Settings & Rail
+    "Settings": "设置",
+    "Search settings": "搜索设置",
+    "Appearance": "外观",
+    "Theme": "主题",
+    "Accent": "强调色",
+    "Text": "文字与语言",
+    "Language": "界面语言",
+    "Interface display language.": "切换软件界面的显示语言。",
+    "Density": "界面密度",
+    "Font size": "字号大小",
+    "Monospace chat": "等宽对话字体",
+    "Columns": "分栏与宽度",
+    "Side column": "右侧栏模式",
+    "New tabs show": "新标签页右侧默认显示",
+    "Project sidebar": "项目侧边栏",
+    "Column widths": "分栏宽度",
+    "Folding": "折叠策略",
+    "Thinking": "思考过程",
+    "Tool output": "工具输出",
+    "Collapse after": "自动折叠阈值",
+    "Scrolling": "滚动行为",
+    "Follow new output": "跟随最新输出",
+    "Composer": "输入框",
+    "Sending": "发送快捷键",
+    "Send with": "发送按键",
+    "Pasting": "粘贴折叠",
+    "Collapse pastes longer than": "长文本粘贴折叠行数",
+    "History": "历史记录",
+    "Prompt history": "提示词历史上限",
+    "Built-in cards": "内置监控卡片",
+    "Context gauge": "上下文计量表",
+    "Agent radar": "智能体雷达",
+    "Subagents": "子智能体",
+    "Minimap": "会话迷你图",
+    "Widgets": "小组件",
+    "Plugin config": "插件配置",
+    "Terminal": "终端",
+    "Shell": "终端程序",
+    "Panel": "终端面板",
+    "Open with new tab": "新建标签页时自动打开",
+    "Scrollback": "回滚缓存行数",
+    "Height": "面板高度",
+    "Chromium": "浏览器内核",
+    "Links": "链接行为",
+    "Open localhost links in the panel": "在内置面板中打开 localhost 链接",
+    "Agent": "智能体",
+    "Profiles": "配置文件",
+    "Startup profile": "默认启动配置",
+    "Goals": "目标模式",
+    "Keep working on a goal": "自动推进目标",
+    "omp behaviour": "OMP 行为",
+    "Auto-compact context": "自动压缩上下文",
+    "Retry failed requests": "失败请求自动重试",
+    "Tabs": "标签页",
+    "Reopen tabs on launch": "启动时恢复上次打开的标签页",
+    "Ask before closing a working tab": "关闭运行中的标签页前询问",
+    "Name tabs automatically": "自动生成标签页标题",
+    "Updates": "版本更新",
+    "Check for updates": "自动检查更新",
+    "Version": "当前版本",
+    "Approvals": "权限审批",
+    "Approval mode": "审批模式",
+    "Tool approval mode": "工具调用审批模式",
+    "Standing rules": "常驻规则",
+    "Always-allow rules": "始终允许规则",
+    "Shortcuts": "快捷键",
+    "Keyboard shortcuts": "键盘快捷键",
+    "Key bindings": "键位绑定",
+    "changes apply at once": "修改即时生效",
+    "reset": "重置",
+    "matches": "匹配项",
+    "to defaults": "为默认值",
+    "sections": "切换分类",
+    "close tab": "关闭标签页",
+    "changed from default": "项已修改",
+    "Changed from default": "已修改（非默认值）",
+    "Reset to default": "重置为默认值",
+    "context window": "上下文窗口",
+    "compact context": "压缩上下文",
+    "compacting…": "压缩中…",
+    "compact context window": "立即压缩当前会话上下文 (/compact)",
     "Tweaks": "偏好设置",
     "Look": "外观",
     "language": "界面语言",
@@ -184,6 +266,8 @@
     "aurora": "极光",
     "phosphor": "荧光",
     "daylight": "日光",
+    "dark": "深色",
+    "light": "浅色",
     "density": "密度",
     "cozy": "宽松",
     "compact": "紧凑",
@@ -196,6 +280,8 @@
     "rail": "侧边栏",
     "split": "分栏",
     "focus": "聚焦",
+    "tree": "会话树",
+    "browser": "浏览器",
     "Chat": "对话",
     "thinking": "思考过程",
     "tool output": "工具输出",
@@ -213,7 +299,6 @@
     "Session": "会话",
     "prompt history": "提示词历史",
     "prompts": "条记录",
-
     // Microcopy
     "Hand me a project. I'll set the table.": "选择或打开一个项目即可开始。",
     "no plan yet. think out loud below.": "暂无计划，在下方直接输入想法。",
@@ -334,7 +419,7 @@
 
   // ── Minimap / message-history trim ───────────────────────────────────────
   const MINIMAP_COLS = 13;
-  const MINIMAP_MAX  = MINIMAP_COLS * MINIMAP_COLS; // 169 — one full 13×13 grid
+  const MINIMAP_MAX  = MINIMAP_COLS * 150; // 1950 — 150 scrollable 13-col rows
 
   // ── Session registry ───────────────────────────────────────────────────────
   // Tracks all open tabs. The tab list in the UI is derived from this.
@@ -411,6 +496,20 @@
   // active profile and the list is stale. App-wide like `profiles`.
   let recentProjects = [];
   let _recentsProfile = null;
+
+  // Settings → Session / Agent (#37, app/session-prefs.js): app-wide prefs,
+  // read from the stored tweaks at load so the boot restore sees
+  // `restoreTabs` before React mounts; `setSessionPrefs` keeps them current.
+  let sessionPrefs = PREFS.fromTweaks(window.OMP_TWEAKS_STORE.read(), window.TWEAK_DEFAULTS);
+  // The busy-close confirmation on screen (`PREFS.tabCloseConfirm` /
+  // `quitConfirm` shape), or null; `_closeConfirmAnswer` settles it.
+  let closeConfirm = null;
+  let _closeConfirmAnswer = null;
+  // Last armed state handed to Rust's close guard (null = none sent yet),
+  // and whether a confirmed quit is closing the window: the guard then
+  // stays disarmed, or a notify would re-arm it under the closing window.
+  let _closeGuardSent = null;
+  let _quitting = false;
 
   let activeSessionId  = null;
   let activeListeners  = [];          // unlisten functions for current session
@@ -562,6 +661,7 @@
       noTabProfileId:  _noTabProfile(),
       recentProjects,
       workspaceNotes,
+      closeConfirm,
     };
   }
 
@@ -645,6 +745,10 @@
       kind: "ask",
       method,
       id: ev.id,
+      // The tab whose process asked: frames are dispatched only for the
+      // active tab (see `_switchToSession`), and a tool approval's grant
+      // names this session with the request id (`approveAndRemember`).
+      sessionId: activeSessionId,
       time: timeNow(),
       title: ev.title ?? "",
       options: [],
@@ -724,6 +828,19 @@
     });
     if (settled) notify();
     return settled;
+  }
+
+  // Undo a local `_settleAsk` whose answer never reached omp: the bubble
+  // with this id that reads answered (and was not cancelled by omp since)
+  // takes input again. The caller publishes.
+  function _reopenAsk(id) {
+    state.messages = state.messages.map(m => {
+      if (m.kind === "ask" && m.id === id && m.answered && !m.cancelled) {
+        const { answered: _a, answer: _v, ...open } = m;
+        return open;
+      }
+      return m;
+    });
   }
 
   // Resolve a pending ask bubble: settle it, then send `payload` back to
@@ -851,7 +968,7 @@
     }
     const snap = _buildSnapshot();
     subscribers.forEach(cb => cb(snap));
-
+    _syncCloseGuard(snap.sessions);
     // Keep OMP_DATA in sync for design components that read it directly
     window.OMP_DATA.messages  = state.messages;
     window.OMP_DATA.models    = state.models;
@@ -1088,9 +1205,22 @@
     _replayBuffer = [];
     extSnapshotSeq = 0;
 
+    // Each callback checks it still belongs to this activation: an unlisten
+    // only settles after an IPC round-trip, and until it does a superseded
+    // activation's listener would dispatch its session's frames — a tool
+    // approval among them — into whichever tab is active now. A dropped
+    // line is not lost: `lastSeq` stays behind it, so the next activation
+    // of `id` replays it from the journal. `_detachActiveSession` (no new
+    // generation) clears `activeSessionId`, so that check covers it; the
+    // same check follows every await below, so a detached activation stops
+    // too instead of replaying into the detached state. Proven with an
+    // eval-kernel cell that loads this file into a stubbed-Tauri VM (tabs
+    // A→B→C with B's unlisten held: before, B's approval prompt surfaced in
+    // C with no binding; after, it is dropped and C shows none).
+    const current = () => _switchGen === myGen && activeSessionId === id;
     const { listen } = window.__TAURI__.event;
-    const ulLine = await listen(`agent://line/${id}`, ev => handleLine(ev.payload));
-    if (_switchGen !== myGen) {
+    const ulLine = await listen(`agent://line/${id}`, ev => { if (current()) handleLine(ev.payload); });
+    if (!current()) {
       // Superseded while this call's own listener was still being attached —
       // it was never stored into activeListeners, so nothing else will ever
       // tear it down. Without this it keeps dispatching the abandoned
@@ -1100,6 +1230,7 @@
       return;
     }
     const ulExit = await listen(`agent://exit/${id}`, ev => {
+      if (!current()) return;
       const reason = (ev?.payload && String(ev.payload).trim()) || "";
       console.warn(`[live] session '${id}' omp process exited${reason ? ": " + reason : ""}`);
       state.isStreaming = false;
@@ -1110,7 +1241,7 @@
       _endDeadProcessState();
       notify();
     });
-    if (_switchGen !== myGen) {
+    if (!current()) {
       // Same leak as above, but both listeners for this call exist and
       // haven't been committed to activeListeners yet.
       try { await ulLine(); } catch (_) {}
@@ -1128,7 +1259,7 @@
     // gone for good; get_messages still recovers the persisted text below.
     try {
       const replay = await window.__TAURI__.core.invoke("replay_events", { sessionId: id, afterSeq: lastSeq });
-      if (_switchGen !== myGen) return; // superseded by a newer switch
+      if (!current()) return; // superseded by a newer switch, or detached
       if (replay.dropped) {
         console.warn(`[live] session '${id}' replay desynced — recovered ${replay.events.length} event(s); earlier ones fell outside the journal window`);
       }
@@ -1141,7 +1272,7 @@
       // this tab with its old `lastSeq` and the next visit fetches again.
       if (replay.dropped) {
         const ext = await _invokeSafe("extension_ui_state", { sessionId: id }, null);
-        if (_switchGen !== myGen) return; // superseded by a newer switch
+        if (!current()) return; // superseded by a newer switch, or detached
         if (ext) {
           state.extWidgets = EXT.fromSnapshot(ext);
           extSnapshotSeq = Number.isInteger(ext.seq) ? ext.seq : 0;
@@ -1160,13 +1291,14 @@
       // Same for an abort: its response may be among the evicted events.
       if (replay.dropped) userAbortInFlight = false;
     } catch (e) {
+      if (!current()) return; // superseded by a newer switch, or detached
       console.warn(`[live] replay_events failed for '${id}':`, e);
       // The backend no longer has the session: its process ended while the
       // tab was in the background, with no exit listener attached and no
       // reason worth caching (a clean exit, a crash after startup).
       if (/not found/.test(String(e))) _endDeadProcessState();
     }
-    if (_switchGen !== myGen) return; // superseded by a newer switch
+    if (!current()) return; // superseded by a newer switch, or detached
 
     // Drain live events buffered while the replay fetch was in flight,
     // de-duplicated against lastSeq inside _dispatchEnvelope.
@@ -1182,7 +1314,7 @@
     // cached error synchronously — no event timing race.
     try {
       const startupError = await window.__TAURI__.core.invoke("session_status", { sessionId: id });
-      if (_switchGen !== myGen) return; // superseded by a newer switch
+      if (!current()) return; // superseded by a newer switch, or detached
       // Same renderer as the `agent://exit` path: this is the *same* backend
       // string (the reader writes `last_errors` and emits the event with one
       // value), and every background tab reaches the
@@ -1203,7 +1335,7 @@
     } catch (e) {
       console.warn(`[live] session_status query failed:`, e);
     }
-    if (_switchGen !== myGen) return; // superseded by a newer switch
+    if (!current()) return; // superseded by a newer switch, or detached
 
     // Re-fetch to pick up events missed while not listening.
     // get_messages handler merges completed turns with the cached streaming bubble.
@@ -1943,6 +2075,11 @@
     const restored = []; // ids this restore registered, in order
     let autoActive = null; // the restored tab this restore activated
     try {
+      // Settings → Session "Reopen tabs" off: open nothing and leave the
+      // file as it is. The arming below adopts the empty layout as
+      // written, so open-tabs.json is first rewritten at the first real
+      // tab change, and normal persistence goes on from there.
+      if (!sessionPrefs.restoreTabs) return;
       const saved = await _invokeSafe("open_tabs_load", undefined, null);
       if (!saved) return;
       if (saved.skipped.length > 0) {
@@ -2940,13 +3077,16 @@
         };
         sessionRegistry.set(activeSessionId, entry);
       }
-      if (STITLE.shouldAutoRename(rpcState, entry.autoRenameArmed, lastTurnOk)) {
+      // Settings → Session "Name tabs automatically" off: neither the first
+      // title nor a refresh is sent. Tabs stay armed, so turning it back on
+      // titles the ones still untitled at their next settled turn.
+      if (sessionPrefs.autoName && STITLE.shouldAutoRename(rpcState, entry.autoRenameArmed, lastTurnOk)) {
         sessionRegistry.set(activeSessionId, {
           ...entry, autoRenameArmed: false, autoRenameInFlight: true,
           autoRenameLeft: STITLE.REFINE_MAX, autoRenameTurns: 0,
         });
         _send({ type: "prompt", message: "/rename" });
-      } else if (!entry.autoRenameInFlight &&
+      } else if (sessionPrefs.autoName && !entry.autoRenameInFlight &&
                  STITLE.shouldRefineTitle(rpcState, entry.autoRenameTurns ?? 0,
                                           entry.autoRenameLeft ?? 0, lastTurnOk)) {
         // Budget is spent at send, not at confirmation: a low-signal or
@@ -2988,6 +3128,13 @@
         // process falls back to one `select` per question until told again.
         _sendWithResponse({ type: "set_ask_dialog", enabled: true })
           .catch(err => console.warn("[live] set_ask_dialog failed:", err));
+        // Settings → Agent: on (the default) leaves omp's own
+        // compaction/retry config in charge, so a fresh process is only
+        // told when the user turned one off (session-scoped, per process
+        // like the ask dialog). A live change goes to every open tab either
+        // way (`setSessionPrefs`).
+        if (!sessionPrefs.autoCompaction) _send({ type: "set_auto_compaction", enabled: false });
+        if (!sessionPrefs.autoRetry) _send({ type: "set_auto_retry", enabled: false });
         _send({ type: "get_state" });
         _send({ type: "get_messages" });
         _send({ type: "get_available_models" });
@@ -3010,6 +3157,20 @@
   function _invokeSend(cmd) {
     return window.__TAURI__.core
       .invoke("send_command", { sessionId: activeSessionId, json: JSON.stringify(cmd) });
+  }
+
+  /** Send `cmd` to every open tab's omp, uncorrelated (no `id`: a response
+   *  replayed into a tab later is ignored by `_handleResponse`). A tab
+   *  whose process is gone or still starting misses it; its new process
+   *  starts from omp's own config plus `_initFetch`'s "off" overrides. */
+  function _sendToAll(cmd) {
+    if (!window.__TAURI__) return;
+    const json = JSON.stringify(cmd);
+    // A warning, not `_invokeSafe`'s error: a tab missing it is expected.
+    for (const sessionId of sessionRegistry.keys()) {
+      window.__TAURI__.core.invoke("send_command", { sessionId, json })
+        .catch(e => console.warn(`[live] ${cmd.type} for '${sessionId}' not sent:`, e));
+    }
   }
 
   function _logSendError(e) { console.error("[live] send error:", e); }
@@ -3168,16 +3329,70 @@
       document.addEventListener("click", e => {
         if (e.target.closest(".win-min"))        win.minimize();
         else if (e.target.closest(".win-max"))   win.isMaximized().then(m => m ? win.unmaximize() : win.maximize());
-        else if (e.target.closest(".win-close")) win.close();
+        else if (e.target.closest(".win-close")) void _requestQuit();
       });
     } else {
       document.addEventListener("click", e => {
         const t = e.target.closest(".light");
         if (!t) return;
-        if (t.classList.contains("red"))        win.close();
+        if (t.classList.contains("red"))        void _requestQuit();
         else if (t.classList.contains("amber")) win.minimize();
         else if (t.classList.contains("green")) win.isMaximized().then(m => m ? win.unmaximize() : win.maximize());
       });
+    }
+  }
+
+  // ── Busy-close confirmation (#37) ─────────────────────────────────────────
+  // Settings → Session "Ask before closing a busy tab". Closing a tab
+  // (`closeSessionGuarded`) or the window (our close button, or an OS close
+  // Rust holds while the guard is armed and forwards as
+  // `window://close-requested`) asks first while a tab is busy; the dialog
+  // renders the snapshot's `closeConfirm`. Decisions: app/session-prefs.js.
+
+  /** Arm Rust's close guard exactly while a close would need confirming;
+   *  called on every notify, so it only sends a change. */
+  function _syncCloseGuard(sessions) {
+    if (_quitting) return;
+    const armed = PREFS.closeGuardArmed(sessionPrefs, sessions);
+    if (armed === _closeGuardSent) return;
+    _closeGuardSent = armed;
+    void _invokeSafe("set_close_guard", { armed });
+  }
+
+  /** Show `confirm` and resolve to the user's answer. A newer request
+   *  replaces one still on screen, which then resolves to false. */
+  function _askClose(confirm) {
+    _closeConfirmAnswer?.(false);
+    return new Promise(resolve => {
+      _closeConfirmAnswer = ok => {
+        _closeConfirmAnswer = null;
+        closeConfirm = null;
+        notify();
+        resolve(ok);
+      };
+      closeConfirm = confirm;
+      notify();
+    });
+  }
+
+  /** Close the window — and with it the app, through Rust's usual exit
+   *  path (`kill_child_processes`) — after confirming busy tabs. The guard
+   *  is disarmed first, so Rust lets this close through. */
+  async function _requestQuit() {
+    if (_quitting || !window.__TAURI__) return;
+    const confirm = PREFS.quitConfirm(sessionPrefs, _sessionsView());
+    if (confirm && !(await _askClose(confirm))) return;
+    if (_quitting) return; // a second request confirmed meanwhile
+    _quitting = true;
+    try {
+      await window.__TAURI__.core.invoke("set_close_guard", { armed: false });
+      _closeGuardSent = false;
+      await window.__TAURI__.window.getCurrentWindow().close();
+    } catch (e) {
+      console.error("[live] closing the window failed:", e);
+      _quitting = false;
+      _closeGuardSent = null;
+      _syncCloseGuard(_sessionsView());
     }
   }
 
@@ -3766,15 +3981,47 @@
     // auto-answers "Approve" for an exact "Allow tool: X" prompt shape —
     // see the module doc comment there. Session scope is in-memory (dies
     // with the tab's omp process); project scope persists to disk keyed by
-    // a hash of the active tab's project path.
+    // a hash of the project path — for a grant, the folder of the process
+    // that asked; list and revoke use the active tab's.
 
-    /** Grant standing approval for `tool` in the active session/project.
-     *  `scope` is `"session"` or `"project"`. */
-    async grantApprovalRule(tool, scope) {
-      if (!activeSessionId) return;
-      await _invokeSafe("approval_rules_grant", {
-        sessionId: activeSessionId, projectRoot: _activeProjectPath(), tool, scope,
-      });
+    /** Approve tool-approval prompt `prompt` (its ask bubble: `sessionId` +
+     *  request `id`) and grant standing approval for its tool, `scope`
+     *  `"session"` or `"project"`, in ONE call: `approval_approve_and_grant`
+     *  answers the prompt on the stdin of the process that asked and saves
+     *  the rule only once that answer was written, so no rule outlives an
+     *  unanswered prompt and no answer reaches a respawned process. Rust
+     *  takes the tool and the project from the prompt that session's
+     *  process forwarded and has not seen answered, and refuses any other,
+     *  so a grant never lands on another tab's scope. The bubble settles at
+     *  once (its buttons go inert, so a second click sends nothing), and
+     *  the call names the prompt's own session, whichever tab is active by
+     *  the time it runs. A prompt not in the active tab is left alone.
+     *  A rejection means nothing reached omp (prompt unknown to Rust: past
+     *  the 64-prompt cap, an id too long to record, no running process), so
+     *  the bubble is reopened for a plain Approve/Deny and a note says why —
+     *  never a fallback `send_command` Approve, which would answer whatever
+     *  process now holds the id. A non-null value means the prompt was
+     *  approved but the rule was not saved. Both only while this activation
+     *  of the tab is still the one shown (the bubble lives in its state). */
+    async approveAndRemember(prompt, scope) {
+      const sessionId = prompt?.sessionId;
+      if (!sessionId || sessionId !== activeSessionId || !prompt.id) return;
+      if (!_settleAsk(prompt.id, { answered: true, answer: "Approve" })) return;
+      const gen = _switchGen;
+      const res = await _invokeResult("approval_approve_and_grant", { sessionId, requestId: prompt.id, scope });
+      const unsaved = res.ok ? res.value : null;
+      if (res.ok && !unsaved) return;
+      if (_switchGen !== gen || activeSessionId !== sessionId) {
+        console.warn(`[live] approve and remember for '${sessionId}':`, res.ok ? unsaved : res.error);
+        return;
+      }
+      if (!res.ok) {
+        _reopenAsk(prompt.id);
+        _pushAssistantNote(`**Approve and remember failed:** ${res.error}. The prompt is open again.`);
+      } else {
+        _pushAssistantNote(`**Approved, but the rule was not saved:** ${unsaved}`);
+      }
+      notify();
     },
 
     /** Revoke a previously granted rule. No-op if it wasn't granted. */
@@ -3824,6 +4071,15 @@
     /** A file as of commit `sha` with that commit's change inline: `FileView`. */
     gitBrowserCommitFile(sha, relPath) {
       return _gitBrowserInvoke("git_browser_commit_file", { sha, relPath });
+    },
+
+    /** A file of the active tab's project for the preview (issue #39):
+     *  `FilePreview` from src-tauri/src/project_file.rs, as `{ok, value |
+     *  error}`; null with no tab. Rust takes the folder from the tab, so only
+     *  the tab id and the path cross. `path` may be absolute inside it. */
+    readProjectFile(path) {
+      if (!activeSessionId) return Promise.resolve(null);
+      return _invokeResult("project_file_read", { sessionId: activeSessionId, path });
     },
 
     /** Stage a file's changes (`git add`). */
@@ -4332,7 +4588,9 @@
       return _setApprovalModes("approval_mode_set_project", { projectRoot: path, mode: mode ?? null });
     },
 
-    /** Close a tab: Rust ends its omp process, git watcher, widgets and shell. */
+    /** Close a tab: Rust ends its omp process, git watcher, widgets and
+     *  shell. Unconditional; the tab bar goes through
+     *  `closeSessionGuarded`. */
     async closeSession(id) {
       _closeTab(id);
       sessionRegistry.delete(id);
@@ -4352,6 +4610,40 @@
       } else {
         notify(); // tab list changed
       }
+    },
+
+    /** `closeSession`, after asking when Settings → Session "Ask before
+     *  closing a busy tab" is on and the tab's agent is busy. Resolves to
+     *  whether the tab was closed. */
+    async closeSessionGuarded(id) {
+      const confirm = PREFS.tabCloseConfirm(sessionPrefs, _sessionsView(), id);
+      if (confirm && !(await _askClose(confirm))) return false;
+      if (!sessionRegistry.has(id)) return false; // closed meanwhile
+      await window.OMP_BRIDGE.closeSession(id);
+      return true;
+    },
+
+    /** Answer the busy-close confirmation on screen (snapshot
+     *  `closeConfirm`): `true` closes / quits, `false` keeps everything. */
+    resolveCloseConfirm(ok) {
+      _closeConfirmAnswer?.(ok === true);
+    },
+
+    /** Apply Settings → Session / Agent prefs (`restoreTabs`,
+     *  `confirmBusyClose`, `autoName`, `autoCompaction`, `autoRetry`; any
+     *  subset, the rest kept). Idempotent: only a changed value acts.
+     *  `restoreTabs` only matters at launch (read from the stored tweaks
+     *  then) and `autoName` at each auto-title check, so neither sends
+     *  anything here. */
+    setSessionPrefs(values) {
+      // fromTweaks keeps only PREFS.KEYS, so the whole tweaks object may come in.
+      const next = PREFS.fromTweaks({ ...sessionPrefs, ...values }, window.TWEAK_DEFAULTS);
+      const changed = PREFS.changedKeys(sessionPrefs, next);
+      if (changed.length === 0) return;
+      sessionPrefs = next;
+      if (changed.includes("autoCompaction")) _sendToAll({ type: "set_auto_compaction", enabled: next.autoCompaction });
+      if (changed.includes("autoRetry")) _sendToAll({ type: "set_auto_retry", enabled: next.autoRetry });
+      if (changed.includes("confirmBusyClose")) _syncCloseGuard(_sessionsView());
     },
 
     /** Put the tabs in `ids` order (#40): a drag in the tab bar, the group
@@ -4427,7 +4719,7 @@
       return _invokeResult("open_url_external", { url });
     },
 
-    /** Update the in-memory prompt-history cap (tweaks panel setting,
+    /** Update the in-memory prompt-history cap (Settings → Composer,
      *  default OMP_PROMPT_HISTORY.DEFAULT_LIMIT). Trims every tab's list
      *  eagerly, not just on the next record/backfill — otherwise lowering
      *  the slider wouldn't affect the picker (open via Ctrl+Up) until the
@@ -4480,6 +4772,13 @@
       .then(() => _restoreOpenTabs())
       .catch(e => console.error("[live] restoring the open tabs failed:", e))
       .finally(_setupExternalOpens);
+
+    // Busy-close confirmation for an OS close Rust held (`_requestQuit`),
+    // and the guard's real state: a reloaded webview may find it armed by
+    // the previous document.
+    window.__TAURI__.event.listen("window://close-requested", () => { void _requestQuit(); })
+      .catch(e => console.error("[live] failed to listen for window close requests:", e));
+    _syncCloseGuard(_sessionsView());
 
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", _setupWindowChrome);

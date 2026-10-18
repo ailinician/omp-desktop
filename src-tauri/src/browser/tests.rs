@@ -1,14 +1,13 @@
 //! The manager's lifecycle, and the test support every browser suite shares
-//! (real-Chromium skipping, managers, panels, a fake CDP server).
+//! (real-Chromium skipping, managers, panels, a fake CDP client).
 
 use super::view::{BrowserEmit, Frame, InputEvent, Pick, Status, TabInfo, View, ViewState};
 use super::*;
 use crate::test_support::eventually;
 use serde_json::{json, Value};
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{self, Read, Write};
+use std::net::{Ipv4Addr, TcpStream};
 use std::time::Duration;
-use tungstenite::Message;
 
 /// Real-browser tests share one lock across modules. Hold it from before
 /// fixture creation through teardown; `lock` recovers after a test panics.
@@ -26,36 +25,42 @@ pub(super) fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Minimal HTTP/1.1 GET against `127.0.0.1:port`; returns the body, read by
-/// its `Content-Length` (Chromium and the fakes ignore `Connection: close`).
+/// Ample time for a proxy connection's peer check (`lsof` may take
+/// seconds).
+pub(super) const PEER_CHECK: Duration = Duration::from_secs(10);
+
+/// Sends `request` to the proxy at `127.0.0.1:port`, then collects the
+/// reply until the proxy closes the connection (it does after every
+/// response), for at most [`PEER_CHECK`] per read: a slow peer check can
+/// hold the first byte back.
+pub(super) fn http_roundtrip(port: u16, request: &[u8]) -> io::Result<Vec<u8>> {
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port))?;
+    stream.set_read_timeout(Some(PEER_CHECK))?;
+    stream.write_all(request)?;
+    let mut got = Vec::new();
+    // What arrived before an error is kept in `got`.
+    let _ = stream.read_to_end(&mut got);
+    Ok(got)
+}
+
+/// The status line and body of a response.
+pub(super) fn split_response(response: &[u8]) -> (String, String) {
+    let text = String::from_utf8_lossy(response);
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let status = head.split("\r\n").next().unwrap_or_default();
+    (status.to_owned(), body.to_owned())
+}
+
+/// `method path` with a loopback Host, through the proxy at `port`: the
+/// status line and body of the response.
+pub(super) fn http_request(port: u16, method: &str, path: &str) -> io::Result<(String, String)> {
+    let head = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    http_roundtrip(port, head.as_bytes()).map(|response| split_response(&response))
+}
+
+/// The body of `GET path` through the proxy at `port`, whatever its status.
 pub(super) fn http_get(port: u16, path: &str) -> io::Result<String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-    )?;
-    let mut reader = BufReader::new(stream);
-    let mut length = 0;
-    loop {
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        let line = line.trim();
-        if line.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                length = value
-                    .trim()
-                    .parse()
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            }
-        }
-    }
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body)?;
-    String::from_utf8(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    http_request(port, "GET", path).map(|(_, body)| body)
 }
 
 /// The Chromium a real-browser test runs, as the app would find it. `None`
@@ -176,37 +181,59 @@ pub(super) fn mouse(kind: &str, x: f64, y: f64) -> InputEvent {
     }
 }
 
-/// A one-connection CDP stand-in; returns its browser WebSocket URL. Each
-/// request goes to `reply`: `None` closes the socket, `Some(messages)` sends
-/// them as they are (none = no answer). Build replies with [`cdp_result`] /
-/// [`cdp_error`].
+/// Page sessions the fake suites address without attaching them (a view
+/// core given `set_active("a", "sa")` directly). [`fake_cdp`]'s client owns
+/// them from the start, as if it had attached them.
+const FAKE_SESSIONS: [&str; 2] = ["sa", "sb"];
+
+/// The fixture's own command that hands out [`FAKE_SESSIONS`]; `reply`
+/// never sees it.
+const GRANT: &str = "Fixture.grantSessions";
+
+/// A browser-level client of a fake Chromium (see
+/// [`fake_browser`](super::broker::fake::fake_browser)) that owns
+/// [`FAKE_SESSIONS`]. Each command the client sends goes to `reply`, without
+/// the client's own root session: `None` ends the browser connection,
+/// `Some(messages)` sends them (none = no answer). Build replies with
+/// [`cdp_result`] / [`cdp_error`].
 pub(super) fn fake_cdp(
     mut reply: impl FnMut(&Value) -> Option<Vec<Value>> + Send + 'static,
-) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        let Ok((stream, _)) = listener.accept() else {
-            return;
-        };
-        let Ok(mut ws) = tungstenite::accept(stream) else {
-            return;
-        };
-        while let Ok(Message::Text(text)) = ws.read() {
-            let Ok(request) = serde_json::from_str::<Value>(text.as_str()) else {
-                return;
-            };
-            let Some(messages) = reply(&request) else {
-                return;
-            };
-            for message in messages {
-                if ws.send(Message::text(message.to_string())).is_err() {
-                    return;
+) -> super::broker::BrokerClient {
+    let client = super::broker::fake::fake_browser(move |request| {
+        if request["method"] != GRANT {
+            return reply(request);
+        }
+        // Announced on the client's root session, which makes them its own.
+        let mut answers: Vec<Value> = FAKE_SESSIONS
+            .iter()
+            .map(|session| {
+                json!({
+                    "method": "Target.attachedToTarget",
+                    "params": { "sessionId": session, "targetInfo": {} },
+                })
+            })
+            .collect();
+        answers.push(cdp_result(request, json!({})));
+        Some(answers)
+    })
+    .connect_browser()
+    .unwrap();
+    client
+        .send(&json!({ "id": 0, "method": GRANT, "params": {} }).to_string())
+        .unwrap();
+    // The grants come before the reply; none of it is for the test.
+    loop {
+        match client.recv(Duration::from_secs(5)) {
+            super::broker::Recv::Message(text) => {
+                let message: Value = serde_json::from_str(&text).unwrap();
+                if message["id"] == 0 {
+                    break;
                 }
             }
+            other => panic!("fake cdp grant: {other:?}"),
         }
-    });
-    format!("ws://127.0.0.1:{port}/devtools/browser/x")
+    }
+    client
 }
 
 /// The success reply to `request`.
@@ -279,11 +306,11 @@ fn the_browser_setting_is_read_at_launch_time() {
     settings.set_path(&bin_a.display().to_string()).unwrap();
     let m = BrowserManager::new(&dir.join("root"), Arc::clone(&settings)).unwrap();
     m.allocate("s1").unwrap();
-    m.chromium_port("s1").unwrap();
+    m.chromium("s1").unwrap();
     assert_eq!((launch_count(&a), launch_count(&b)), (1, 0));
     settings.set_path(&bin_b.display().to_string()).unwrap();
     m.kill_chromium_for_test("s1");
-    m.chromium_port("s1").unwrap();
+    m.chromium("s1").unwrap();
     assert_eq!((launch_count(&a), launch_count(&b)), (1, 1));
 }
 
@@ -297,8 +324,10 @@ fn a_configured_browser_that_vanished_is_an_error_not_a_fallback() {
     let m = manager_using(&dir.join("root"), &bin);
     m.allocate("s1").unwrap();
     std::fs::remove_file(&bin).unwrap();
-    let err = m.chromium_port("s1").unwrap_err();
-    assert!(err.contains("Tweaks → Browser"), "{err}");
+    let Err(err) = m.chromium("s1") else {
+        panic!("a vanished browser launched");
+    };
+    assert!(err.contains("Settings → Browser"), "{err}");
     assert_eq!(launch_count(&dir), 0);
     assert!(
         m.profile_dir_for_test("s1").is_none(),
@@ -564,7 +593,7 @@ fn instance_dir_profiles_and_overlay_are_private() {
     let root = dir.join("root");
     let m = manager_using(&root, &bin);
     let overlay = m.allocate("s1").unwrap();
-    m.chromium_port("s1").unwrap();
+    m.chromium("s1").unwrap();
     let profile = m.profile_dir_for_test("s1").unwrap();
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&root.join(std::process::id().to_string())), 0o700);
@@ -610,8 +639,9 @@ fn shutdown_all_removes_only_its_own_instance_directory() {
 }
 
 /// A fake browser (unix) at `dir/fake-chromium`: appends a line to
-/// `dir/launches` per start, records its pid in `dir/pid`, publishes port
-/// `40000 + <launch count>` after `delay` seconds, then idles.
+/// `dir/launches` per start, records its pid in `dir/pid`, waits `delay`
+/// seconds and for the launch's first pipe command (`Browser.getVersion`,
+/// id 1), answers it, then idles with the pipe open.
 #[cfg(unix)]
 pub(super) fn fake_chromium(dir: &Path, delay: &str) -> PathBuf {
     let bin = dir.join("fake-chromium");
@@ -624,8 +654,8 @@ pub(super) fn fake_chromium(dir: &Path, delay: &str) -> PathBuf {
          echo x >> '{log}'\n\
          mkdir -p \"$d\"\n\
          sleep {delay}\n\
-         n=$(wc -l < '{log}')\n\
-         printf '%s\\n/devtools/browser/x\\n' $((40000 + n)) > \"$d/DevToolsActivePort\"\n\
+         dd bs=1 count=1 <&3 >/dev/null 2>&1\n\
+         printf '{{\"id\":1,\"result\":{{}}}}\\000' >&4\n\
          exec sleep 300\n",
         log = log.display(),
         pid = pid.display()
@@ -645,13 +675,16 @@ fn concurrent_ensures_launch_one_chromium() {
     let bin = fake_chromium(&dir, "0.3");
     let m = manager_using(&dir.join("root"), &bin);
     m.allocate("s1").unwrap();
-    let ports: Vec<_> = std::thread::scope(|s| {
+    let brokers: Vec<_> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..5)
-            .map(|_| s.spawn(|| m.chromium_port("s1").unwrap()))
+            .map(|_| s.spawn(|| m.chromium("s1").unwrap()))
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    assert!(ports.iter().all(|&p| p == ports[0]), "{ports:?}");
+    assert!(
+        brokers.iter().all(|b| Arc::ptr_eq(b, &brokers[0])),
+        "one connection for every caller"
+    );
     assert_eq!(launch_count(&dir), 1);
 }
 
@@ -663,7 +696,7 @@ fn a_slow_launch_blocks_no_other_session() {
     let m = manager_using(&dir.join("root"), &bin);
     m.allocate("slow").unwrap();
     std::thread::scope(|s| {
-        let launching = s.spawn(|| m.chromium_port("slow").unwrap());
+        let launching = s.spawn(|| m.chromium("slow").unwrap());
         eventually(Duration::from_secs(5), || {
             (launch_count(&dir) > 0).then_some(())
         })
@@ -681,19 +714,31 @@ fn a_slow_launch_blocks_no_other_session() {
     });
 }
 
+/// A browser killed from outside is noticed (its broker ends) and the next
+/// `chromium` starts a fresh one in a fresh profile.
 #[cfg(unix)]
 #[test]
-fn relaunch_after_crash_uses_a_fresh_profile_and_port() {
+fn relaunch_after_crash_uses_a_fresh_profile_and_connection() {
     let dir = tempdir("mgr-relaunch-fake");
     let bin = fake_chromium(&dir, "0");
     let m = manager_using(&dir.join("root"), &bin);
     m.allocate("s1").unwrap();
     let placeholder = m.port("s1").unwrap();
-    let first = m.chromium_port("s1").unwrap();
+    let first = m.chromium("s1").unwrap();
     let first_profile = m.profile_dir_for_test("s1").unwrap();
-    m.kill_chromium_for_test("s1");
-    let second = m.chromium_port("s1").unwrap();
-    assert_ne!(first, second);
+    let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+    let killed = std::process::Command::new("kill")
+        .args(["-9", pid.trim()])
+        .status()
+        .unwrap();
+    assert!(killed.success(), "kill -9 {pid}");
+    assert!(
+        eventually(Duration::from_secs(5), || (!first.is_alive()).then_some(())).is_some(),
+        "the crash closes the broker"
+    );
+    let second = m.chromium("s1").unwrap();
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert_eq!(launch_count(&dir), 2);
     assert_ne!(first_profile, m.profile_dir_for_test("s1").unwrap());
     assert!(!first_profile.exists(), "dead browser's profile removed");
     assert_eq!(m.port("s1"), Some(placeholder));
@@ -706,7 +751,7 @@ fn release_removes_profile_and_overlay_and_refuses_later_launches() {
     let bin = fake_chromium(&dir, "0");
     let m = manager_using(&dir.join("root"), &bin);
     let overlay = m.allocate("s1").unwrap();
-    m.chromium_port("s1").unwrap();
+    m.chromium("s1").unwrap();
     let profile = m.profile_dir_for_test("s1").unwrap();
     assert!(profile.exists());
     let pid_file = profile.with_extension("pid");
@@ -716,7 +761,7 @@ fn release_removes_profile_and_overlay_and_refuses_later_launches() {
     assert!(!profile.exists());
     assert!(!pid_file.exists(), "release removes browser PID file");
     assert!(!overlay.exists());
-    assert!(m.chromium_port("s1").is_err());
+    assert!(m.chromium("s1").is_err());
     assert_eq!(launch_count(&dir), 1);
 }
 
@@ -731,8 +776,8 @@ fn release_many_ends_exactly_the_given_sessions() {
         .iter()
         .map(|id| m.allocate(id).unwrap())
         .collect();
-    m.chromium_port("s1").unwrap();
-    m.chromium_port("s2").unwrap();
+    m.chromium("s1").unwrap();
+    m.chromium("s2").unwrap();
     let profiles: Vec<_> = ["s1", "s2"]
         .iter()
         .map(|id| m.profile_dir_for_test(id).unwrap())
@@ -755,7 +800,7 @@ fn second_closer_waits_for_the_release_in_flight(name: &str, second_closer: fn(&
     let m = manager_using(&dir.join("root"), &bin);
     m.allocate("s1").unwrap();
     std::thread::scope(|s| {
-        let launching = s.spawn(|| m.chromium_port("s1"));
+        let launching = s.spawn(|| m.chromium("s1"));
         eventually(Duration::from_secs(5), || {
             (launch_count(&dir) > 0).then_some(())
         })
@@ -798,7 +843,7 @@ fn allocating_a_session_that_is_still_closing_is_an_error() {
     let m = manager_using(&dir.join("root"), &bin);
     m.allocate("s1").unwrap();
     std::thread::scope(|s| {
-        let launching = s.spawn(|| m.chromium_port("s1"));
+        let launching = s.spawn(|| m.chromium("s1"));
         eventually(Duration::from_secs(5), || {
             (launch_count(&dir) > 0).then_some(())
         })
@@ -832,12 +877,15 @@ fn relaunch_after_crash_keeps_placeholder_port() {
     assert!(http_get(placeholder, "/json/version")
         .unwrap()
         .contains("webSocketDebuggerUrl"));
-    let first = m.chromium_port("s1").unwrap();
+    let first = m.chromium("s1").unwrap();
     m.kill_chromium_for_test("s1");
     let body = http_get(placeholder, "/json/version").unwrap();
     assert!(body.contains(&format!("127.0.0.1:{placeholder}")), "{body}");
-    let second = m.chromium_port("s1").unwrap();
-    assert_ne!(first, second, "a fresh chromium was launched");
+    let second = m.chromium("s1").unwrap();
+    assert!(
+        !Arc::ptr_eq(&first, &second),
+        "a fresh chromium was launched"
+    );
     assert_eq!(
         m.port("s1"),
         Some(placeholder),
@@ -863,13 +911,18 @@ fn release_closes_connections_kills_chromium_removes_profile() {
     let mut ws = TcpStream::connect(("127.0.0.1", placeholder)).unwrap();
     write!(ws, "GET /devtools/{ws_path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").unwrap();
     let mut buf = [0u8; 512];
-    assert!(ws.read(&mut buf).unwrap() > 0, "handshake answered");
+    let n = ws.read(&mut buf).unwrap();
+    assert!(
+        buf[..n].starts_with(b"HTTP/1.1 101"),
+        "handshake answered: {}",
+        String::from_utf8_lossy(&buf[..n])
+    );
     let profile = m.profile_dir_for_test("s1").unwrap();
     m.release("s1");
     ws.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     assert!(
         matches!(ws.read(&mut buf), Ok(0) | Err(_)),
-        "spliced socket closed"
+        "agent socket closed"
     );
     assert!(!profile.exists(), "profile removed");
     // `ps` exists on unix only; elsewhere the removed profile is the evidence.

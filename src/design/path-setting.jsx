@@ -1,17 +1,17 @@
 /* ═════════════════════════════════════════════════════════════════════
-   design/path-setting.jsx — a Rust-owned program path setting in Tweaks
+   design/path-setting.jsx — a Rust-owned program path setting in Settings
    (Terminal's shell, Browser's Chromium): `usePathSetting` reads and saves
-   it, `PathPicker` is the row's button and its menu (rows from
-   app/path-setting.js `menu`, then "other…", Rust's file dialog).
-   The menu opens inline, below the button: the panel scrolls and clips, so
-   a floating pop-up would be cut off at its edge.
+   it, `PathPicker` is the row's control: a button naming the value and its
+   drop-down menu (rows from app/path-setting.js `menu`, then "other…",
+   Rust's file dialog). Settings → Agent's startup profile reuses the
+   picker without "other…". The row frame is the caller's (SettingsRow).
    ═════════════════════════════════════════════════════════════════════ */
 
-const { TweakRow: _PSet_Row, Icon: _PSet_Icon } = window;
+const { Icon: _PSet_Icon } = window;
 
 /**
  * The "other…" pick in flight per setting (`api.key`), kept outside the
- * component: closing Tweaks unmounts it, and on Linux (rfd's GTK3 dialog
+ * component: closing Settings unmounts it, and on Linux (rfd's GTK3 dialog
  * ignores the parent window) the panel can be closed and reopened while
  * the dialog is up. A remount waits for this before it reads the setting,
  * so it shows the pick, and a second "other…" does nothing until the
@@ -58,15 +58,16 @@ function usePathSetting(bridge, api) {
 }
 
 /**
- * A Tweaks row naming a path setting (`name`, its row label) and its inline
- * menu: `rows` (`{ name, hint, path, value, checked }`, exactly one checked)
- * then "other…". `label` is the button's text, `title` its tooltip;
- * `disabled` until the setting is read. A row saves its `value`.
+ * The control of a Settings row naming a path setting: a button (`label`
+ * its text, `title` its tooltip, `name` the menu's accessible name) and its
+ * drop-down menu: `rows` (`{ name, hint, path, value, checked }`, exactly
+ * one checked), then "other…" when `pick` is given. `disabled` until the
+ * setting is read. A row saves its `value`; `error` shows under the button.
  */
 function PathPicker({ name, label, title, rows, disabled, error, save, pick }) {
   const [open, setOpen] = React.useState(false);
   const rootRef = React.useRef(null);
-  // precedent:ignore — the menu trigger/close pattern of the other popover menus, moved here from terminal-tweaks.jsx
+  // precedent:ignore — the menu trigger/close pattern of the other popover menus
   const menuRef = React.useRef(null);
   const triggerRef = React.useRef(null);
 
@@ -77,8 +78,8 @@ function PathPicker({ name, label, title, rows, disabled, error, save, pick }) {
   // An outside click leaves focus where it lands; Escape returns it.
   window.usePopoverDismiss(open, rootRef, () => close(false), close);
 
-  // Focus the checked row when the menu opens, and keep the menu inside the
-  // Tweaks panel's scroll area (the browser row sits near its bottom).
+  // Focus the checked row when the menu opens, and scroll the Settings page
+  // so the menu is in view (a row near the bottom drops it past the edge).
   React.useEffect(() => {
     if (!open) return;
     menuRef.current?.scrollIntoView({ block: "nearest" });
@@ -89,36 +90,42 @@ function PathPicker({ name, label, title, rows, disabled, error, save, pick }) {
   const onMenuKey = e => window.menuKeyNav(e, menuRef.current, "button", close);
 
   return (
-    <div className="twk-row" ref={rootRef}>
-      <_PSet_Row label={name} inline>
-        <button ref={triggerRef} type="button" className="twk-btn secondary twk-pick"
-          aria-haspopup="menu" aria-expanded={open} disabled={disabled} title={title}
-          onClick={() => (open ? close() : setOpen(true))}>
-          {label}
-          <_PSet_Icon name="chev" size={10} color="var(--fg-4)" />
-        </button>
-      </_PSet_Row>
+    <div className="st-pick" ref={rootRef}>
+      <button ref={triggerRef} type="button" className="st-sel"
+        aria-haspopup="menu" aria-expanded={open} aria-label={name} disabled={disabled} title={title}
+        onClick={() => (open ? close() : setOpen(true))}>
+        <span className="st-sel-v">{label}</span>
+        <_PSet_Icon name="chev" size={10} color="var(--fg-4)" />
+      </button>
+      {/* `data-st-esc`: while open, the Settings page leaves Escape and the
+          arrows to this menu (settings/page.jsx). */}
       {open && (
-        <div ref={menuRef} className="twk-menu" role="menu" aria-label={name} onKeyDown={onMenuKey}>
+        <div ref={menuRef} className="st-menu" role="menu" aria-label={name} onKeyDown={onMenuKey} data-st-esc="">
           {rows.map(r => (
-            <button key={r.value || "default"} type="button" className="twk-menu-item"
+            <button key={r.value || "default"} type="button" className="st-menu-item"
               role="menuitemradio" aria-checked={r.checked} title={r.path || undefined}
               onClick={() => { close(); save(r.value); }}>
-              <span className="twk-menu-mark">
+              <span className="st-menu-mark">
                 {r.checked && <_PSet_Icon name="check" size={10} color="var(--accent)" />}
               </span>
-              <span className="twk-menu-name">{r.name}</span>
-              {r.hint && <span className="twk-menu-hint">{r.hint}</span>}
+              <span className="st-menu-name">{r.name}</span>
+              {r.hint && <span className="st-menu-hint">{r.hint}</span>}
             </button>
           ))}
-          <button type="button" className="twk-menu-item" role="menuitem"
-            onClick={() => { close(); pick(); }}>
-            <span className="twk-menu-mark" />
-            <span className="twk-menu-name">other…</span>
-          </button>
+          {pick && (
+            <>
+              <div className="st-menu-sep" role="separator" />
+              <button type="button" className="st-menu-item" role="menuitem"
+                onClick={() => { close(); pick(); }}>
+                <span className="st-menu-mark" />
+                <span className="st-menu-name">other…</span>
+                <span className="st-menu-hint">browse</span>
+              </button>
+            </>
+          )}
         </div>
       )}
-      {error != null && <div className="twk-path-error">{error}</div>}
+      {error != null && <div className="st-path-error">{error}</div>}
     </div>
   );
 }

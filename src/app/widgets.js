@@ -5,7 +5,7 @@
 //   runKey / mergeRun / cardRun / parsedLast
 //                              the hook's run bookkeeping (events → card props)
 //   hiddenPluginIds(tweaks, ids) / argvDisplay(arg)
-//                              Tweaks-hidden plugins; approval-card argv text
+//                              Settings-hidden plugins; approval-card argv text
 // User guide and schema: docs/widgets.md. Which plugin runs when (triggers,
 // matching, approval, scheduling) lives in Rust (src-tauri/src/widgets/);
 // every output-schema rule lives here so tests/test-widgets.mjs covers it.
@@ -136,7 +136,7 @@
   // Namespaced per source so #52's extension widgets can use `widget:ext:<key>`.
   const TWEAK_PREFIX = "widget:plugin:";
   const tweakKey = (id) => `${TWEAK_PREFIX}${id}`;
-  // hiddenPluginIds: every plugin id whose Tweaks toggle is off, read from the
+  // hiddenPluginIds: every plugin id whose Settings toggle is off, read from the
   // tweak keys rather than the loaded config — a plugin missing from the
   // config (a broken reload, the first view before the snapshot) must still
   // be hidden once a reload brings it back, before the hook re-sends the view.

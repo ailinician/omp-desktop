@@ -10,11 +10,14 @@
 //! ([`BrowserManager::release_many`]) or leaving the app ends it.
 
 mod annotate;
+mod broker;
 mod cdp;
 pub mod commands;
 mod process;
 pub mod proxy;
 mod view;
+mod waiters;
+mod wire;
 
 #[cfg(test)]
 mod tests;
@@ -24,9 +27,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use process::{
-    prepare_instance_dir, private_dirs, prune_dead, remove_dir_retrying, write_overlay, Chromium,
-};
+use crate::private_fs::private_dirs;
+use broker::Broker;
+use process::{prepare_instance_dir, prune_dead, remove_dir_retrying, write_overlay, Chromium};
 pub use process::{BrowserSettings, SettingsStore};
 use proxy::Proxy;
 
@@ -75,16 +78,16 @@ struct Slot {
 }
 
 impl Slot {
-    /// The live Chromium's port, launching or relaunching it when there is
-    /// none or it died. A configured browser that cannot be launched is an
-    /// error, never a fallback to another browser.
-    fn ensure(&self) -> Result<u16, String> {
+    /// The live Chromium's CDP connection, launching or relaunching it when
+    /// there is none or it died. A configured browser that cannot be
+    /// launched is an error, never a fallback to another browser.
+    fn ensure(&self) -> Result<Arc<Broker>, String> {
         let mut slot = lock(&self.chromium);
         if self.closed.load(Ordering::SeqCst) {
             return Err("browser closed".into());
         }
         if let Some(chromium) = slot.as_ref().filter(|c| c.is_alive()) {
-            return Ok(chromium.port());
+            return Ok(Arc::clone(chromium.broker()));
         }
         if let Some(dead) = slot.take() {
             dead.stop(); // reaps it and removes its profile
@@ -94,10 +97,10 @@ impl Slot {
             .create(&self.profiles)
             .map_err(|e| format!("browser profile dir: {e}"))?;
         let chromium = Chromium::launch(&binaries, || self.next_profile(), WINDOW.0, WINDOW.1)?;
-        let port = chromium.port();
+        let broker = Arc::clone(chromium.broker());
         *slot = Some(chromium);
         drop(slot);
-        Ok(port)
+        Ok(broker)
     }
 
     /// A profile path no earlier launch of this session used.
@@ -293,9 +296,9 @@ impl BrowserManager {
             .map(|entry| entry.proxy.port())
     }
 
-    /// The live Chromium's own debugging port, launching it when needed (the
-    /// panel's CDP client connects here, not through the proxy).
-    pub fn chromium_port(&self, session_id: &str) -> Result<u16, String> {
+    /// The live Chromium's CDP connection, launching it when needed (the
+    /// panel's CDP client attaches here, not through the proxy).
+    pub fn chromium(&self, session_id: &str) -> Result<Arc<Broker>, String> {
         let slot = self
             .state()
             .entries

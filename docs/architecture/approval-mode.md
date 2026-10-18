@@ -1,6 +1,6 @@
 # Tool approval mode
 
-omp's `--approval-mode` is chosen in the desktop: a global default and an optional per-project override, under the status-bar ✓ button (**approvals** panel). The Rust side is `src-tauri/src/approval_mode.rs` (`ApprovalModeStore`, the three `approval_mode_*` commands); the webview side is `src/app/approval-mode.js` (`window.OMP_APPROVAL_MODE`, regression `test-approval-mode.mjs`), the bridge methods and `_respawnSession` in `live.js`, and `design/approval-rules-panel.jsx` / `design/chrome.jsx` (status bar). Standing rules (`approval.rs` `RuleBook`) are a separate store and are unchanged by this.
+omp's `--approval-mode` is chosen in the desktop: a global default and an optional per-project override, under the status-bar ✓ button (**approvals** panel) and in Settings → Approvals, which render the same `design/approval-mode-section.jsx` (`ApprovalModeSection`; Settings through `design/settings/rows-approvals.jsx`, whose `approvalRules` row also shows the standing-rule count and opens the panel). The Rust side is `src-tauri/src/approval_mode.rs` (`ApprovalModeStore`, the three `approval_mode_*` commands); the webview side is `src/app/approval-mode.js` (`window.OMP_APPROVAL_MODE`, regression `test-approval-mode.mjs`), the bridge methods and `_respawnSession` in `live.js`, and `design/approval-rules-panel.jsx` / `design/chrome.jsx` (status bar). Standing rules (`approval.rs` `RuleBook`) are a separate store and are unchanged by this.
 
 ## Modes
 

@@ -11,22 +11,15 @@ function PromptHistoryModal({ open, entries, onClose, onPick }) {
   const [activeIdx, setActiveIdx] = React.useState(0);
   const listRef = React.useRef(null);
   const containerRef = React.useRef(null);
-  const restoreFocusRef = React.useRef(null);
 
   // Move DOM focus onto the modal itself when it opens, and back to
   // whatever had it (the composer textarea, reached via Ctrl+Up) when it
-  // closes — same "focus falls back to <body> otherwise" fix as
-  // profile-menu.jsx's triggerRef.focus(). The focus grab alone isn't a
-  // complete guard, though: the composer has its own "refocus when
-  // streaming ends" effect (composer.jsx, `!isStreaming` → `ta.focus()`)
-  // that can steal focus back while this is still open mid-turn — see the
-  // capture-phase keydown listener below, which is the actual guard.
-  React.useEffect(() => {
-    if (!open) return;
-    restoreFocusRef.current = document.activeElement;
-    requestAnimationFrame(() => containerRef.current?.focus());
-    return () => { restoreFocusRef.current?.focus?.(); };
-  }, [open]);
+  // closes (ui/use-modal-focus.js). The focus grab alone isn't a complete
+  // guard, though: the composer has its own "refocus when streaming ends"
+  // effect (composer.jsx, `!isStreaming` → `ta.focus()`) that can steal
+  // focus back while this is still open mid-turn — see the capture-phase
+  // keydown listener below, which is the actual guard.
+  window.useModalFocus(containerRef, open);
 
   // Reset selection to the newest entry each time the modal opens.
   React.useEffect(() => { if (open) setActiveIdx(0); }, [open]);
@@ -44,7 +37,7 @@ function PromptHistoryModal({ open, entries, onClose, onPick }) {
   // isn't a reliable guard once the composer's own streaming-end
   // refocus effect can run while this is still open, so intercept
   // before the event ever reaches the composer's onKeyDown — same
-  // pattern as shortcuts-modal.jsx's chord recorder. Modified keys are
+  // pattern as settings/shortcuts-editor.jsx's chord recorder. Modified keys are
   // let through untouched so Ctrl+Up still reaches the keymap toggle.
   React.useEffect(() => {
     if (!open) return;

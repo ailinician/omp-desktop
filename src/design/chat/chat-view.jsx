@@ -7,7 +7,7 @@
    `hoveredMsgIdx` prop. */
 
 const { UserBubble: _CV_UserBubble, ToolCard: _CV_ToolCard, AssistantBubble: _CV_AssistantBubble, AskBubble: _CV_AskBubble, RetryRow: _CV_RetryRow, GoalRow: _CV_GoalRow, ApprovalRow: _CV_ApprovalRow, Icon: _CV_Icon, TOOL_META: _CV_TOOL_META } = window;
-const { nextPinned: _CV_nextPinned, shouldRepin: _CV_shouldRepin } = window.OMP_SCROLL_PIN;
+const { nextPinned: _CV_nextPinned, shouldRepin: _CV_shouldRepin, afterOutput: _CV_afterOutput } = window.OMP_SCROLL_PIN;
 const { collapseStates: _CV_collapseStates, PREVIEW_LINES: _CV_PREVIEW_LINES } = window.OMP_COLLAPSE;
 // Lines a collapsed block keeps in view, for chat.css; one object, so a
 // streaming frame does not diff a fresh style.
@@ -118,7 +118,9 @@ const JobRow = React.memo(function JobRow({ msg, idx, highlighted }) {
 // Collapsible blocks (#44, #43): `foldModes` (`{ thinking, tool }`) and
 // `collapseAfter` are the tweaks, `collapseOverrides` this tab's
 // `_id → collapsed` toggles, and `onToggleCollapse(id, collapsed)` flips one
-// (app/chat-collapse.js).
+// (app/chat-collapse.js). `followOutput` and `submitKey` are tweaks too: the
+// first lets new output move a view at the bottom, the second is the ask
+// editor's send chord.
 // ── Pure Turn-Rail helpers (extracted for isolated testability) ─────────────
 const TURN_POP_PAD_Y = 88;
 
@@ -157,11 +159,14 @@ function fisheyeWindow(userTurns, hoverTurn) {
   return slice;
 }
 
-function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, onAskAnswer, onAskDialogAnswer, onConfirmAsk, onCancelAsk, onGrantApproval, onStopRetry, hasProjectPath, onInspectSubagent, onOpenFile, foldModes, collapseAfter, collapseOverrides, onToggleCollapse }) {
+function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, onAskAnswer, onAskDialogAnswer, onConfirmAsk, onCancelAsk, onGrantApproval, onStopRetry, hasProjectPath, onInspectSubagent, onOpenFile, onPreviewFile, projectRoot, foldModes, collapseAfter, collapseOverrides, onToggleCollapse, followOutput = true, submitKey = "enter" }) {
   const scrollRef   = React.useRef(null);
   const pinnedRef   = React.useRef(true);   // assume start pinned to bottom
   const prevTopRef  = React.useRef(0);
   const lastIdRef   = React.useRef(null);
+  const renderedRef = React.useRef(false); // first transcript effect done
+  const followRef   = React.useRef(followOutput);
+  followRef.current = followOutput;
   // Mirrors pinnedRef into render so the "Jump to latest" button can show —
   // scroll position itself must not force a re-render on every wheel tick.
   const [showJump, setShowJump] = React.useState(false);
@@ -237,21 +242,26 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
     setPinned(true);
   };
 
-  // Auto-scroll only while pinned. A new message block (tool card, new
-  // assistant turn, …) during a run must NOT itself force a jump — that
-  // was issue #20: every streamed update snapped the view to the bottom
-  // even while the user was reading history. Sending a new prompt
-  // explicitly re-pins, and so does the transcript being reset to empty
-  // (/new, a profile switch respawning the tab, or the tab itself being
-  // torn down) — none of those change `activeSessionId`, so the `key`
+  // Auto-scroll only while pinned and following output. A new message
+  // block (tool card, new assistant turn, …) during a run must NOT itself
+  // force a jump — that was issue #20: every streamed update snapped the
+  // view to the bottom even while the user was reading history. Sending a
+  // new prompt explicitly re-pins, and so does the transcript being reset
+  // to empty (/new, a profile switch respawning the tab, or the tab itself
+  // being torn down) — none of those change `activeSessionId`, so the `key`
   // remount on tab switch (app-live.jsx) doesn't reach them, and a leftover
   // unpinned state would otherwise strand the button over an empty chat.
+  // The first render (that remount) also opens on the latest line. With
+  // `followOutput` off nothing else scrolls (app/scroll-pin.js afterOutput).
   React.useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    if (!pinnedRef.current && _CV_shouldRepin(lastIdRef.current, messages)) setPinned(true);
+    const repin = !renderedRef.current || _CV_shouldRepin(lastIdRef.current, messages);
+    renderedRef.current = true;
     lastIdRef.current = messages[messages.length - 1]?._id ?? null;
-    if (pinnedRef.current) stickToBottom(el);
+    const next = _CV_afterOutput({ pinned: pinnedRef.current, follow: followRef.current, repin }, el);
+    if (next.pinned !== pinnedRef.current) setPinned(next.pinned);
+    if (next.stick) stickToBottom(el);
     syncActiveTurn(el);
   }, [messages, syncActiveTurn]);
 
@@ -359,8 +369,8 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
             if (m.kind === "goal")    return <_CV_GoalRow         key={m._id ?? i} idx={i} highlighted={hl} msg={m} />;
             if (m.kind === "approval") return <_CV_ApprovalRow    key={m._id ?? i} idx={i} highlighted={hl} msg={m} />;
             if (m.kind === "tool")    return <_CV_ToolCard_M      key={m._id ?? i} idx={i} highlighted={hl} msg={m} onInspectSubagent={onInspectSubagent}
-              onOpenFile={onOpenFile} collapsed={collapsed[m._id]} onToggleCollapse={onToggleCollapse} />;
-            if (m.kind === "ask")     return <_CV_AskBubble_M     key={m._id ?? i} idx={i} highlighted={hl} msg={m} onAnswer={onAskAnswer} onAnswerDialog={onAskDialogAnswer} onConfirm={onConfirmAsk} onCancelAsk={onCancelAsk} onGrant={onGrantApproval} hasProjectPath={hasProjectPath} />;
+              onOpenFile={onOpenFile} onPreviewFile={onPreviewFile} projectRoot={projectRoot} collapsed={collapsed[m._id]} onToggleCollapse={onToggleCollapse} />;
+            if (m.kind === "ask")     return <_CV_AskBubble_M     key={m._id ?? i} idx={i} highlighted={hl} msg={m} onAnswer={onAskAnswer} onAnswerDialog={onAskDialogAnswer} onConfirm={onConfirmAsk} onCancelAsk={onCancelAsk} onGrant={onGrantApproval} hasProjectPath={hasProjectPath} submitKey={submitKey} />;
             return <_CV_AssistantBubble_M key={m._id ?? i} idx={i} highlighted={hl} msg={m}
               annotable={i === lastAsstIdx}
               annotations={annotations}

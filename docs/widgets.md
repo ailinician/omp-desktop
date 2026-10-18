@@ -14,7 +14,7 @@ Internals (scheduler, IPC, invariants) are in [`architecture/widgets.md`](archit
    chmod +x ~/.omp-desktop/widgets/*
    ```
 
-2. Copy `examples/widgets/widgets.example.json` to `<app config>/widgets.json`. The path is shown under Tweaks → Rail, in the `plugins` row:
+2. Copy `examples/widgets/widgets.example.json` to `<app config>/widgets.json`. The path is shown under Settings → Rail, in the `Plugin config` row:
 
    | OS | `<app config>` |
    |---|---|
@@ -30,7 +30,7 @@ Internals (scheduler, IPC, invariants) are in [`architecture/widgets.md`](archit
    ] }
    ```
 
-3. Click "reload widgets" in the same Tweaks row. An approval card for "Hello" appears in the rail. It lists the exact command. Check it, then click **Approve**.
+3. Click "Reload widgets" in the same Settings row. An approval card for "Hello" appears in the rail. It lists the exact command. Check it, then click **Approve**.
 4. The card runs and shows the context it was given. From now on it refreshes on its own (see [When a plugin runs](#when-a-plugin-runs)).
 
 A ten-line shell script works the same way:
@@ -50,13 +50,13 @@ PY
 Widget cards sit in the ambient rail **between the Subagents card and the Minimap**, in this order:
 
 1. Error cards about `widgets.json` itself.
-2. **Approval cards**, in `widgets.json` order: one for every enabled plugin that is not approved yet, or that changed since you approved it. They show in every tab, whatever the plugin's `match` says, so you can approve a plugin before you open a project it applies to. An approval card whose Tweaks toggle is off is hidden too.
+2. **Approval cards**, in `widgets.json` order: one for every enabled plugin that is not approved yet, or that changed since you approved it. They show in every tab, whatever the plugin's `match` says, so you can approve a plugin before you open a project it applies to. An approval card whose Settings toggle is off is hidden too.
 3. **Result cards**, in `widgets.json` order, for the approved plugins that apply to the active tab (their `match` fits its project and remote). A card shows as idle until its first run.
 4. **omp extension cards** of the active tab (see [omp extension widgets](#omp-extension-widgets)): one card for the extensions' status lines, then one per widget, marked `extension`.
 
 A disabled plugin (`"enabled": false`) gets no card.
 
-Tweaks → Rail has one toggle per enabled plugin, next to the toggles for the built-in cards (`showContext`, `showRadar`, `showSubagents`, `showMinimap`). A plugin's toggle is stored as the tweak `widget:plugin:<id>`, so the choice survives restarts (toggles saved by earlier builds under `widget:<id>` are not carried over). **A hidden card never runs.** The same goes for the whole rail: while the rail is hidden (focus layout, or the conversation tree is open), no plugin starts. Closing the rail with its × button stays available even when every card is hidden.
+Settings → Rail has one toggle per enabled plugin, under the toggles for the built-in cards (`showContext`, `showRadar`, `showSubagents`, `showMinimap`). A plugin's toggle is stored as the tweak `widget:plugin:<id>`, so the choice survives restarts (toggles saved by earlier builds under `widget:<id>` are not carried over). **A hidden card never runs.** The same goes for the whole rail: while the rail is hidden (focus layout, or the conversation tree is open), no plugin starts. Closing the rail with its × button stays available even when every card is hidden.
 
 ## Config reference
 
@@ -84,14 +84,14 @@ Tweaks → Rail has one toggle per enabled plugin, next to the toggles for the b
 | Field | Required | Meaning |
 |---|---|---|
 | `version` | yes | Must be `1`. Anything else rejects the whole file: one error card, no plugin runs. |
-| `id` | yes | `[a-z0-9-]{1,32}`, unique. Also names the plugin's Tweaks toggle (`widget:plugin:<id>`) and its approval. |
+| `id` | yes | `[a-z0-9-]{1,32}`, unique. Also names the plugin's Settings toggle (`widget:plugin:<id>`) and its approval. |
 | `title` | no | Shown in the card head. Defaults to `id`. |
 | `command` | yes | An argv array. Element 0 is either a bare program name (looked up on `PATH`) or an absolute path. A relative path such as `./x` or `bin/x` is rejected, because the working directory is the untrusted project. There is no shell. A leading `~/` in any element is expanded to your home directory (`$HOME`, or `%USERPROFILE%` on Windows); `~user` and a bare `~` are left as they are. If there is no home directory, the entry is reported as an error. |
 | `match` | no | Every key is optional, and every key you give must match. `path` matches when the project path starts with this prefix, on a directory boundary (`~/` is expanded). `remote` matches when the default remote's fetch URL contains this substring. Without `match`, the plugin applies to every project. Typical use: work widgets under `~/GIT/work`, personal ones under `~/GIT/private`. |
 | `triggers` | no | Any of `activate`, `turn_end` and `branch`. All three are the default; `[]` means the plugin runs only from its refresh button (and `intervalMs`). The refresh button (`manual`) always works, so listing `manual` is allowed but changes nothing. `interval` is not accepted here: set `intervalMs` instead. |
 | `timeoutMs` | no | Default 10000, clamped to 1000..60000. |
 | `intervalMs` | no | Periodic refresh. Absent or `0` means none. Clamped to 15000..3600000 (15 s to 1 h). |
-| `enabled` | no | Default `true`. A disabled plugin is never offered for approval and never runs, and it has no Tweaks toggle. |
+| `enabled` | no | Default `true`. A disabled plugin is never offered for approval and never runs, and it has no Settings toggle. |
 | `scope` | no | `"tab"` (default) or `"global"`; anything else rejects the entry. A `tab` plugin keeps one result per tab. A `global` plugin keeps one result for the whole app, computed with the active tab's context. |
 
 How the file is read:
@@ -113,6 +113,16 @@ A plugin never runs until you approve it. Approving pins the plugin's **fingerpr
 The rail shows an approval card for each enabled plugin whose fingerprint is not approved, regardless of `match`. The card lists the command, one argument per line, each in double quotes with line breaks, control characters and invisible or direction-changing Unicode characters escaped (`\n`, `\u202e`), so what you read is exactly what will run. If the plugin was approved before under a different fingerprint, the card says that it changed since you approved it.
 
 Before **every** run, the desktop recomputes the fingerprint. If anything changed (the command in `widgets.json` after a reload, or the script file on disk), nothing is started. The card shows `plugin changed since it was approved — approve it again`, and the approval card comes back.
+
+The run executes exactly what that check read. Each file the fingerprint hashes is run from a verified copy in a private folder (`widget-runs/store/<fingerprint>/` in the app's cache directory), not from its original path. The first run after an approval copies each file while hashing it and keeps the copies only if they hash to the approved fingerprint. Later runs reuse those copies, but never on trust: while the originals are hashed again, each copy is compared with its original byte for byte, and the folder must hold nothing but the copies. A copy that differs or is missing, or anything else found in the folder, makes the desktop build it again. A script replaced between the check and the start therefore cannot run under the old approval. If the copies cannot be stored, the run uses its fresh ones once and deletes them afterwards. Copies of fingerprints that are no longer approved are deleted at the next start of the app.
+
+A copy keeps its file name, so an interpreter that goes by the extension (`.mjs`, `.ps1`) behaves the same, and on macOS and Linux a file executable by you stays executable by you. Its path stays the same from run to run, so tools that cache per script path (uv's environments for scripts with inline metadata) keep their cache. It sits in another folder, though: anything named by absolute path that loads files next to itself does not find them. That covers a widget script doing `$(dirname "$0")/lib.sh` or a relative `import`, and also launcher scripts such as npm's `npx.cmd` shim or a symlinked `/usr/local/bin/npx`. Keep a widget in one file, and start launchers by their bare name (looked up on `PATH`, not copied). Not copied, and started from their own path:
+
+- the program itself (`command[0]`) when it is a native executable for your system, which loads its libraries from its own folder: on Windows a path ending in `.exe`, elsewhere an ELF or Mach-O binary. Anything else named first is copied, including a `.bat`/`.cmd` and, on Windows, a program named without `.exe`. So is any file passed as an argument, even a native one, such as the `.dll` in `["dotnet", "…/app.dll"]`;
+- a file larger than 8 MiB;
+- a path that is not a regular file when the run starts, such as a folder (`uv run --directory …`) or a missing file.
+
+If the app's cache directory cannot be determined, or a script cannot be read or copied, the run fails with that error instead of falling back to the original file.
 
 Approvals are stored in `<app config>/widget-approvals.json`, as `{ "version": 1, "approved": { "<id>": "<fingerprint>" } }`. To revoke one, delete its entry (keep the JSON valid), or the file, and click "reload widgets". Approving writes only that plugin's entry into the file as it is on disk, so a revocation you have not reloaded yet stays revoked. If the file exists but is not valid JSON or has another `version`, no plugin is approved, and approving is refused until you fix or delete it.
 
@@ -297,10 +307,11 @@ Neither runs until you approve the new fingerprint in the rail. This matters bec
 - **Files the fingerprint does not cover.**
   - A program resolved via `PATH` (`bash`, `python3`, `node`) is hashed by name only.
   - So is anything the script loads by itself: modules, sourced files, config files, or packages fetched by `uv`/`npx`.
-  - A file larger than 8 MiB is covered only by its size and modification time.
+  - A file larger than 8 MiB is covered only by its size and modification time, and runs from its own path.
+  - A native program named as `command[0]` by absolute path is checked before each run but started from its own path, where it also loads its libraries; scripts and arguments run from the verified copies.
 
-  Keep a widget self-contained in one script file, and use absolute interpreter paths if you want them pinned.
-- **The approvals file.** `widget-approvals.json` is an ordinary user file, like `approval-rules/`. Anything that can write arbitrary files as you can edit it, and it could just as well edit `~/.bashrc`. Approval does not defend against that level of access.
+  Keep a widget self-contained in one script file, and use absolute paths to native interpreters if you want them pinned.
+- **The approvals file and the script copies.** `widget-approvals.json` is an ordinary user file, like `approval-rules/`, and so are the verified copies under `widget-runs/` in the app's cache directory. Anything that can write arbitrary files as you can edit them, and it could just as well edit `~/.bashrc`. Approval does not defend against that level of access: something that changes a copy, or puts a file beside it, in the moment between the check and the plugin's start would run its own code.
 - **The webview.** Approving goes through the desktop window (`widgets_approve`), as answering tool approvals does. A compromised webview could approve a plugin, but it can already send prompts and answer tool approvals, so this adds no new power.
 - **Hostile project contents.** The working directory is the project, which you should treat as untrusted: a cloned repo can contain any file. Make sure nothing from it is imported or executed:
   - **Python:** run with `python3 -I`. It ignores the working directory, the `PYTHON*` variables and the user site-packages. `python3 -c` and `python3 -` otherwise put the working directory on `sys.path`, so a repo's `json.py` would run. With `-I`, neither the working directory nor the script's directory is put on the path.
@@ -335,7 +346,7 @@ Put them in `~/.omp-desktop/widgets/`, one executable per widget, and reference 
 `examples/widgets/` contains:
 
 - `widgets.example.json`: wires all four examples with `~/.omp-desktop/widgets/…` paths. `git` and `hello` are enabled; `node` and `mcp` are disabled until you set them to `true`.
-- `git.sh`: branch (or `detached @ <sha>`), upstream, changed files, ahead/behind, and the unpushed commits; with no upstream, the recent commits instead. Click `+` on a commit to insert `<sha> <subject>`. Needs `bash`, `git` and `python3` (for JSON escaping). It runs git with `GIT_OPTIONAL_LOCKS=0`, so it never takes `.git/index.lock` from under the agent's own `git add`/`commit`.
+- `git.sh`: branch (or `detached @ <sha>`), upstream, changed files, ahead/behind, and the unpushed commits; with no upstream, the recent commits instead. Click `+` on a commit to insert `<sha> <subject>`. Needs `bash`, `git` ≥ 2.26 and `python3` (for JSON escaping). It runs git with `GIT_OPTIONAL_LOCKS=0`, so it never takes `.git/index.lock` from under the agent's own `git add`/`commit`. It never runs a program the project's own git config (`.git/config`, the files it includes, `config.worktree`) names: no `core.fsmonitor`, every filter driver that config defines or overrides is emptied for the run (filters only your global or system config defines, such as git-lfs, keep working), commit signatures are not verified, and a partial clone does not fetch (`GIT_NO_LAZY_FETCH`, git ≥ 2.44), so one missing objects the widget needs shows an error instead. A submodule counts as changed only when it has a different commit checked out, since checking its files would use the submodule's own filters.
 - `hello.py`: Python 3, standard library only. Echoes the context as key/value rows; the remote is shown without its password, because the desktop already removed it.
 - `hello.mjs`: the same in Node ≥ 18.
 - `mcp-tool.py`: calls one MCP tool over stdio and shows its text result. Started with `uv run --directory ~/.omp-desktop/widgets --no-project --no-config --with mcp`, and it starts the MCP server (`npx`) in your home directory, so nothing from the project is used.
@@ -355,7 +366,7 @@ Both cards carry an `extension` chip and the accent border. They have no refresh
 
 **Per tab.** Each tab shows what its own omp process published, including what a background tab published while you were elsewhere. A tab's statuses and widgets stay through `/new`, branch and fork, as in omp's terminal UI (extensions that care refresh them on `session_switch`, and on `session_branch` for a branch), and go away when its omp process ends or is restarted (profile switch).
 
-**Hiding.** Tweaks → Rail lists `extension: status lines` and `extension: <key>` for what the active tab has published, stored as `widget:ext-status` and `widget:ext:<key>` next to the plugins' `widget:plugin:<id>`. A hidden card's updates are still kept, so it comes back current.
+**Hiding.** Settings → Rail lists `extension: status lines` and `extension: <key>` for what the active tab has published, stored as `widget:ext-status` and `widget:ext:<key>` next to the plugins' `widget:plugin:<id>`. A hidden card's updates are still kept, so it comes back current.
 
 **Trust.** The code runs inside omp, with the trust you already give an installed omp extension; the desktop runs none of it and needs no approval. It only displays the text.
 

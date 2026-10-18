@@ -13,14 +13,16 @@
 //!
 //! Approval is enforced here, not in the webview: the scheduler only starts
 //! plugins whose current fingerprint is approved, and every worker recomputes
-//! the fingerprint right before spawning. A mismatch (script edited after
-//! approval) spawns nothing, reports an error outcome, marks the plugin
-//! unapproved and re-emits `widgets://config`. See `trust.rs` for the threat
-//! model.
+//! the fingerprint right before spawning and runs the verified copies of the
+//! plugin's scripts that hash to it (`snapshot.rs`), never the checked
+//! script paths. A mismatch (script edited after approval) spawns nothing,
+//! reports an error outcome, marks the plugin unapproved and re-emits
+//! `widgets://config`. See `trust.rs` for the threat model.
 //!
 //! The config is read once at startup and on `widgets_reload` only.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
@@ -39,6 +41,7 @@ use crate::widgets::run;
 use crate::widgets::schedule::{
     Action, Event, Outcome, Phase, RunKey, RunState, Scheduler, SessionCtx, View,
 };
+use crate::widgets::snapshot::{Prepared, ScriptStore};
 use crate::widgets::trust::{self, Approval, ApprovalStore};
 
 pub const CONFIG_EVENT: &str = "widgets://config";
@@ -50,7 +53,6 @@ pub const ACTIVE_EVENT: &str = "widgets://active";
 const MAX_SESSION_ID_LEN: usize = 128;
 /// `widgets_set_view` keeps at most this many hidden plugin ids.
 const MAX_HIDDEN_IDS: usize = 64;
-const FINGERPRINT_HEX_LEN: usize = 64;
 
 pub const CHANGED_ERROR: &str = "plugin changed since it was approved — approve it again";
 const STOPPED_ERROR: &str = "widgets are shutting down";
@@ -77,9 +79,11 @@ impl HostEmitter for tauri::AppHandle {
 /// How sessions are resolved and plugins executed.
 pub trait PluginRunner: Send + Sync + 'static {
     fn session_ctx(&self, project: Option<&Path>) -> SessionCtx;
+    /// Run `entry` as `argv`, the snapshot of its command the worker checked.
     fn run(
         &self,
         entry: &PluginEntry,
+        argv: &[OsString],
         ctx: &PluginContext,
         on_spawn: impl FnOnce(&Arc<ProcessSupervisor>),
     ) -> Outcome;
@@ -96,10 +100,11 @@ impl PluginRunner for ProcessRunner {
     fn run(
         &self,
         entry: &PluginEntry,
+        argv: &[OsString],
         ctx: &PluginContext,
         on_spawn: impl FnOnce(&Arc<ProcessSupervisor>),
     ) -> Outcome {
-        run::run_plugin(entry, ctx, on_spawn)
+        run::run_plugin(entry, argv, ctx, on_spawn)
     }
 }
 
@@ -152,7 +157,7 @@ impl Serialize for PluginView {
 }
 
 /// The active session and the plugins applicable to it (enabled, approved,
-/// matching; visibility and hidden toggles ignored) — what the Tweaks panel
+/// matching; visibility and hidden toggles ignored) — what the Settings page
 /// offers toggles for. Emitted as `widgets://active` whenever it changes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -222,13 +227,6 @@ fn sanitize_view(args: ViewArgs) -> View {
     }
 }
 
-fn valid_fingerprint(fp: &str) -> bool {
-    fp.len() == FINGERPRINT_HEX_LEN
-        && fp
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
 // ── shared state ────────────────────────────────────────────────────────────
 
 /// A run between `Start` and its worker's return. `supervisor` is set once
@@ -249,6 +247,8 @@ struct Snapshot {
 struct Shared<E, R> {
     emitter: E,
     runner: R,
+    /// The verified copies of plugin scripts that runs execute.
+    scripts: ScriptStore,
     registry: Mutex<HashMap<RunKey, Slot>>,
     snapshot: Mutex<Snapshot>,
     /// Set by `kill_all`: nothing is spawned afterwards.
@@ -352,23 +352,29 @@ impl WidgetHost {
         app: tauri::AppHandle,
         config_path: Option<PathBuf>,
         approvals_path: Option<PathBuf>,
+        runs_dir: Option<PathBuf>,
     ) -> Self {
-        Self::new(app, ProcessRunner, config_path, approvals_path)
+        Self::new(app, ProcessRunner, config_path, approvals_path, runs_dir)
     }
 }
 
 impl<E: HostEmitter, R: PluginRunner> WidgetHost<E, R> {
     /// Start the scheduler thread, which loads the config first. `None`
-    /// paths (no app config dir) leave widgets disabled with a `fatal`.
+    /// paths (no app config dir) leave widgets disabled with a `fatal`; no
+    /// `runs_dir` (no app cache dir) fails every run that needs a script
+    /// copy, since a plugin's scripts run only from verified copies
+    /// (`snapshot.rs`).
     pub fn new(
         emitter: E,
         runner: R,
         config_path: Option<PathBuf>,
         approvals_path: Option<PathBuf>,
+        runs_dir: Option<PathBuf>,
     ) -> Self {
         let shared = Arc::new(Shared {
             emitter,
             runner,
+            scripts: ScriptStore::new(runs_dir),
             registry: Mutex::new(HashMap::new()),
             snapshot: Mutex::new(Snapshot::default()),
             stopped: AtomicBool::new(false),
@@ -436,7 +442,7 @@ impl<E: HostEmitter, R: PluginRunner> WidgetHost<E, R> {
         if !config::id_ok(plugin_id) {
             return Err(format!("invalid widget plugin id \"{plugin_id}\""));
         }
-        if !valid_fingerprint(fingerprint) {
+        if !trust::is_fingerprint(fingerprint) {
             return Err("invalid widget fingerprint".to_owned());
         }
         let (reply, rx) = mpsc::sync_channel(1);
@@ -558,6 +564,10 @@ fn run_view(key: &RunKey, state: &RunState) -> RunView {
 
 impl<E: HostEmitter, R: PluginRunner> Core<E, R> {
     fn run(mut self, rx: &Receiver<Msg>) {
+        // Before any run: what a killed earlier app left behind, and the
+        // script copies of fingerprints no longer approved.
+        let approvals = &self.approvals;
+        self.shared.scripts.prune(|fp| approvals.holds(fp));
         self.load_config();
         self.sync_active();
         loop {
@@ -863,7 +873,8 @@ impl<E: HostEmitter, R: PluginRunner> Core<E, R> {
     }
 }
 
-/// One run on its worker thread: fingerprint check, spawn, report.
+/// One run on its worker thread: fingerprint check against the verified
+/// script copies, spawn of those copies, report.
 fn work<E: HostEmitter, R: PluginRunner>(shared: &Shared<E, R>, tx: &Sender<Msg>, job: Job) {
     let Job {
         key,
@@ -872,24 +883,28 @@ fn work<E: HostEmitter, R: PluginRunner>(shared: &Shared<E, R>, tx: &Sender<Msg>
         approved,
         ctx,
     } = job;
-    let current = trust::fingerprint(&entry);
-    let changed = current != approved;
-    let outcome = if changed {
-        error_outcome(CHANGED_ERROR)
-    } else if shared.is_live(&key, seq) {
-        shared.runner.run(&entry, &ctx, |supervisor| {
-            shared.register(&key, seq, supervisor);
-        })
-    } else {
-        error_outcome(CANCELLED_ERROR)
+    let mut changed = None;
+    let outcome = match shared.scripts.prepare(&entry, &approved) {
+        Err(e) => error_outcome(e),
+        Ok(Prepared::Changed(fingerprint)) => {
+            changed = Some(fingerprint);
+            error_outcome(CHANGED_ERROR)
+        }
+        // `run` lives to the end of the arm: it may own a scratch directory.
+        Ok(Prepared::Ready(run)) if shared.is_live(&key, seq) => {
+            shared.runner.run(&entry, &run.argv, &ctx, |supervisor| {
+                shared.register(&key, seq, supervisor);
+            })
+        }
+        Ok(Prepared::Ready(_)) => error_outcome(CANCELLED_ERROR),
     };
     shared.release(&key, seq);
     let _ = tx.send(Msg::Event(Event::Finished { key, seq, outcome }));
-    if changed {
+    if let Some(fingerprint) = changed {
         let _ = tx.send(Msg::FingerprintChanged {
             // The message owns the id; the entry stays shared.
             plugin_id: entry.id.clone(),
-            fingerprint: current,
+            fingerprint,
         });
     }
 }
@@ -1005,6 +1020,7 @@ mod tests {
                 ProcessRunner,
                 Some(self.path("widgets.json")),
                 Some(self.path("widget-approvals.json")),
+                Some(self.path("widget-runs")),
             );
             (host, capture)
         }
@@ -1145,7 +1161,7 @@ mod tests {
     #[test]
     fn missing_config_dir_is_fatal_and_approves_nothing() {
         let capture = Arc::new(Capture::default());
-        let host: TestHost = WidgetHost::new(Arc::clone(&capture), ProcessRunner, None, None);
+        let host: TestHost = WidgetHost::new(Arc::clone(&capture), ProcessRunner, None, None, None);
         let snap = host.reload();
         assert_eq!(snap.config.fatal.as_deref(), Some(NO_CONFIG_DIR));
         assert!(snap.config.plugins.is_empty() && snap.config.config_path.is_none());

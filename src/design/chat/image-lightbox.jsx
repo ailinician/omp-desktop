@@ -8,9 +8,13 @@
      index    — image shown; onIndex(i) switches it
      onClose  — called once the close animation has finished
      thumbFor — i → the thumbnail element to fly from / back into
+
+   Also ImageThumbs (a message's thumbnail strip, opening the viewer) and
+   useModalLayer (the modal behaviour it shares with chat/file-preview.jsx).
    ═════════════════════════════════════════════════════════════════════ */
 const { Icon: _LB_Icon } = window;
 const { fitRect: _LB_fitRect, flipTransform: _LB_flipTransform, stepIndex: _LB_stepIndex } = window.OMP_LIGHTBOX;
+const { toDataUrl: _LB_toDataUrl } = window.OMP_IMAGES;
 
 const _LB_EASE = "cubic-bezier(0.22, 1, 0.36, 1)"; // --ease-out
 const _LB_OPEN_MS = 320;
@@ -22,6 +26,25 @@ function _LB_reducedMotion() {
 
 function _LB_viewport() {
   return { w: window.innerWidth, h: window.innerHeight };
+}
+
+// Modal: the app behind (#root — a modal renders in a portal on <body>) is
+// inert, so Tab can't reach, and Enter can't press, what opened it and stack
+// a second one. `scrimRef` takes focus; it goes back where it was on close.
+function useModalLayer(scrimRef) {
+  React.useEffect(() => {
+    const prev = document.activeElement;
+    const root = document.getElementById("root");
+    if (root) root.inert = true;
+    scrimRef.current?.focus();
+    return () => {
+      if (root) root.inert = false;
+      // preventScroll: the opener may have scrolled out of view meanwhile
+      // (a streaming reply), and scrolling back to it would unpin the chat
+      // from the bottom (app/scroll-pin.js).
+      if (prev?.isConnected) prev.focus({ preventScroll: true });
+    };
+  }, [scrimRef]);
 }
 
 function ImageLightbox({ images, index, onIndex, onClose, thumbFor }) {
@@ -115,22 +138,7 @@ function ImageLightbox({ images, index, onIndex, onClose, thumbFor }) {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  // Modal: the app behind (#root — this renders in a portal on <body>) is
-  // inert, so Tab can't reach, and Enter can't press, another thumbnail
-  // and stack a second viewer. Focus goes back where it was on close.
-  React.useEffect(() => {
-    const prev = document.activeElement;
-    const root = document.getElementById("root");
-    if (root) root.inert = true;
-    scrimRef.current?.focus();
-    return () => {
-      if (root) root.inert = false;
-      // preventScroll: the thumbnail may have scrolled out of view while the
-      // viewer was open (a streaming reply), and scrolling back to it would
-      // unpin the chat from the bottom (app/scroll-pin.js).
-      if (prev?.isConnected) prev.focus({ preventScroll: true });
-    };
-  }, []);
+  useModalLayer(scrimRef);
 
   const imgStyle = rect
     ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
@@ -175,4 +183,49 @@ function ImageLightbox({ images, index, onIndex, onClose, thumbFor }) {
   );
 }
 
-window.ImageLightbox = ImageLightbox;
+// A message's images (`{ data, mimeType }`) as a strip of thumbnails in a
+// `className` box; a click opens the viewer on that one (issue #25).
+function ImageThumbs({ images, className, alt }) {
+  // Index of the image shown enlarged, or null.
+  const [openIdx, setOpenIdx] = React.useState(null);
+  const thumbsRef = React.useRef([]);
+  const srcs = React.useMemo(() => (images ?? []).map(_LB_toDataUrl), [images]);
+  const thumbFor = React.useCallback((i) => thumbsRef.current[i] ?? null, []);
+  const closeViewer = React.useCallback(() => setOpenIdx(null), []);
+  if (srcs.length === 0) return null;
+  return (
+    <React.Fragment>
+      <div className={className}>
+        {srcs.map((src, i) => (
+          <button
+            key={i}
+            type="button"
+            className="user-image-btn"
+            title="View image"
+            onClick={() => setOpenIdx(i)}
+          >
+            {/* Hidden, not removed, while it is the one enlarged: the
+                viewer flies out of and back into its rect. */}
+            <img
+              ref={(el) => { thumbsRef.current[i] = el; }}
+              className={`user-image${openIdx === i ? " is-lifted" : ""}`}
+              src={src}
+              alt={alt}
+            />
+          </button>
+        ))}
+      </div>
+      {openIdx != null && openIdx < srcs.length && (
+        <ImageLightbox
+          images={srcs}
+          index={openIdx}
+          onIndex={setOpenIdx}
+          onClose={closeViewer}
+          thumbFor={thumbFor}
+        />
+      )}
+    </React.Fragment>
+  );
+}
+
+Object.assign(window, { ImageLightbox, ImageThumbs, useModalLayer });

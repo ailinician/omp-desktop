@@ -40,7 +40,7 @@ function TreeSummary({ model }) {
 
 function ConversationTree({
   model, currentFile, error, loading, treeKey, now, since, streaming,
-  onRefresh, onClose, onBranch, onFork, onOpenFile,
+  onRefresh, onClose, onBranch, onFork, onOpenFile, onJumpToPrompt,
 }) {
   const [selectedId, setSelectedId] = React.useState(null);
   React.useEffect(() => { setSelectedId(null); }, [treeKey]);
@@ -98,7 +98,7 @@ function ConversationTree({
           ? <_CT_Compaction key={row.id} row={row} now={now} />
           : <_CT_Row key={row.id} row={row} model={model} now={now} since={since}
               selected={selected?.id === row.id} currentFile={currentFile}
-              onSelect={setSelectedId} onOpenTip={openTip} />)}
+              onSelect={id => { setSelectedId(id); onJumpToPrompt?.(row); }} onOpenTip={openTip} />)}
       </div>
       {model && selected && (
         <_CT_Detail key={selected.id} row={selected} tips={model.tips} now={now} since={since}

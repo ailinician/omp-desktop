@@ -32,7 +32,7 @@ pub const MAX_LINES: usize = 50;
 /// those first and then shows at most 500 characters, so any line it can
 /// show in full fits.
 pub const MAX_TEXT_BYTES: usize = 4096;
-/// Longer keys are ignored: a key is a card title and a Tweaks key.
+/// Longer keys are ignored: a key is a card title and a tweak key.
 pub const MAX_KEY_BYTES: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

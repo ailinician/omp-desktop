@@ -11,6 +11,13 @@ const {
   normalizePaste, shouldCollapsePaste, collapsePaste, pastesIn, expandPastes, inlinePaste,
 } = window.OMP_SESSION_UI;
 const { restoredDraft: restoredQueueDraft } = window.OMP_QUEUE;
+// The footer's send/newline chord labels per `submitKey` tweak
+// (constants.js isSubmitKey decides what actually sends).
+const _CMP_IS_MAC = window.OMP_KEYMAP?.detectMac?.() ?? false;
+const _CMP_SEND_HINTS = {
+  "enter":      { send: _CMP_IS_MAC ? "↵" : "Enter", newline: _CMP_IS_MAC ? "⇧↵" : "Shift+Enter" },
+  "ctrl+enter": { send: _CMP_IS_MAC ? "⌘↵" : "Ctrl+Enter", newline: _CMP_IS_MAC ? "↵" : "Enter" },
+};
 
 // Thin wrappers around the shared `OMP_KEYMAP.hintFor`/`hintKeyFor` (display
 // logic lives there so chrome.jsx's ⌘K/history hints can reuse it too,
@@ -28,7 +35,9 @@ function hintKeyFor(actionId, fallback) {
 }
 
 // ── The composer (input + plan/steer modes + send) ────────────────────
-function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow, browserChips = [], onRemoveBrowserChip, onBrowserChipClick }) {
+// `submitKey` ("enter" | "ctrl+enter") and `pasteCollapseLines` come from the
+// tweaks (Settings › Composer); the defaults match TWEAK_DEFAULTS.
+function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow, browserChips = [], onRemoveBrowserChip, onBrowserChipClick, submitKey = "enter", pasteCollapseLines = 5 }) {
   // Drafts are per tab (issue #28). The composer stays mounted across tab
   // switches and keeps one draft per session id (app/session-ui.js
   // DRAFT_IDLE): text, pending image attachments (sent alongside the next
@@ -475,7 +484,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
       // works this resolves to zero files and is a no-op.
       imageFilesFromClipboardAsync().then((files) => { if (files.length > 0) addFiles(files); });
     }
-    if (!shouldCollapsePaste(raw)) return; // short — let browser handle normally
+    if (!shouldCollapsePaste(raw, pasteCollapseLines)) return; // short — let browser handle normally
     e.preventDefault();
     const ta    = taRef.current;
     const start = ta ? ta.selectionStart : text.length;
@@ -495,6 +504,9 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
       if (e.key === "ArrowUp")    { e.preventDefault(); setActiveIdx(i => Math.max(i - 1, 0)); return; }
       if (e.key === "Escape")     { e.preventDefault(); if (midSlash) setSlashDismissedKey(slashKey); else setText(""); return; }
       if (e.key === "Tab")        { e.preventDefault(); setActiveIdx(i => (i + 1) % filtered.length); return; }
+      // A plain Enter runs the highlighted command whatever the send chord:
+      // it picks from the popup, it does not send a message.
+      if (isSubmitEnter(e) && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); send(); return; }
     }
     // Prompt-history recall (issues #16, #55) — only when neither popup owns
     // the arrows and no modifier is held (a modified arrow is a different
@@ -513,7 +525,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
       const eligible = dir < 0 ? H.caretOnFirstLine(text, start, end) : H.caretOnLastLine(text, start, end);
       // recallInDraft (app/session-ui.js) refuses a typed draft and drops a
       // recall position the text has drifted from (an edit, a lowered
-      // tweaks-panel limit) instead of trusting a stale index.
+      // Settings history limit) instead of trusting a stale index.
       const next = eligible ? recallInDraft(draft, promptHistory, dir, H.step) : null;
       if (next) {
         e.preventDefault();
@@ -526,15 +538,18 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
         return;
       }
     }
-    // followUp must be checked before the plain-Enter branch: `ctrl+enter` is
-    // a default followUp chord and `isSubmitEnter` would match it first.
+    // isSubmitKey (app/constants.js) owns the IME-composition guard and the
+    // `submitKey` chord. With "ctrl+enter" the send check runs first, as
+    // `ctrl+enter` is also a default followUp chord; with "enter" followUp
+    // goes first, since isSubmitKey's Enter would match `ctrl+enter` too.
+    const sendChord = isSubmitKey(e, submitKey);
+    if (sendChord && submitKey === "ctrl+enter") { e.preventDefault(); send(); return; }
     if (window.OMP_KEYMAP?.matches(e.nativeEvent ?? e, "app.message.followUp")) {
       e.preventDefault();
       if (onFollowUp) sendWith(onFollowUp, { followUp: true });
       return;
     }
-    // isSubmitEnter (app/constants.js) owns the IME-composition guard.
-    if (isSubmitEnter(e) && !e.shiftKey) { e.preventDefault(); send(); return; }
+    if (sendChord) { e.preventDefault(); send(); return; }
   };
 
   // Live keymap hints — computed once per render, reused across the
@@ -543,9 +558,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const bridgeKeyHint = hintKeyFor("desktop.commands.open", "K");
   const abortHint = hintFor("app.interrupt", "⎋");
   const cycleThinkingHint = hintFor("app.thinking.cycle", "⇧Tab");
-  const isMac = window.OMP_KEYMAP ? window.OMP_KEYMAP.detectMac() : false;
-  const enterKey = isMac ? "↵" : "Enter";
-  const newlineKey = isMac ? "⇧↵" : "Shift+Enter";
+  const sendHints = _CMP_SEND_HINTS[submitKey] ?? _CMP_SEND_HINTS.enter;
 
   return (
     <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}${dropActive ? " drop-on" : ""}`}
@@ -724,8 +737,8 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
         <span className="mono" style={{ color: "var(--fg-4)", fontSize: "var(--d-text-xs)" }}>
           {[
             ...(isStreaming && steerable
-              ? [goalMode ? `${enterKey} ${_t("start goal")}` : `${enterKey} ${_t("steer")}`]
-              : [goalMode ? `${enterKey} ${_t("start goal")}` : `${enterKey} ${_t("send")}`, `${newlineKey} ${_t("newline")}`]),
+              ? [goalMode ? `${sendHints.send} ${_t("start goal")}` : `${sendHints.send} ${_t("steer")}`]
+              : [goalMode ? `${sendHints.send} ${_t("start goal")}` : `${sendHints.send} ${_t("send")}`, `${sendHints.newline} ${_t("newline")}`]),
             // Dropped entirely when unbound rather than showing a keyless
             // "abort" segment that advertises a shortcut that isn't there.
             ...(abortHint ? [`${abortHint} ${_t("abort")}`] : []),

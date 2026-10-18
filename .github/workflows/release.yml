@@ -128,7 +128,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Fail in seconds, not after a full compile: with createUpdaterArtifacts
       # on, the bundler only errors on a missing key at the very end.
@@ -143,9 +143,9 @@ jobs:
           fi
 
       # ── Node (Tauri CLI is an npm dev-dep) ──────────────────────────────────
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '24'
           cache: npm
 
       # ── Rust ────────────────────────────────────────────────────────────────
@@ -257,7 +257,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # A draft is invisible to GitHub's by-tag release lookup; `gh` falls
       # back to searching drafts.

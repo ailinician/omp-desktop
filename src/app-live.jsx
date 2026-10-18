@@ -1,5 +1,5 @@
 /* ═════════════════════════════════════════════════════════════════════
-   app-live.jsx — live-wired root. Replaces design/app.jsx.
+   app-live.jsx — live-wired root.
 
    Session model: each tab owns one omp process. OMP_BRIDGE manages
    session lifecycle; the tab list and active session come from the
@@ -19,19 +19,20 @@
 
 const {
   Icon, ChatView, Composer, CommandBridge, WindowChrome, TabBar, SubagentPane, ProjectSidebar, EmptyWorkspace,
-  StatusBar, AmbientRail, ConversationTree, PlanKanban, HistoryModal, GitBrowser, ApprovalRulesPanel, UsageStatsPanel, PromptHistoryModal, UpdateModal, useTweaks,
-  TweaksPanel, TweakSection, TweakRow, TweakRadio, TweakToggle, TweakColor, TweakSlider, TweakButton,
+  StatusBar, AmbientRail, ConversationTree, PlanKanban, HistoryModal, GitBrowser, FilePreview, ApprovalRulesPanel, UsageStatsPanel, PromptHistoryModal, UpdateModal, useTweaks,
+  SettingsPage, ConfirmCloseDialog,
   useWidgets, WidgetCard, WidgetErrorCard, WidgetApprovalCard, WidgetBoundary,
   TWEAK_DEFAULTS, NULL_MODEL, EMPTY_PROJECT, DEFAULT_PROFILE_ID,
   INTENT_FRAMING, APPROVAL_PROMPT,
-  useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, useTerminal, TerminalPanels, TerminalTweaks, timeNow,
-  useKeymap, useKeymapDispatch, ShortcutsModal, useBrowser, BrowserDock, BrowserTweaks, MarkdownLinkContext: _AL_MdLinkCtx,
+  useBridgeSnapshot, useThemeEffect, useSubagentManager, useUpdater, useConversationTree, useGoalMode, useTerminal, TerminalPanels, timeNow,
+  useKeymap, useKeymapDispatch, useBrowser, BrowserDock, MarkdownLinkContext: _AL_MdLinkCtx,
+  usePaneWidths, ResizeHandle,
 } = window;
 const { routeSubmit: _routeSubmit } = window.OMP_SLASH;
-const { mergeIntoMessage: _mergeBrowserChips, browserCommand: _browserCommand } = window.OMP_BROWSER;
+const { mergeIntoMessage: _mergeBrowserChips, browserCommand: _browserCommand, MIN_WIDTH: _AL_BROWSER_MIN } = window.OMP_BROWSER;
 const { recentRows, groupKey, moveGroup, moveMember, shiftGroup } = window.OMP_PROJECT_NAV;
 const {
-  entryOf, updateEntry, pruneEntries,
+  entryOf, updateEntry, pruneEntries, seedEntries,
   PLAN_IDLE, togglePlan, enterPlan, approvePlan, annotatePlan, markPlanSent,
 } = window.OMP_SESSION_UI;
 const { NO_OVERRIDES: NO_COLLAPSE_OVERRIDES, foldModes: _foldModes, overridesForAll: _collapseOverridesForAll } = window.OMP_COLLAPSE;
@@ -39,6 +40,7 @@ const { tweakKey: _widgetTweakKey } = window.OMP_WIDGETS;
 const { EMPTY: _EXT_EMPTY, cards: _extCards, toggles: _extToggles } = window.OMP_EXT_WIDGETS;
 const { entryOf: _TERM_entryOf } = window.OMP_TERMINAL;
 const { absolutePath: _gitAbsolutePath, finishedEdits: _gitFinishedEdits } = window.OMP_GIT_BROWSER;
+const { linkClick: _fpLinkClick } = window.OMP_FILE_PREVIEW;
 
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
@@ -53,10 +55,18 @@ function App() {
   // Git browser: null, or { path, project } — the file it opens on (null =
   // the first changed file) and the project that path belongs to.
   const [gitOpen,     setGitOpen]     = React.useState(null);
+  // The file preview (issue #39): `{ key, target }`, `key` the tab it was
+  // opened in — it shows only while that tab is active.
+  const [preview,     setPreview]     = React.useState(null);
   const [rulesOpen,   setRulesOpen]   = React.useState(false);
   const [statsOpen,   setStatsOpen]   = React.useState(false);
   const [promptHistoryOpen, setPromptHistoryOpen] = React.useState(false);
-  const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
+  // The Settings app tab (#37; app/settings-tab.js): `{open, active,
+  // section}`. Not an omp tab: the active omp tab stays `activeSessionId`
+  // underneath while the page covers the stage.
+  const [stab, setStab] = React.useState(window.OMP_SETTINGS_TAB.initial);
+  // live.js's pending "close a working tab / quit?" question, or null.
+  const [closeConfirm, setCloseConfirm] = React.useState(null);
   const [planOpen,    setPlanOpen]    = React.useState(false);
   // The column beside the chat, per tab (`side` below): the ambient rail,
   // the conversation tree (prompt-cache navigator; design/conversation-tree.jsx,
@@ -73,11 +83,27 @@ function App() {
   // Cross-component highlight: hovering a minimap cell lights up the
   // matching chat bubble; clicking scrolls to it.
   const [hoveredMsgIdx, setHoveredMsgIdx] = React.useState(null);
+  const treeFlashRef = React.useRef(null);
+  React.useEffect(() => () => clearTimeout(treeFlashRef.current), []);
   const handleMinimapClick = (idx) => {
     const el = document.querySelector(`[data-msg-idx="${idx}"]`);
     el?.scrollIntoView({ block: "center", behavior: "smooth" });
   };
-
+  const handleTreeJump = (row) => {
+    if (!row || row.kind !== "prompt") return;
+    let idx = row.ts != null ? messages.findIndex(m => m.kind === "user" && m.ts === row.ts) : -1;
+    if (idx === -1 && row.inCurrent && row.text) {
+      const norm = row.text.replace(/\s+/g, " ").trim();
+      idx = messages.findIndex(m => m.kind === "user" && (m.text || "").replace(/\s+/g, " ").trim().startsWith(norm));
+    }
+    if (idx === -1) return;
+    const el = document.querySelector(`[data-msg-idx="${idx}"]`);
+    if (!el) return;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    setHoveredMsgIdx(idx);
+    clearTimeout(treeFlashRef.current);
+    treeFlashRef.current = setTimeout(() => setHoveredMsgIdx(cur => (cur === idx ? null : cur)), 1200);
+  };
   // ── Live data (all per-session — driven by OMP_BRIDGE.onUpdate) ───────────
   const [messages,      setMessages]      = React.useState([]);
   const [streaming,     setStreaming]     = React.useState(false);
@@ -137,13 +163,16 @@ function App() {
     setModels, setActivity, setSparkline,
     setModelState, setThinkingLevel,
     setSessions, setActiveSessionId, setProfiles, setStartupProfileId, setRecentProjects,
-    setNoTabProfileId, setWorkspaceNotes, setApprovalModes,
+    setNoTabProfileId, setWorkspaceNotes, setApprovalModes, setCloseConfirm,
     setPromptHistory, setSubagents, setSubagentTranscripts, setQueue, setQueueSending, setGoal, setExtWidgets,
   });
   useThemeEffect(t);
   React.useEffect(() => {
     bridge?.setPromptHistoryLimit(t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT);
   }, [bridge, t.promptHistoryLimit]);
+  // Behaviours live.js owns (app/session-prefs.js): it takes its keys from
+  // the tweaks and acts only on a changed one.
+  React.useEffect(() => { bridge?.setSessionPrefs(t); }, [bridge, t]);
   // Refuse a file or link drop no handler took (`refusesStrayDrop`), so the
   // webview never navigates to it now that Tauri's native file drop is off
   // (#50). The composer's handlers run first and accept their own drops.
@@ -220,6 +249,11 @@ function App() {
     path => setGitOpen({ path: _gitAbsolutePath(gitProject, path), project: gitProject }),
     [gitProject]);
   const closeGit = React.useCallback(() => setGitOpen(null), []);
+  // A read card's path: the preview, bound to this tab.
+  const handlePreviewFile = React.useCallback(
+    target => setPreview({ key: planKey, target }), [planKey]);
+  const closePreview = React.useCallback(() => setPreview(null), []);
+  const previewToGit = React.useCallback(path => { setPreview(null); handleOpenFile(path); }, [handleOpenFile]);
   // The git browser refetches when this count rises; counted only while it
   // is open, and handed over as a number so streaming frames that finish no
   // edit leave the memoised browser alone.
@@ -228,17 +262,25 @@ function App() {
   // the tab's earlier ones; later blocks follow the modes again.
   const handleCollapseAll = (collapsed) => setCollapseOverrides(m => updateEntry(m, planKey, NO_COLLAPSE_OVERRIDES,
     () => _collapseOverridesForAll(messages, collapsed, { hidden: window.OMP_TURN_STATUS.isHidden })));
-  const openTweaks = () => window.postMessage({ type: "__activate_edit_mode" }, "*");
+  const openSettings = section => setStab(s => window.OMP_SETTINGS_TAB.open(s, section));
+  const closeSettings = () => setStab(window.OMP_SETTINGS_TAB.close);
+  // Another omp tab shown (opened, picked, restored) leaves the settings tab.
+  React.useEffect(() => { setStab(window.OMP_SETTINGS_TAB.selectProject); }, [activeSessionId]);
   // Tab ids, for dropping the per-tab state of closed tabs (here and in
   // the composer's drafts). live.js rebuilds `sessions` on every snapshot,
   // streaming deltas included, so the list is memoised on the ids' content:
   // the prune effects run only when a tab opens or closes.
   const sessionIdsKey = sessions.map(s => s.id).join("\0");
   const sessionIds = React.useMemo(() => (sessionIdsKey ? sessionIdsKey.split("\0") : []), [sessionIdsKey]);
+  // A tab seen for the first time starts with the `defaultSide` setting;
+  // tabs already open keep theirs when the setting changes.
+  const seenSideIds = React.useRef(new Set());
   React.useEffect(() => {
+    const fresh = sessionIds.filter(id => !seenSideIds.current.has(id));
+    seenSideIds.current = new Set(sessionIds);
     setPlans(m => pruneEntries(m, sessionIds));
     setCollapseOverrides(m => pruneEntries(m, sessionIds));
-    setSides(m => pruneEntries(m, sessionIds));
+    setSides(m => seedEntries(pruneEntries(m, sessionIds), fresh, "rail", t.defaultSide ?? "rail"));
   }, [sessionIds]);
   // Profile chip text for a tab/project: none for the built-in profile (same
   // expression as TabBar's own copy, which labels the tab bar).
@@ -275,6 +317,18 @@ function App() {
   const browser = useBrowser({
     bridge, activeSessionId: activeProject.id, sessionIds, open: side === "browser", setOpen: setBrowserOpen, tweaks: t, setTweak,
   });
+  // Clicks on links in the agent's markdown: a project file opens the
+  // preview (Ctrl/⌘-click: the git browser); anything else goes on to the
+  // browser panel's localhost handler. Without this a relative link would
+  // navigate the webview, which navigation_guard.rs silently blocks.
+  const browserLinkClick = browser.onChatClick;
+  const handleChatLinkClick = React.useCallback(e => {
+    const file = _fpLinkClick(e, gitProject);
+    if (!file) { browserLinkClick?.(e); return; }
+    e.preventDefault();
+    if (file.git) handleOpenFile(file.target.path);
+    else handlePreviewFile(file.target);
+  }, [browserLinkClick, gitProject, handleOpenFile, handlePreviewFile]);
   const stageRef = React.useRef(null);
   // A chip click scrolls the panel to the annotated element — but only
   // when the panel is open and still on the page the chip was picked from
@@ -301,7 +355,7 @@ function App() {
     bridge, activeSessionId: activeProject.id, railVisible: t.layout !== "focus" && side === "rail", tweaks: t,
   });
   // Pushed by omp, not run by the desktop: nothing to schedule, only a
-  // Tweaks toggle per card (`widget:ext-status`, `widget:ext:<key>`).
+  // Settings → Rail toggle per card (`widget:ext-status`, `widget:ext:<key>`).
   const extCards = React.useMemo(() => _extCards(extWidgets), [extWidgets]);
   const extToggles = React.useMemo(() => _extToggles(extWidgets), [extWidgets]);
 
@@ -391,7 +445,7 @@ function App() {
   const handleAskDialogAnswer = React.useCallback((id, answers) => { bridge?.answerAskDialog(id, answers); }, [bridge]);
   const handleConfirmAsk = React.useCallback((id, confirmed) => { bridge?.answerConfirm(id, confirmed); }, [bridge]);
   const handleCancelAsk  = React.useCallback((id) => { bridge?.cancelAsk(id); }, [bridge]);
-  const handleGrantApproval = React.useCallback((tool, scope) => { bridge?.grantApprovalRule(tool, scope); }, [bridge]);
+  const handleGrantApproval = React.useCallback((prompt, scope) => { bridge?.approveAndRemember(prompt, scope); }, [bridge]);
   const handleStopRetry  = React.useCallback(() => bridge?.stopRetry(), [bridge]);
   const handlePickLogin = async (provider) => {
     if (!bridge) return;
@@ -498,11 +552,11 @@ function App() {
     else if (c.name === "login")     { openBridge("login"); }
     else if (c.name === "new")       { bridge?.newSession(); }
     else if (c.name === "history")   { setHistoryOpen(true); }
-    else if (c.name === "shortcuts") { setShortcutsOpen(true); }
+    else if (c.name === "shortcuts") { openSettings("shortcuts"); }
     else if (c.name === "check-updates") { updater.check(); }
     else if (c.name === "collapse-all")  { handleCollapseAll(true); }
     else if (c.name === "expand-all")    { handleCollapseAll(false); }
-    else if (c.name === "tweaks")    { openTweaks(); }
+    else if (c.name === "settings")  { openSettings(); }
     else if (c.name === "terminal")  { terminal.toggle(planKey); }
   };
 
@@ -526,6 +580,7 @@ function App() {
   // Tab select — switches the active session; bridge resets all per-session state
   // and re-fetches from the new session's omp → notify() pushes fresh data.
   const handleSelectTab = id => {
+    setStab(window.OMP_SETTINGS_TAB.selectProject);
     if (id === activeSessionId) return;
     bridge?.activateSession(id);
     // setActiveSessionId is driven by snap.activeSessionId from onUpdate
@@ -549,8 +604,9 @@ function App() {
     }
   };
 
-  // Close tab → kills that session's omp process; bridge updates tab list
-  const handleCloseTab = id => { bridge?.closeSession(id); };
+  // Close tab → kills that session's omp process; bridge updates tab list.
+  // Guarded: with `confirmBusyClose` a working tab asks first (live.js).
+  const handleCloseTab = id => { bridge?.closeSessionGuarded(id); };
   // Manual rename (#32): omp's `/rename <title>` via the bridge, which
   // activates a background tab first and keeps the transcript clean.
   const handleRenameTab = (id, title) => { bridge?.renameSession(id, title); };
@@ -598,6 +654,16 @@ function App() {
     const order = shiftGroup(sessions, groupKey(activeProject), delta);
     if (order) bridge?.reorderTabs(order);
   };
+  // Ctrl+Tab / Ctrl+Shift+Tab over the project tabs and, when open, the
+  // settings tab as the last stop. Indexed on `activeProject.id`, not
+  // `activeSessionId`: `activeProject` falls back to `sessions[0]` when the
+  // snapshot's `activeSessionId` is stale or empty.
+  const cycleTabs = dir => {
+    const r = window.OMP_SETTINGS_TAB.cycle(stab, sessionIds, activeProject.id, dir);
+    if (r.settingsActive) { openSettings(); return; }
+    setStab(window.OMP_SETTINGS_TAB.selectProject);
+    if (r.sessionId && r.sessionId !== activeProject.id) bridge?.activateSession(r.sessionId);
+  };
 
   // ── Global keymap handler map ─────────────────────────────────────────────
   // Written into handlersRef every render so the dispatch hook always reads
@@ -608,8 +674,9 @@ function App() {
   // dodge a TDZ that a closure never actually hits.
   handlersRef.current = {
     "app.interrupt":           () => {
-      // Only abort when no overlay is open (overlays handle Escape themselves).
-      if (bridgeOpen || historyOpen || gitOpen || rulesOpen || statsOpen || promptHistoryOpen || planOpen || shortcutsOpen || updater.open) return;
+      // Only abort when no overlay is open (overlays handle Escape themselves),
+      // and never from the Settings page, which covers the chat.
+      if (stab.active || bridgeOpen || historyOpen || gitOpen || rulesOpen || statsOpen || promptHistoryOpen || planOpen || updater.open) return;
       if (streaming) handleAbort();
     },
     "app.thinking.cycle":      cycleThinking,
@@ -627,25 +694,18 @@ function App() {
     "app.session.resume":      () => setHistoryOpen(v => !v),
     "desktop.commands.open":   () => { setBridgeView("commands"); setBridgeOpen(v => !v); },
     "desktop.history.open":    () => setHistoryOpen(v => !v),
-    "desktop.shortcuts.open":  () => setShortcutsOpen(v => !v),
+    "desktop.shortcuts.open":  () => openSettings("shortcuts"),
+    "desktop.settings.open":   () => openSettings(),
     "desktop.sidebar.toggle":  toggleSidebar,
     "desktop.tab.new":         handleNewProject,
-    "desktop.tab.close":       () => { if (activeProject.id) handleCloseTab(activeProject.id); },
-    // Indexed on `activeProject.id`, not `activeSessionId` — same rationale
-    // as `handleSelectProfile` below: `activeProject` falls back to
-    // `sessions[0]` when the snapshot's `activeSessionId` is stale or empty,
-    // so `findIndex` can never return -1 here while `sessions.length >= 2`.
-    // Indexing on `activeSessionId` directly would reintroduce that -1.
-    "desktop.tab.next":        () => {
-      if (sessions.length < 2) return;
-      const idx = sessions.findIndex(s => s.id === activeProject.id);
-      bridge?.activateSession(sessions[(idx + 1) % sessions.length].id);
+    // The settings tab, when it is the one shown, closes itself; it is the
+    // last stop of next/prev (OMP_SETTINGS_TAB.cycle).
+    "desktop.tab.close":       () => {
+      if (stab.active) closeSettings();
+      else if (activeProject.id) handleCloseTab(activeProject.id);
     },
-    "desktop.tab.prev":        () => {
-      if (sessions.length < 2) return;
-      const idx = sessions.findIndex(s => s.id === activeProject.id);
-      bridge?.activateSession(sessions[(idx - 1 + sessions.length) % sessions.length].id);
-    },
+    "desktop.tab.next":        () => cycleTabs(1),
+    "desktop.tab.prev":        () => cycleTabs(-1),
     "desktop.tab.moveLeft":    () => shiftActiveProject(-1),
     "desktop.tab.moveRight":   () => shiftActiveProject(1),
     "desktop.panel.todo":      () => setPlanOpen(v => !v),
@@ -689,6 +749,8 @@ function App() {
   // Returns {ok, error}; the backend re-validates the id under its lock, so
   // the menu renders a refusal inline rather than assuming success.
   const handleSetStartupProfile = React.useCallback(id => bridge?.setStartupProfile(id), [bridge]);
+  // Stable: the dialog's key listener re-subscribes on a new handler.
+  const handleCloseAnswer = React.useCallback(ok => bridge?.resolveCloseConfirm(ok), [bridge]);
 
   const showRail  = t.layout !== "focus";
   const showSplit = subagentUi.paneOpen;
@@ -697,9 +759,54 @@ function App() {
   // empty state instead of a transcript and a composer with nowhere to send.
   const noTab = sessions.length === 0;
 
-  // Chat links go through the browser panel's routing (localhost links).
+  // Resizable columns beside the chat (#41): which are shown, and their
+  // widths as CSS variables on `.workspace`. Browser full view hides the
+  // chat and the split pane (layout/browser.css): only the sidebar is left.
+  const workspaceRef = React.useRef(null);
+  const browserFull = side === "browser" && browser.fullView;
+  const splitShown = showSplit && !browserFull;
+  const sideRail = side === "tree" ? "tree" : side !== "browser" && showRail ? "rail" : null;
+  const panes = usePaneWidths({
+    tweaks: t, setTweak, workspaceRef,
+    open: [showSidebar && "sidebar", splitShown && "split", sideRail].filter(Boolean),
+    reserve: side === "browser" && !browserFull ? _AL_BROWSER_MIN : 0,
+  });
+
+  // The widget switch keys the Settings Rail section renders: badges and
+  // resets count only these (a removed plugin's stored key has no row).
+  const settingsKeyOpts = React.useMemo(() => ({
+    prefixKeys: [...widgets.togglePlugins.map(p => _widgetTweakKey(p.id)), ...extToggles.map(r => r.tweak)],
+  }), [widgets.togglePlugins, extToggles]);
+
+  // What the Settings page reads and writes (design/settings/). Built only
+  // while the tab is shown: behind a project tab the page stays mounted
+  // with the last one (`active: false`), so streaming frames re-render
+  // nothing there.
+  const settingsLiveCtx = stab.open && stab.active ? {
+    active: true, t, setTweak, bridge, keymap,
+    profiles, startupProfileId, onSetStartupProfile: handleSetStartupProfile,
+    approvalModes, sessions, activeProject,
+    widgets, widgetTweakKey: _widgetTweakKey, extToggles, keyOpts: settingsKeyOpts,
+    panes, terminalHeight: terminal.height, updater,
+    goal: { profileId: activeProfileId },
+    openApprovals: () => setRulesOpen(true),
+    section: stab.section,
+    setSection: id => setStab(s => window.OMP_SETTINGS_TAB.setSection(s, id)),
+  } : null;
+  // Dropped once the tab closes: the ctx's closures hold that render's scope.
+  const settingsLastCtx = React.useRef(null);
+  settingsLastCtx.current = stab.open ? settingsLiveCtx ?? settingsLastCtx.current : null;
+  const settingsIdleCtx = React.useMemo(
+    () => (stab.open && settingsLastCtx.current ? { ...settingsLastCtx.current, active: false } : null),
+    [stab.open, stab.active]);
+  const settingsCtx = settingsLiveCtx ?? settingsIdleCtx;
+  const settingsChanged = React.useMemo(
+    () => (stab.open ? window.OMP_SETTINGS.modifiedCount("all", t, settingsKeyOpts) : 0),
+    [stab.open, t, settingsKeyOpts]);
+
+  // Chat links: project files to the preview, localhost to the browser panel.
   return (
-    <_AL_MdLinkCtx.Provider value={browser.onChatClick}>
+    <_AL_MdLinkCtx.Provider value={handleChatLinkClick}>
       <div className="app-backdrop" />
       <div className="app">
         <div className={`window scanlines ${showSplit ? "is-split" : ""}`}>
@@ -718,7 +825,7 @@ function App() {
           <TabBar
             profiles={profiles}
             projects={sessions}
-            activeId={activeSessionId}
+            activeId={stab.active ? null : activeSessionId}
             onSelect={handleSelectTab}
             onNew={handleNewProject}
             onClose={handleCloseTab}
@@ -732,13 +839,16 @@ function App() {
             updateVersion={updater.pillVersion}
             onUpdate={updater.openModal}
             onCheckUpdate={updater.check}
+            settings={{ open: stab.open, active: stab.active, changed: settingsChanged }}
+            onSelectSettings={() => openSettings()}
+            onCloseSettings={closeSettings}
           />
 
-          <div className="workspace">
+          <div ref={workspaceRef} className="workspace" style={panes.style}>
             {showSidebar && (
               <ProjectSidebar
                 tabs={sessions}
-                activeId={activeSessionId}
+                activeId={stab.active ? null : activeSessionId}
                 recents={recentRows(recentProjects, sessions, activeProfileId)}
                 profileLabel={profileLabel}
                 onSelectTab={handleSelectTab}
@@ -752,7 +862,8 @@ function App() {
                 onReorder={handleReorder}
               />
             )}
-            <div ref={stageRef} className={`stage ${side === "browser" ? `with-browser${browser.fullView ? " browser-full" : ""}` : side === "tree" ? "with-tree" : showRail ? "with-rail" : ""}`}>
+            {showSidebar && <ResizeHandle className="at-sidebar" {...panes.handle("sidebar")} />}
+            <div ref={stageRef} className={`stage ${side === "browser" ? `with-browser${browserFull ? " browser-full" : ""}` : sideRail ? `with-${sideRail}` : ""}`}>
               <main className="session">
                 {noTab ? (
                   <EmptyWorkspace notes={workspaceNotes} />
@@ -771,10 +882,14 @@ function App() {
                     hasProjectPath={!!activeProject?.path}
                     onInspectSubagent={subagentUi.open}
                     onOpenFile={handleOpenFile}
+                    onPreviewFile={handlePreviewFile}
+                    projectRoot={gitProject}
                     foldModes={foldModes}
                     collapseAfter={t.collapseAfter}
                     collapseOverrides={tabCollapseOverrides}
                     onToggleCollapse={handleToggleCollapse}
+                    followOutput={t.followOutput}
+                    submitKey={t.submitKey}
                   />
                   <TerminalPanels sessions={sessions} activeId={planKey} terminal={terminal} />
                   <Composer
@@ -814,10 +929,14 @@ function App() {
                     browserChips={browser.chips}
                     onRemoveBrowserChip={browser.removeChip}
                     onBrowserChipClick={handleBrowserChipClick}
+                    submitKey={t.submitKey}
+                    pasteCollapseLines={t.pasteCollapseLines}
                   />
                 </>)}
               </main>
 
+              {splitShown && <ResizeHandle className="at-split" {...panes.handle("split")} />}
+              {sideRail && <ResizeHandle key={sideRail} className="at-side" {...panes.handle(sideRail)} />}
               {showSplit && (
                 <SubagentPane
                   state={subagents}
@@ -830,11 +949,12 @@ function App() {
                   onStop={id => bridge?.cancelSubagent(id)}
                   onClose={subagentUi.closePane}
                   onJumpToCall={subagentUi.jumpToCall}
+                  submitKey={t.submitKey}
                 />
               )}
 
               {side === "browser" ? (
-                <BrowserDock ui={browser} stageRef={stageRef} />
+                <BrowserDock ui={browser} stageRef={stageRef} room={panes.browserRoom} />
               ) : side === "tree" ? (
                 <ConversationTree
                   model={convTree.model} currentFile={convTree.currentFile} error={convTree.error}
@@ -842,8 +962,12 @@ function App() {
                   streaming={streaming}
                   onRefresh={convTree.refresh} onClose={() => setSide("rail")}
                   onBranch={convTree.branch} onFork={convTree.fork} onOpenFile={convTree.openFile}
+                  onJumpToPrompt={handleTreeJump}
                 />
-              ) : showRail && (
+              ) : showRail && (() => {
+                const compacting = messages.some(m => m.kind === "compact" && m.status === "pending");
+                const canCompact = !!activeProject.id && !streaming && !compacting && messages.length > 0;
+                return (
                 <AmbientRail
                   ctx={liveCtx}
                   activity={activity}
@@ -852,6 +976,9 @@ function App() {
                   onOpenSubagent={subagentUi.open}
                   onToggleSubagentPane={subagentUi.togglePane}
                   onOpenTree={() => setSide("tree")}
+                  onCompact={() => bridge?.compact()}
+                  canCompact={canCompact}
+                  compacting={compacting}
                   messages={messages}
                   microcopy={data.microcopy}
                   sparklineValues={sparkline}
@@ -861,7 +988,6 @@ function App() {
                   onMinimapClick={handleMinimapClick}
                   show={{ context: t.showContext ?? true, radar: t.showRadar ?? true, subagents: t.showSubagents ?? true, minimap: t.showMinimap ?? true }}
                 >
-                  {widgets.fatal && <WidgetErrorCard title="widgets.json" error={widgets.fatal} />}
                   {widgets.configErrors.map((e, i) => <WidgetErrorCard key={i} title="widgets.json" error={e} />)}
                   {widgets.approvals.map(a => (
                     <WidgetBoundary key={`approve:${a.id}`} title={a.title}>
@@ -881,6 +1007,12 @@ function App() {
                     </WidgetBoundary>
                   ))}
                 </AmbientRail>
+                );
+              })()}
+              {settingsCtx && (
+                <div className="st-host" hidden={!stab.active}>
+                  <SettingsPage ctx={settingsCtx} />
+                </div>
               )}
             </div>
           </div>
@@ -900,9 +1032,8 @@ function App() {
             terminalOpen={_TERM_entryOf(terminal.state, planKey).open}
             onBrowser={() => toggleSide("browser")}
             browserOpen={side === "browser"}
-            onTweaks={openTweaks}
-            autosave={t.autosave ?? true}
-            onAutosave={v => setTweak("autosave", v)}
+            onSettings={() => openSettings()}
+            settingsActive={stab.active}
           />
         </div>
       </div>
@@ -948,6 +1079,10 @@ function App() {
           onClose={closeGit} branch={activeProject.branch ?? null} edits={gitEdits} />
       )}
 
+      {preview && preview.key === planKey && (
+        <FilePreview target={preview.target} onClose={closePreview} onOpenGit={previewToGit} />
+      )}
+
       {rulesOpen && (
         <ApprovalRulesPanel
           onClose={() => setRulesOpen(false)}
@@ -975,115 +1110,13 @@ function App() {
         />
       )}
 
-      {shortcutsOpen && (
-        <ShortcutsModal
-          open={shortcutsOpen}
-          onClose={() => setShortcutsOpen(false)}
-          keymap={keymap}
-        />
-      )}
-
       {updater.open && (
         <UpdateModal updater={updater} busyTabs={window.OMP_UPDATER.busyTabCount(sessions)} />
       )}
 
-      <TweaksPanel title={_t("Tweaks")} noDeckControls>
-        <TweakSection label={_t("Look")}>
-          <TweakRadio label={_t("language")} value={t.lang ?? "zh"}
-            options={[
-              { label: "中文", value: "zh" },
-              { label: "EN", value: "en" },
-            ]}
-            onChange={v => setTweak("lang", v)}
-          />
-          <TweakRadio label={_t("theme")} value={t.theme}
-            options={[
-              { label: _t("aurora"),   value: "aurora"   },
-              { label: _t("phosphor"), value: "phosphor" },
-              { label: _t("daylight"), value: "daylight" },
-            ]}
-            onChange={v => setTweak({ theme: v, accent:
-              v === "aurora"   ? "#8AF0C8" :
-              v === "phosphor" ? "#C4FF3F" : "#1F8A5B"
-            })}
-          />
-          <TweakRadio label={_t("density")} value={t.density}
-            options={[
-              { label: _t("cozy"),    value: "cozy"    },
-              { label: _t("compact"), value: "compact" },
-              { label: _t("dense"),   value: "dense"   },
-            ]}
-            onChange={v => setTweak("density", v)}
-          />
-          <TweakColor label={_t("accent")} value={t.accent}
-            options={["#8AF0C8", "#6EE7FF", "#FF7AC6", "#FFC56E", "#B59BFF", "#C4FF3F"]}
-            onChange={v => setTweak("accent", v)}
-          />
-          <TweakToggle label={_t("mono chat font")} value={t.monoChat}
-            onChange={v => setTweak("monoChat", v)} />
-          <TweakSlider label={_t("font size")} value={t.fontSize ?? 100}
-            min={75} max={150} step={5} unit="%"
-            onChange={v => setTweak("fontSize", v)} />
-        </TweakSection>
-        <TweakSection label={_t("Layout")}>
-          <TweakRadio label={_t("layout")} value={t.layout}
-            options={[
-              { label: _t("rail"),  value: "rail"  },
-              { label: _t("split"), value: "split" },
-              { label: _t("focus"), value: "focus" },
-            ]}
-            onChange={v => setTweak("layout", v)}
-          />
-          <TweakToggle label={_t("project sidebar")} value={t.sidebar ?? true}
-            onChange={v => setTweak("sidebar", v)} />
-        </TweakSection>
-        <TweakSection label={_t("Chat")}>
-          {/* Tool cards and thinking (#44, #43): modes in app/chat-collapse.js. */}
-          <TweakRadio label={_t("thinking")} value={foldModes.thinking}
-            options={window.OMP_COLLAPSE.MODES.map(m => ({ label: _t(m), value: m }))}
-            onChange={v => setTweak("foldThinking", v)} />
-          <TweakRadio label={_t("tool output")} value={foldModes.tool}
-            options={window.OMP_COLLAPSE.MODES.map(m => ({ label: _t(m), value: m }))}
-            onChange={v => setTweak("foldTools", v)} />
-          {Object.values(foldModes).includes("auto") && (
-            <TweakSlider label={_t("collapse after")} value={window.OMP_COLLAPSE.clampAfter(t.collapseAfter)}
-              min={window.OMP_COLLAPSE.MIN_AFTER} max={window.OMP_COLLAPSE.MAX_AFTER} step={1} unit={` ${_t("newer")}`}
-              onChange={v => setTweak("collapseAfter", v)} />
-          )}
-        </TweakSection>
-        <TweakSection label={_t("Rail")}>
-          <TweakToggle label={_t("context gauge")} value={t.showContext ?? true} onChange={v => setTweak("showContext", v)} />
-          <TweakToggle label={_t("agent radar")} value={t.showRadar ?? true} onChange={v => setTweak("showRadar", v)} />
-          <TweakToggle label={_t("subagents")} value={t.showSubagents ?? true} onChange={v => setTweak("showSubagents", v)} />
-          <TweakToggle label={_t("minimap")} value={t.showMinimap ?? true} onChange={v => setTweak("showMinimap", v)} />
-          {widgets.togglePlugins.map(p => (
-            <TweakToggle key={p.id} label={`${_t("widget")}: ${p.title}`} value={t[_widgetTweakKey(p.id)] ?? true}
-              onChange={v => setTweak(_widgetTweakKey(p.id), v)} />
-          ))}
-          {extToggles.map(r => (
-            <TweakToggle key={r.tweak} label={_t(r.label)} value={t[r.tweak] ?? true}
-              onChange={v => setTweak(r.tweak, v)} />
-          ))}
-          <TweakRow label={_t("plugins")}>
-            <div className="twk-path">{widgets.configPath ?? _t("unavailable")}</div>
-            <TweakButton label={_t("reload widgets")} secondary onClick={widgets.reload} />
-          </TweakRow>
-        </TweakSection>
-        <TerminalTweaks bridge={bridge} height={terminal.height} autoOpen={t.terminalAutoOpen ?? false}
-          onAutoOpen={v => setTweak("terminalAutoOpen", v)} />
-        <TweakSection label={_t("Browser")}>
-          <BrowserTweaks bridge={bridge} />
-          <TweakToggle label={_t("open localhost links in panel")} value={t.browserLocalhostInPanel ?? true}
-            onChange={v => setTweak("browserLocalhostInPanel", v)} />
-        </TweakSection>
-        <TweakSection label={_t("Session")}>
-          <TweakSlider label={_t("prompt history")} value={t.promptHistoryLimit ?? window.OMP_PROMPT_HISTORY.DEFAULT_LIMIT}
-            min={window.OMP_PROMPT_HISTORY.MIN_LIMIT} max={window.OMP_PROMPT_HISTORY.MAX_LIMIT} step={10} unit={` ${_t("prompts")}`}
-            onChange={v => setTweak("promptHistoryLimit", v)} />
-          <TweakToggle label={_t("check for updates")} value={t.updateCheck ?? true}
-            onChange={v => setTweak("updateCheck", v)} />
-        </TweakSection>
-      </TweaksPanel>
+      {closeConfirm && (
+        <ConfirmCloseDialog confirm={closeConfirm} onAnswer={handleCloseAnswer} />
+      )}
     </_AL_MdLinkCtx.Provider>
   );
 }

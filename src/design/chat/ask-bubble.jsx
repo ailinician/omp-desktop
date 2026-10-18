@@ -10,7 +10,9 @@ const { Icon: _AskIcon, AskDialog: _AskDialog, OMP_ASK_DIALOG: _AskDialogRules }
 // head/details split and the grant-eligible tool name. See app/approval.js.
 const { approvalInfo: _AskApprovalInfo } = window.OMP_APPROVAL;
 
-function AskBubble({ msg, idx, highlighted, onAnswer, onAnswerDialog, onConfirm, onCancelAsk, onGrant, hasProjectPath }) {
+// `submitKey` ("enter" | "ctrl+enter", the tweak) is the editor textarea's
+// send chord (constants.js isSubmitKey); the single-line input keeps Enter.
+function AskBubble({ msg, idx, highlighted, onAnswer, onAnswerDialog, onConfirm, onCancelAsk, onGrant, hasProjectPath, submitKey = "enter" }) {
   const [draft, setDraft] = React.useState(msg.method === "editor" ? (msg.prefill ?? "") : "");
   const done = msg.answered || msg.cancelled;
   const method = msg.method ?? "select";
@@ -25,13 +27,17 @@ function AskBubble({ msg, idx, highlighted, onAnswer, onAnswerDialog, onConfirm,
     onAnswer(msg.id, value);
   };
 
-  // Grant a standing rule for `tool`, then answer this prompt as approved
-  // — remembering for next time shouldn't require a second click on
-  // "Approve" for the request that's already in front of the user.
+  // Approve this prompt and remember the tool for next time — that
+  // shouldn't require a second click on "Approve" for the request that's
+  // already in front of the user. One bridge call does both: the grant names
+  // this prompt, not the tool (Rust reads the tool and the project from what
+  // the prompt's own process asked, and only while it is unanswered). The
+  // bridge settles the bubble at once; Rust answers the prompt first and
+  // saves the rule only once the answer was written, and a refusal (nothing
+  // sent) reopens the bubble.
   const grant = (scope) => {
     if (done || !tool) return;
-    onGrant?.(tool, scope);
-    submit("Approve");
+    onGrant?.(msg, scope);
   };
 
   const confirm = (value) => {
@@ -88,6 +94,9 @@ function AskBubble({ msg, idx, highlighted, onAnswer, onAnswerDialog, onConfirm,
           value={done ? (msg.answer ?? "") : draft}
           disabled={done}
           onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => {
+            if (!done && isSubmitKey(e, submitKey)) { e.preventDefault(); submit(draft); }
+          }}
           rows={6}
         />
         {!done && (

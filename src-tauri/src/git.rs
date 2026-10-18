@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 ///
 /// Both fields are `None` when `path` is not inside any git repository.
 /// Opens the repository only once so callers that need both values pay
-/// a single discovery cost.
+/// a single discovery cost. Holds the spawn gate: gix may run `git` to find
+/// its installation config.
 pub fn probe(path: &Path) -> (Option<String>, Option<PathBuf>) {
-    let Ok(repo) = gix::discover(path) else {
+    let Ok((_gate, repo)) = crate::spawn_gate::discover(path) else {
         return (None, None);
     };
     let branch = repo

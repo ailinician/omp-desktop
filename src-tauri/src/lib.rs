@@ -3,12 +3,16 @@
 // invoke payload. Suppress the related pedantic lints at module scope so
 // command signatures stay idiomatic for the Tauri API.
 #![allow(clippy::needless_pass_by_value)]
+// `clippy.toml` routes every spawn through `spawn_gate`; the suites start
+// their helper processes (`git`, `sh`, stand-in browsers) directly.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 mod agent;
 mod approval;
 mod approval_mode;
 mod browser;
 mod child_path;
+mod config_file;
 mod conversation_tree;
 mod external_open;
 mod files;
@@ -22,11 +26,14 @@ mod model_usage;
 mod navigation_guard;
 mod omp_cli;
 mod open_tabs;
+mod private_fs;
 mod profiles;
 mod program_setting;
+mod project_file;
 mod recent_projects;
 mod redaction;
 mod saved_sessions;
+mod spawn_gate;
 mod stats;
 mod supervisor;
 mod terminal;
@@ -44,8 +51,9 @@ use external_open::OpenProjectState;
 use git_watcher::GitWatcherState;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State, Url};
+use tauri::{AppHandle, Emitter, Manager, State, Url};
 
 /// Write a JSON command to a specific session's omp stdin.
 #[tauri::command]
@@ -154,9 +162,9 @@ async fn off_ipc<T: Send + 'static>(
 }
 
 /// [`off_ipc`] against a shared `Arc<S>` — what every state-mutating command
-/// shares (`ProfileStore` and the keybindings `OverlayStore` alike): each one
-/// is a locked, fsync'd read-modify-write of its own JSON file (same
-/// rationale as `approval_rules_grant`).
+/// shares (`ProfileStore` and the keybindings `OverlayStore` alike): file-backed,
+/// each one is a locked, fsync'd read-modify-write of its own JSON file (same
+/// rationale as `approval_approve_and_grant`); memory-only, a short mutex hold.
 async fn with_blocking<S: Send + Sync + 'static, T: Send + 'static>(
     shared: &Arc<S>,
     f: impl FnOnce(&S) -> Result<T, String> + Send + 'static,
@@ -482,7 +490,7 @@ async fn terminal_set_shell(
 /// cancelled. The path comes from the OS dialog, never from the webview.
 /// Callback-based `pick_file` for the reason `open_project` gives. Parented
 /// to the calling window, which makes it modal on Windows and macOS (the
-/// Tweaks panel cannot change under a pick, no second dialog); rfd's GTK3
+/// Settings page cannot change under a pick, no second dialog); rfd's GTK3
 /// backend ignores the parent, so on Linux the window stays usable.
 #[tauri::command]
 async fn terminal_pick_shell(
@@ -622,7 +630,7 @@ fn extension_ui_state(
 /// List tool-approval rules currently in effect for a session/project pair.
 ///
 /// Runs `async` + `spawn_blocking` for the same reason as
-/// `approval_rules_grant` — see its doc comment: `RuleBook::list` performs
+/// `approval_approve_and_grant` — see its doc comment: `RuleBook::list` performs
 /// a `Path::canonicalize()` syscall via `project_key()`, plus on a cold
 /// cache a `std::fs::read` and potentially a full snapshot-ring directory
 /// scan, while holding a mutex.
@@ -636,29 +644,33 @@ async fn approval_rules_list(
     off_ipc(move || rule_book.list(&session_id, project_root.as_deref().map(Path::new))).await
 }
 
-/// Grant standing approval for `tool`. `scope` is `"session"` or `"project"`
-/// (the latter requires `project_root`); anything else is a stable error.
+/// Answer the open approval prompt `request_id` of `session_id` with
+/// "Approve" and grant standing approval for its tool, in one call. `scope`
+/// is `"session"` or `"project"` (the latter needs a process started in a
+/// folder); anything else is a stable error. The tool and the project come
+/// from the prompt the session's process forwarded, and the answer goes to
+/// that same process (`AgentBridge::approve_and_grant`), never from the
+/// webview: a prompt with no open match in that process is refused with
+/// nothing answered or saved, and a rule is saved only once the answer was
+/// written. A rejection means nothing reached omp (the prompt still waits);
+/// `Some(reason)` means the prompt was approved but the rule was not saved.
 ///
-/// Runs `async` + `spawn_blocking`: `RuleBook::grant` performs a locked
-/// file read-modify-write with up to several blocking retry sleeps, which
-/// can stall the webview if run on Tauri's main command thread.
+/// Runs `async` + `spawn_blocking`: a project grant's `RuleBook::grant`
+/// performs a locked file read-modify-write with up to several blocking
+/// retry sleeps, which can stall the webview if run on Tauri's main command
+/// thread.
 #[tauri::command]
-async fn approval_rules_grant(
+async fn approval_approve_and_grant(
     session_id: String,
-    project_root: Option<String>,
-    tool: String,
+    request_id: String,
     scope: String,
-    rule_book: State<'_, Arc<RuleBook>>,
-) -> Result<(), String> {
-    let rule_book = Arc::clone(rule_book.inner());
+    app: AppHandle,
+) -> Result<Option<String>, String> {
+    let scope = parse_rule_scope(&scope)?;
     off_ipc(move || {
-        let scope = parse_rule_scope(&scope)?;
-        rule_book.grant(
-            &session_id,
-            project_root.as_deref().map(Path::new),
-            &tool,
-            scope,
-        )
+        let rule_book = app.state::<Arc<RuleBook>>();
+        app.state::<AgentBridge>()
+            .approve_and_grant(&rule_book, &session_id, &request_id, scope)
     })
     .await?
 }
@@ -666,7 +678,7 @@ async fn approval_rules_grant(
 /// Revoke a previously granted rule. No-op (not an error) if it wasn't granted.
 ///
 /// Runs `async` + `spawn_blocking` for the same reason as
-/// `approval_rules_grant` — see its doc comment.
+/// `approval_approve_and_grant` — see its doc comment.
 #[tauri::command]
 async fn approval_rules_revoke(
     session_id: String,
@@ -872,6 +884,22 @@ async fn git_browser_commit_file(
     rel_path: String,
 ) -> Result<git_browser::FileView, String> {
     off_ipc(move || git_browser::commit_file(Path::new(&path), &sha, &rel_path)).await?
+}
+
+/// A file of the tab's project for the in-app preview — see
+/// `project_file::read`. The folder is the one `start_session` registered
+/// for the tab, never one sent by the webview. `async` + `spawn_blocking`:
+/// reads up to `project_file::MAX_IMAGE_BYTES` from disk.
+#[tauri::command]
+async fn project_file_read(
+    session_id: String,
+    path: String,
+    terminal: State<'_, Arc<terminal::TerminalManager>>,
+) -> Result<project_file::FilePreview, String> {
+    let root = terminal
+        .folder(&session_id)
+        .ok_or_else(|| "this tab has no project folder".to_owned())?;
+    off_ipc(move || project_file::read(&root, &path)).await?
 }
 
 /// Stage a file's changes — see `workspace::accept`.
@@ -1200,6 +1228,56 @@ pub(crate) fn kill_child_processes(app: &AppHandle) {
     }
 }
 
+/// "Ask before closing a busy tab" (#37, Settings → Session): whether a
+/// user's request to close the main window (or quit) must first be
+/// confirmed in the webview. The webview arms it only while the setting is
+/// on and a tab is busy (`live.js` `_syncCloseGuard`), so with nothing to
+/// lose the window closes the normal way; armed, [`handle_run_event`]
+/// holds the close and emits [`CLOSE_REQUESTED_EVENT`], and the webview
+/// disarms the guard before it closes the window itself, so the exit then
+/// takes the usual path through [`kill_child_processes`].
+#[derive(Default)]
+struct CloseGuard(AtomicBool);
+
+/// Payload-free: tells the webview a close was held for its confirmation.
+const CLOSE_REQUESTED_EVENT: &str = "window://close-requested";
+
+/// Arm (`true`) or disarm the [`CloseGuard`].
+#[tauri::command]
+fn set_close_guard(armed: bool, guard: State<'_, CloseGuard>) {
+    guard.0.store(armed, Ordering::SeqCst);
+}
+
+/// Whether a close of window `label` is held for the webview to confirm:
+/// only the main window's, and only while the webview armed the guard.
+fn holds_close(label: &str, armed: bool) -> bool {
+    armed && label == "main"
+}
+
+/// The per-user folder the persistent stores live in, from Tauri's
+/// `app_config_dir()`. `None` when it can't be resolved or is relative:
+/// every store then keeps its state in memory for the app run. There is no
+/// fallback to a shared location such as the OS temp dir, where another
+/// local account could plant the files these stores trust (`open-tabs.json`
+/// alone picks the folders and profiles omp starts in), and a relative path
+/// would resolve against whatever the working directory happens to be.
+fn config_dir<E: std::fmt::Display>(resolved: Result<PathBuf, E>) -> Option<PathBuf> {
+    match resolved {
+        Ok(dir) if dir.is_absolute() => Some(dir),
+        Ok(dir) => {
+            eprintln!(
+                "[omp-desktop] app config dir {} is not absolute; settings are kept in memory only",
+                dir.display()
+            );
+            None
+        }
+        Err(e) => {
+            eprintln!("[omp-desktop] no app config dir ({e}); settings are kept in memory only");
+            None
+        }
+    }
+}
+
 /// App-level state that needs a resolved path, and the cold-start "Open
 /// with" argv — `run()`'s `setup` hook. No omp process starts here: the app
 /// opens with no tab until the user (or an OS folder open) picks a project.
@@ -1208,7 +1286,9 @@ fn setup(app: &tauri::App) {
     if let Some(win) = app.get_webview_window("main") {
         win.open_devtools();
     }
-    let resolved_config_dir = app.path().app_config_dir().ok();
+    // Every store below is memory-only without it (see `config_dir`).
+    let resolved_config_dir = config_dir(app.path().app_config_dir());
+    let config_file = |name: &str| resolved_config_dir.as_deref().map(|dir| dir.join(name));
     // Rail widget plugins: <app_config_dir>/widgets.json and the approvals in
     // <app_config_dir>/widget-approvals.json. No temp-dir fallback: a
     // `widgets.json` in a shared temp dir could be planted by another user,
@@ -1220,36 +1300,36 @@ fn setup(app: &tauri::App) {
     // Terminal tabs and the shell setting: <app_config_dir>/terminal.json.
     // No temp-dir fallback either: another account could plant the shell
     // this one runs; without a config dir the setting stays in memory.
-    app.manage(Arc::new(terminal::TerminalManager::new(
-        resolved_config_dir
-            .as_deref()
-            .map(|dir| dir.join("terminal.json")),
-    )));
+    app.manage(Arc::new(terminal::TerminalManager::new(config_file(
+        "terminal.json",
+    ))));
     // Approval mode: <app_config_dir>/approval-mode.json. No temp-dir
     // fallback: another account could plant a `yolo` there; without a config
     // dir the choice stays in memory.
-    app.manage(Arc::new(ApprovalModeStore::load(
-        resolved_config_dir
-            .as_deref()
-            .map(|dir| dir.join("approval-mode.json")),
-    )));
+    app.manage(Arc::new(ApprovalModeStore::load(config_file(
+        "approval-mode.json",
+    ))));
     // The browser panel's Chromium setting: <app_config_dir>/browser.json.
     // No temp-dir fallback: another account could plant the browser this one
     // runs; without a config dir the setting stays in memory. An
     // unresolvable home only loses the candidates under it (omp's Chrome for
     // Testing cache, macOS `~/Applications`).
     let browser_store = Arc::new(browser::SettingsStore::load(
-        resolved_config_dir
-            .as_deref()
-            .map(|dir| dir.join("browser.json")),
+        config_file("browser.json"),
         app.path().home_dir().ok(),
     ));
     app.manage(Arc::clone(&browser_store));
-    // Falls back to the temp dir if the config dir can't be resolved
-    // (e.g. a locked-down test environment) rather than failing
-    // startup — approval grants and profiles just won't survive a
-    // restart there.
-    let config_dir = resolved_config_dir.unwrap_or_else(std::env::temp_dir);
+    // Approval-rule store: project-scoped grants persist under
+    // <app_config_dir>/approval-rules/<project-hash>.json. No temp-dir
+    // fallback: another account could plant grants there that approve
+    // tools without asking; without a config dir they stay in memory.
+    app.manage(Arc::new(
+        resolved_config_dir
+            .as_deref()
+            .map_or_else(RuleBook::in_memory, |dir| {
+                RuleBook::new(dir.join("approval-rules"))
+            }),
+    ));
     // Per-tab headless Chromium + the overlay omp reads its `cdpUrl` from.
     // It lives under the per-user app cache dir (user-owned, unlike a shared
     // temp dir); without one the manager is unavailable and sessions start
@@ -1277,31 +1357,36 @@ fn setup(app: &tauri::App) {
     if let Err(e) = pruning {
         eprintln!("[omp-desktop] browser leftovers not pruned: {e}");
     }
-    // Approval-rule store: project-scoped grants persist under
-    // <app_config_dir>/approval-rules/<project-hash>.json.
-    app.manage(Arc::new(RuleBook::new(config_dir.join("approval-rules"))));
-    // Profile list: <app_config_dir>/profiles.json.
-    app.manage(Arc::new(profiles::ProfileStore::load(
-        config_dir.join("profiles.json"),
-    )));
+    // Profile list: <app_config_dir>/profiles.json. No temp-dir fallback for
+    // it or the stores below: another account could plant the profile tabs
+    // start in, a rebind, or the folders the next launch opens.
+    app.manage(Arc::new(profiles::ProfileStore::load(config_file(
+        "profiles.json",
+    ))));
     // Keybinding overlay: <app_config_dir>/keybindings.json.
     app.manage(Arc::new(keybindings::overlay::OverlayStore::new(
-        config_dir.join("keybindings.json"),
+        config_file("keybindings.json"),
     )));
     // Widget scheduler thread; it loads the config and approvals itself.
+    // Each run executes private copies of the plugin's scripts under
+    // <app_cache_dir>/widget-runs (user-owned, unlike a shared temp dir).
     app.manage(Arc::new(widgets::WidgetHost::for_app(
         app.handle().clone(), // the host emits `widgets://` events for the app's lifetime
         widget_config,
         widget_approvals,
+        app.path()
+            .app_cache_dir()
+            .ok()
+            .map(|dir| dir.join("widget-runs")),
     )));
     // Recently opened projects: <app_config_dir>/recent-projects.json.
     app.manage(Arc::new(recent_projects::RecentProjectsStore::new(
-        config_dir.join("recent-projects.json"),
+        config_file("recent-projects.json"),
     )));
     // Open-tab layout for the next launch: <app_config_dir>/open-tabs.json.
-    app.manage(Arc::new(open_tabs::OpenTabsStore::new(
-        config_dir.join("open-tabs.json"),
-    )));
+    app.manage(Arc::new(open_tabs::OpenTabsStore::new(config_file(
+        "open-tabs.json",
+    ))));
 
     // A cold start *is* how Windows and Linux file managers open a
     // folder, so the launch argv is the third delivery path into the
@@ -1353,6 +1438,21 @@ fn single_instance_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     })
 }
 
+/// The plugins after the single-instance one, and the app-wide state the
+/// commands read. Split out of [`run`], whose command list alone nears
+/// the function-length lint.
+fn with_plugins_and_state(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    builder
+        .plugin(navigation_guard::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(AgentBridge::new())
+        .manage(GitWatcherState::new())
+        .manage(OpenProjectState::new())
+        .manage(updater::UpdaterState::default())
+        .manage(CloseGuard::default())
+}
+
 /// Run the Tauri application. Panics if the runtime fails to initialise.
 ///
 /// # Panics
@@ -1367,14 +1467,7 @@ pub fn run() {
     // an `unused_mut` warning (and so a lint-gate error) on macOS.
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     let builder = builder.plugin(single_instance_plugin());
-    let app = builder
-        .plugin(navigation_guard::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AgentBridge::new())
-        .manage(GitWatcherState::new())
-        .manage(OpenProjectState::new())
-        .manage(updater::UpdaterState::default())
+    let app = with_plugins_and_state(builder)
         .invoke_handler(tauri::generate_handler![
             send_command,
             start_session,
@@ -1417,7 +1510,7 @@ pub fn run() {
             list_saved_sessions,
             conversation_tree,
             approval_rules_list,
-            approval_rules_grant,
+            approval_approve_and_grant,
             approval_rules_revoke,
             approval_mode_get,
             approval_mode_set_default,
@@ -1427,6 +1520,7 @@ pub fn run() {
             git_browser_log,
             git_browser_commit,
             git_browser_commit_file,
+            project_file_read,
             workspace_accept,
             workspace_reject,
             widgets_state,
@@ -1455,6 +1549,7 @@ pub fn run() {
             model_usage_list,
             app_update_check,
             app_update_install,
+            set_close_guard,
         ])
         .setup(|app| {
             setup(app);
@@ -1468,8 +1563,29 @@ pub fn run() {
 
 /// Handle lifecycle and platform file-open events from the Tauri run loop.
 fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
-    if matches!(event, tauri::RunEvent::Exit) {
-        kill_child_processes(app);
+    match &event {
+        tauri::RunEvent::Exit => kill_child_processes(app),
+        // The OS close (title-bar menu, Alt+F4, taskbar) of a window the
+        // [`CloseGuard`] holds: the webview confirms, then closes it itself.
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } if holds_close(label, app.state::<CloseGuard>().0.load(Ordering::SeqCst)) => {
+            api.prevent_close();
+            announce_held_close(app);
+        }
+        // A quit that is not a window close (macOS Cmd+Q). `code: None` is
+        // a user's request; the updater's restart and `exit` carry a code.
+        // The last window closing also lands here with `None`, but only
+        // after the guard let that close through, i.e. while disarmed.
+        tauri::RunEvent::ExitRequested {
+            code: None, api, ..
+        } if app.state::<CloseGuard>().0.load(Ordering::SeqCst) => {
+            api.prevent_exit();
+            announce_held_close(app);
+        }
+        _ => {}
     }
     // macOS' "Open with" for a folder (see `Info.plist`) arrives as a
     // run-loop event, on launch *and* while already running — the one
@@ -1481,9 +1597,47 @@ fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
     }
 }
 
+/// Ask the webview to confirm a close [`handle_run_event`] held.
+fn announce_held_close(app: &AppHandle) {
+    if let Err(e) = app.emit(CLOSE_REQUESTED_EVENT, ()) {
+        eprintln!("[omp-desktop] failed to forward the window close for confirmation: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::StartSessionArgs;
+    use super::{config_dir, holds_close, StartSessionArgs};
+    use std::path::PathBuf;
+
+    #[test]
+    fn an_absolute_config_dir_is_used_as_is() {
+        let cwd = std::env::current_dir().expect("cwd");
+        assert!(cwd.is_absolute());
+        let dir = config_dir::<&str>(Ok(cwd.join("omp-desktop-config")));
+        assert_eq!(dir, Some(cwd.join("omp-desktop-config")));
+    }
+
+    #[test]
+    fn an_unresolvable_config_dir_means_memory_only_not_the_temp_dir() {
+        assert_eq!(config_dir::<&str>(Err("no home directory")), None);
+    }
+
+    #[test]
+    fn a_relative_config_dir_is_refused() {
+        assert_eq!(
+            config_dir::<&str>(Ok(PathBuf::from("omp-desktop-config"))),
+            None
+        );
+    }
+
+    /// The guard holds only the main window's close, and only while armed:
+    /// with it disarmed (setting off, or no busy tab) closing never waits.
+    #[test]
+    fn only_an_armed_guard_holds_the_main_windows_close() {
+        assert!(holds_close("main", true));
+        assert!(!holds_close("main", false));
+        assert!(!holds_close("other", true));
+    }
 
     /// The exact payload `live.js::_spawnSession` sends. Tauri hands the
     /// `args` object straight to serde, so a field-name or casing change on

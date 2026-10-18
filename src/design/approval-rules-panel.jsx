@@ -1,8 +1,9 @@
 /* ═════════════════════════════════════════════════════════════════════
    approval-rules-panel.jsx — the approvals panel (status-bar ✓, keymap
-   `desktop.panel.rules`): the tool approval mode section on top
-   (approval-mode-section.jsx, #57), then the tool-approval rules granted
-   for the active tab's session/project, with a revoke button per rule.
+   `desktop.panel.rules`): the tool approval mode editor on top
+   (approval-mode-section.jsx, #57, the same one Settings → Approvals
+   shows), then the tool-approval rules granted for the active tab's
+   session/project, with a revoke button per rule.
    Rules are backed by OMP_BRIDGE.listApprovalRules/revokeApprovalRule
    (src-tauri/src/approval.rs::RuleBook). Rules are granted from the ask
    bubble itself (chat/ask-bubble.jsx's "Allow for this session" /
@@ -55,6 +56,7 @@ function ApprovalRulesPanel({ onClose, activeProject, sessions, approvalModes })
           </button>
         </div>
         <div className="rules-body">
+          <div className="panel-sect-hd">tool approval mode</div>
           <_RulesModeSection view={approvalModes} activeProject={activeProject} sessions={sessions} />
           <div className="panel-sect-hd">standing rules</div>
           {loading && rules.length === 0 && <div className="panel-empty mono">loading…</div>}

@@ -4,6 +4,8 @@
 const { TOOL_META: _SP_TOOL_META } = window;
 
 // ── Sparkline ─────────────────────────────────────────────────────────
+// Drawn in a `width` × `height` box stretched to its container's width (the
+// rail is resizable, #41); the stroke keeps its width.
 const Sparkline = ({ values, width = 80, height = 18, color = "var(--accent)", glow = true }) => {
   const max = Math.max(...values, 1);
   const min = Math.min(...values, 0);
@@ -13,7 +15,7 @@ const Sparkline = ({ values, width = 80, height = 18, color = "var(--accent)", g
   const d = pts.map((p, i) => (i === 0 ? `M ${p[0]} ${p[1]}` : `L ${p[0]} ${p[1]}`)).join(" ");
   const fill = `${d} L ${width} ${height} L 0 ${height} Z`;
   return (
-    <svg width={width} height={height} style={{ display: "block", overflow: "visible" }}>
+    <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ display: "block", overflow: "visible" }}>
       <defs>
         <linearGradient id="spark-grad" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={color} stopOpacity="0.35" />
@@ -21,7 +23,7 @@ const Sparkline = ({ values, width = 80, height = 18, color = "var(--accent)", g
         </linearGradient>
       </defs>
       <path d={fill} fill="url(#spark-grad)" />
-      <path d={d} stroke={color} strokeWidth="1.25" fill="none"
+      <path d={d} stroke={color} strokeWidth="1.25" fill="none" vectorEffect="non-scaling-stroke"
         style={{ filter: glow ? `drop-shadow(0 0 4px ${color})` : "none" }} />
     </svg>
   );

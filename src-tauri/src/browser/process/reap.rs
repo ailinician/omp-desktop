@@ -102,11 +102,11 @@ fn uses_profile(pid: u32, profile: &Path) -> bool {
 #[cfg(target_os = "macos")]
 fn uses_profile(pid: u32, profile: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
-    let Ok(output) = std::process::Command::new("/bin/ps")
-        .args(["-o", "command=", "-p"])
-        .arg(pid.to_string())
-        .output()
-    else {
+    let Ok(output) = crate::spawn_gate::output(
+        std::process::Command::new("/bin/ps")
+            .args(["-o", "command=", "-p"])
+            .arg(pid.to_string()),
+    ) else {
         return false;
     };
     if !output.status.success() {

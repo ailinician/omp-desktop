@@ -18,14 +18,24 @@ The working tree is shown against **HEAD**: staged and unstaged changes in one v
 
 | File | Responsibility |
 |---|---|
-| `mod.rs` | the `pub fn` entry points the five `#[tauri::command]` wrappers in `lib.rs` call, the shared types (`TreeNode`, `StatusKind`), path relativising, `MAX_FILES`, the test fixture (repo discovery is `workspace::discover`, shared with stage/discard) |
+| `mod.rs` | the `pub fn` entry points the five `#[tauri::command]` wrappers in `lib.rs` call, the shared types (`TreeNode`, `StatusKind`), repo opening (`workspace::discover`, shared with stage/discard, minus the repository's own filter drivers — see [Filter drivers](#filter-drivers)), path relativising, `MAX_FILES`, the test fixture |
 | `status.rs` | `StatusView` / `RepoInfo`, the per-path status merge, folding the paths into a `TreeNode` tree |
 | `file.rs` | `FileView` / `Line` / `LineKind` / `FileKind`, the full-file inline line diff (worktree vs HEAD, commit vs first parent), binary sniff, the per-file caps |
 | `log.rs` | `LogView` / `LogRow` / `Ref`, the topological walk over HEAD and every ref, ref badges, ahead/behind vs upstream, `MAX_COMMITS` |
 | `graph.rs` | the lane layout, `MAX_LANES` |
 | `commit.rs` | `CommitView`, the tree-to-tree diff vs the first parent, folded into the tree of touched files |
 
-Every command takes `path` (the tab's project folder, as the `workspace_*` commands do), runs under `tauri::async_runtime::spawn_blocking` and returns `Result<T, String>`; the error string reaches the overlay as is (e.g. "not a git repository"). The repo is found with `gix::discover(path)`; the **work dir**, not `path`, is the root of every relative path. Relative paths from the webview go through `workspace::validate_relative_path`; a path inside a stored commit tree gets only its textual checks (no `..`, no `.git` component, not absolute), since resolving it against today's disk could follow a directory that has since become a symlink. Structs are `#[serde(rename_all = "camelCase")]`; enums serialise as bare strings.
+Every command takes `path` (the tab's project folder, as the `workspace_*` commands do), runs under `tauri::async_runtime::spawn_blocking` and returns `Result<T, String>`; the error string reaches the overlay as is (e.g. "not a git repository"). The repo is found with `gix::discover(path)` (`mod.rs` `open`); the **work dir**, not `path`, is the root of every relative path. Relative paths from the webview go through `workspace::validate_relative_path`; a path inside a stored commit tree gets only its textual checks (no `..`, no `.git` component, not absolute), since resolving it against today's disk could follow a directory that has since become a symlink. Structs are `#[serde(rename_all = "camelCase")]`; enums serialise as bare strings.
+
+### Filter drivers
+
+Reading a work-tree file through git's filter pipeline — status hashing a file whose stat data changed, the file view's worktree side — runs the command of any `filter.<name>.clean`/`process` driver the file's attributes select. gix trusts a repository's own config as soon as the user owns it, and a downloaded or extracted repository is owned by the user, so its `.git/config` could make a mere preview run a command. `open` therefore removes, in memory, every `filter` section whose source is the repository (`.git/config`, `config.worktree`, and files they include). Drivers from the user's, the system's and the environment's config stay (`git lfs install` writes the global one): those commands are the user's own choice, as they are for `git status`. The built-in conversions (`core.autocrlf`, `eol`/`text`, `ident`, `working-tree-encoding`) run no command and are unaffected. A repository driver that is gone leaves its paths unconverted: an LFS setup made with `git lfs install --local` shows the worktree content against the pointer blob.
+
+Submodules are opened by gix from their own config, which `open` never sees, so status does not descend into them: a submodule is `Modified` when it has a different commit checked out (gix `Submodule::Given { ignore: Dirty }`), never for edits inside its work tree.
+
+The drivers that stay, and the `git` gix runs once to find its installation config, are children of the app: every command holds the spawn gate (`spawn_gate::shared`, the guard `open` returns) for as long as it reads, so none starts while a Chromium launch has its CDP pipe ends in reach of a child (`docs/architecture/browser.md`). A Chromium launch waits for the reads in flight; other spawns do not wait behind it.
+
+Stage and discard (`workspace_accept`/`workspace_reject`) run the `git` binary, which applies the repository's drivers like any `git add` / `git checkout`; they run only on the user's explicit action.
 
 ### Commands and payloads
 
@@ -112,7 +122,7 @@ Rename detection between HEAD and the index follows the repo's config (`status.r
 
 ### Why gix, and where `git` still runs
 
-Reads go through gix (0.87, default features: `status`, `blob-diff`, `revision`, `dirwalk`, `index`, `attributes`, `excludes`): no process per refresh, no output parsing, no dependence on the user's `git` version, PATH or config aliases. The `git` binary still runs for **`workspace::accept` / `reject` only** (`git add` / `git checkout`, through `child_path`): gix has no mature index add or worktree restore.
+Reads go through gix (0.87, default features: `status`, `blob-diff`, `revision`, `dirwalk`, `index`, `attributes`, `excludes`): no process per refresh, no output parsing, no dependence on the user's `git` version, PATH or config aliases. The `git` binary still runs for **`workspace::accept` / `reject` only** (`git add` / `git checkout`): gix has no mature index add or worktree restore. `workspace::git` runs it by absolute path, the first `git` (`git.exe`) in the absolute folders of the child PATH (`child_path::child_path_dirs` + `locate_program`), with those folders as its PATH; never a bare `git`, which an empty or relative PATH entry would resolve inside the project. No `git` there is the command's `Err`.
 
 ## Frontend
 

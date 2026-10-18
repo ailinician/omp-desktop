@@ -37,8 +37,8 @@ function useKeymap(bridge, profileId) {
         setPayload(null);
       }
       // Else: keep the last-good resolution, `payload`, and `conflicts`
-      // live — only surface the error banner. The Shortcuts modal reloads
-      // on every open, so a transient IPC failure must not revert dispatch
+      // live — only surface the error banner. The Shortcuts editor reloads
+      // each time it is shown, so a transient IPC failure must not revert dispatch
       // to registry defaults or blank the footer's omp/overlay path info
       // until the next successful reload.
       setError("Keybinding configuration could not be loaded.");
@@ -54,7 +54,7 @@ function useKeymap(bridge, profileId) {
     // A malformed/unreadable overlay doesn't fail the whole payload (the omp
     // layer above is still valid, per mod.rs::payload's contract) — it comes
     // back as `overlayError` instead. Surface it as the hook's `error` so the
-    // Shortcuts modal's banner + disabled-buttons gate actually fires for it,
+    // Shortcuts editor's banner + disabled-buttons gate actually fires for it,
     // not just for a total load failure.
     setError(p.overlayError ?? null);
   }, []);

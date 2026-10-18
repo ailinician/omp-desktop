@@ -2,7 +2,7 @@
 // Regression script for src/app/extension-widgets.js — omp extension status
 // lines and text widgets in the rail (#52): set / replace / remove by key,
 // terminal escapes stripped, bounds shared with src-tauri/src/agent/ext_ui.rs,
-// the backend snapshot, and the cards and Tweaks rows built from the state.
+// the backend snapshot, and the cards and Settings rows built from the state.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

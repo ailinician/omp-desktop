@@ -88,7 +88,7 @@ function useWidgets({ bridge, activeSessionId, railVisible, tweaks }) {
     return () => document.removeEventListener("visibilitychange", onChange);
   }, []);
 
-  // Plugins whose Tweaks toggle is off: they neither run nor render. Taken
+  // Plugins whose Settings toggle is off: they neither run nor render. Taken
   // from the tweak keys, not the config, so a plugin the config lacks right
   // now stays hidden when a reload brings it back (see hiddenPluginIds).
   const hiddenKey = _UW.hiddenPluginIds(tweaks, config.plugins.map(p => p.id)).join("\0");

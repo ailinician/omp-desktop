@@ -4,7 +4,7 @@
 //   fromSnapshot(snap)     the backend's `extension_ui_state` → state
 //   isFireAndForget(m)     methods omp sends without waiting for a reply
 //   cards(ext) / toggles(ext)
-//                          WidgetCard models and Tweaks → Rail rows
+//                          WidgetCard models and Settings → Rail rows
 // State is `{ statuses: [{key, text}], widgets: [{key, lines, more}] }`, keys
 // in the order they first appeared: a replaced key keeps its place, so a card
 // never jumps in the rail (omp's TUI sorts statuses and moves a replaced
@@ -113,7 +113,7 @@
   });
 
   /** Rail cards: one for all status lines (key/value rows), then one per
-   *  widget key with its lines as monospace text. Each carries the Tweaks key
+   *  widget key with its lines as monospace text. Each carries the tweak key
    *  that hides it. A widget with no lines has no card. */
   function cards(ext) {
     const out = [];
@@ -135,7 +135,7 @@
     return out;
   }
 
-  /** Tweaks → Rail rows for what the active tab has published. */
+  /** Settings → Rail rows for what the active tab has published. */
   function toggles(ext) {
     const rows = ext.statuses.length > 0 ? [{ tweak: STATUS_TWEAK, label: "extension: status lines" }] : [];
     for (const w of ext.widgets) rows.push({ tweak: widgetTweak(w.key), label: `extension: ${w.key}` });

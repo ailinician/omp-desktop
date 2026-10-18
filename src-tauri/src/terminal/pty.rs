@@ -196,10 +196,12 @@ pub fn spawn(
     cmd.args(spec.shell_args);
     cmd.cwd(spec.cwd);
     shell::apply_env(&mut cmd, &spec.program, spec.session_id);
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("spawn {}: {e}", spec.program.display()))?;
+    #[allow(clippy::disallowed_methods)] // under the gate
+    let child = {
+        let _gate = crate::spawn_gate::shared();
+        pair.slave.spawn_command(cmd)
+    }
+    .map_err(|e| format!("spawn {}: {e}", spec.program.display()))?;
     // Only the child may hold the slave, or the master never sees EOF.
     drop(pair.slave);
 

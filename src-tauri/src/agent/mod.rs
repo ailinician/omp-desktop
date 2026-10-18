@@ -13,10 +13,12 @@
 //!   `read_until_capped`, and credential redaction.
 //! - [`journal`]    — bounded per-session event ring + replay.
 //! - [`ext_ui`]     — latest omp extension status lines / widgets (#52).
+//! - [`approvals`]  — open tool-approval prompts a grant is bound to.
 //!
 //! A stopped session's descendants (subagents, tool calls) die with it
 //! through `crate::supervisor` (Job Object / process group).
 
+mod approvals;
 pub mod ext_ui;
 mod inner;
 pub mod journal;
@@ -30,6 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::AppHandle;
 
+use approvals::PendingApprovals;
 use ext_ui::ExtUiState;
 use inner::BridgeInner;
 use journal::{EventJournal, Replay};
@@ -104,6 +107,11 @@ const ALLOWED_COMMAND_TYPES: &[&str] = &[
     "fork",
     // Goal mode: omp's `goal` command (get/create/resume/pause/drop).
     "goal",
+    // Settings → Agent (#37): omp's session-scoped automatic compaction and
+    // retry switches: sent to a new process when turned off, and to every
+    // open tab on change.
+    "set_auto_compaction",
+    "set_auto_retry",
 ];
 
 /// What one omp process is started with (`start_session` → `spawn_omp`).
@@ -207,6 +215,9 @@ impl AgentBridge {
         )));
         let ext_ui = Arc::new(Mutex::new(ExtUiState::default()));
         let project_root = cwd.filter(|c| !c.is_empty()).map(std::path::PathBuf::from);
+        // A second copy of the folder: the reader checks rules against its
+        // own on every prompt, this one travels with a grant.
+        let approvals = Arc::new(Mutex::new(PendingApprovals::new(project_root.clone())));
         let gen = self.next_gen.fetch_add(1, Ordering::SeqCst);
         // Liveness flag for this incarnation. Cloned into the map entry
         // (so `reap_and_clear_grants`/supersession can clear it) and into
@@ -236,6 +247,7 @@ impl AgentBridge {
                     supervisor: Some(supervisor),
                     journal: Arc::clone(&journal),
                     ext_ui: Arc::clone(&ext_ui),
+                    approvals: Arc::clone(&approvals),
                     // Kept alive (pun intended) on the map entry; the reader
                     // thread below gets its own clone via `alive` moved into
                     // `StdoutReaderConfig`.
@@ -272,6 +284,7 @@ impl AgentBridge {
             gen,
             journal,
             ext_ui,
+            approvals,
             stdin: stdin_for_reader,
             rule_book,
             project_root,
@@ -325,6 +338,8 @@ impl AgentBridge {
     /// never deadlocks concurrent management calls. If the session isn't
     /// running, the cached startup error (if any) takes precedence over a
     /// generic "session not found" so the frontend gets the real reason.
+    /// An `extension_ui_response` that reached omp settles its approval
+    /// prompt: answered, it can no longer be granted ([`approvals`]).
     pub fn send(&self, session_id: &str, line: &str) -> Result<(), String> {
         // Strip any trailing CR/LF the caller appended. The omp RPC parser
         // is line-framed — a stray blank line corrupts the stream and a
@@ -333,24 +348,22 @@ impl AgentBridge {
         // frontend is responsible for not embedding raw newlines in JSON
         // (which is invalid JSON anyway).
         let trimmed = line.trim_end_matches(['\r', '\n']);
-        validate_command_type(trimmed)?;
+        let command = validate_command_type(trimmed)?;
+        let answered = approvals::answered_id(&command);
 
-        let Some(stdin_arc) =
-            self.with_entry(session_id, |inner| inner.stdin.as_ref().map(Arc::clone))?
+        let Some((stdin_arc, open)) = self.with_entry(session_id, |inner| {
+            (
+                inner.stdin.as_ref().map(Arc::clone),
+                answered.map(|_| Arc::clone(&inner.approvals)),
+            )
+        })?
         else {
             return Err(self
                 .last_error(session_id)
                 .unwrap_or_else(|| format!("session '{session_id}' not found")));
         };
         let stdin_arc = stdin_arc.ok_or_else(|| "agent not running".to_string())?;
-
-        let mut stdin = stdin_arc
-            .lock()
-            .map_err(|_| "stdin lock poisoned".to_string())?;
-        writeln!(*stdin, "{trimmed}").map_err(|e| e.to_string())?;
-        // ChildStdin is unbuffered, but flush() costs nothing and keeps
-        // the contract explicit.
-        stdin.flush().map_err(|e| e.to_string())
+        write_command(&stdin_arc, trimmed, answered.zip(open.as_deref()))
     }
 
     /// Look up the last cached spawn / startup error for a `session_id`.
@@ -394,8 +407,9 @@ impl AgentBridge {
     /// `pick` applied to `session_id`'s map entry, holding the `sessions`
     /// lock only while `pick` runs: callers take an `Arc` handle out and lock
     /// or write through it after the map lock is released, so a slow pipe or
-    /// a busy reader never blocks management calls. `Ok(None)` for an unknown
-    /// session.
+    /// a busy reader never blocks management calls (`approve_and_grant`
+    /// instead makes a session grant in `pick`: a set insert that must not
+    /// outlive the entry). `Ok(None)` for an unknown session.
     fn with_entry<T>(
         &self,
         session_id: &str,
@@ -514,20 +528,43 @@ fn reap_and_clear_grants(
 }
 
 /// Parse `trimmed` as JSON, require a string `type` field, and check it
-/// against [`ALLOWED_COMMAND_TYPES`]. Extracted as a pure function so the
-/// validation logic is unit-testable without a running child process.
-fn validate_command_type(trimmed: &str) -> Result<(), String> {
+/// against [`ALLOWED_COMMAND_TYPES`]; the parsed command on success.
+/// Extracted as a pure function so the validation logic is unit-testable
+/// without a running child process.
+fn validate_command_type(trimmed: &str) -> Result<serde_json::Value, String> {
     let parsed: serde_json::Value =
         serde_json::from_str(trimmed).map_err(|_| "command is not valid JSON".to_string())?;
     let cmd_type = parsed
         .get("type")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "command missing string 'type' field".to_string())?;
-    if ALLOWED_COMMAND_TYPES.contains(&cmd_type) {
-        Ok(())
-    } else {
-        Err(format!("command type '{cmd_type}' is not allowed"))
+    if !ALLOWED_COMMAND_TYPES.contains(&cmd_type) {
+        return Err(format!("command type '{cmd_type}' is not allowed"));
     }
+    Ok(parsed)
+}
+
+/// Write one command line to omp's `stdin`, then — only once it was written
+/// — settle the approval prompt it answers (`answered`: request id and the
+/// process's open prompts). Generic over the writer, like
+/// `reader::try_auto_approve`, so a test can pass a `Mutex<Vec<u8>>`.
+fn write_command<W: Write>(
+    stdin: &Mutex<W>,
+    line: &str,
+    answered: Option<(&str, &Mutex<PendingApprovals>)>,
+) -> Result<(), String> {
+    let mut w = stdin
+        .lock()
+        .map_err(|_| "stdin lock poisoned".to_string())?;
+    writeln!(*w, "{line}").map_err(|e| e.to_string())?;
+    // ChildStdin is unbuffered, but flush() costs nothing and keeps the
+    // contract explicit.
+    w.flush().map_err(|e| e.to_string())?;
+    drop(w);
+    if let Some((id, open)) = answered {
+        approvals::settle(open, id);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -569,7 +606,7 @@ mod tests {
         };
         let live = flat(include_str!("../../../src/live.js"));
         let mut checked = 0;
-        for callee in ["_send(", "_sendWithResponse("] {
+        for callee in ["_send(", "_sendWithResponse(", "_sendToAll("] {
             for (idx, _) in live.match_indices(callee) {
                 let args = &live[idx + callee.len()..];
                 if let Some(rest) = args.strip_prefix("{type:\"") {
@@ -637,9 +674,73 @@ mod tests {
         assert!(err.contains("missing string 'type'"));
     }
 
+    fn open_prompt(id: &str) -> Mutex<PendingApprovals> {
+        let open = Mutex::new(PendingApprovals::new(None));
+        approvals::observe(
+            &open,
+            Some("extension_ui_request"),
+            &approval_prompt(id, "bash"),
+        );
+        open
+    }
+
+    #[test]
+    fn a_written_answer_settles_its_prompt() {
+        let stdin: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+        let open = open_prompt("req-1");
+        let line = r#"{"type":"extension_ui_response","id":"req-1","value":"Deny"}"#;
+        write_command(&stdin, line, Some(("req-1", &open))).unwrap();
+        assert_eq!(
+            stdin.lock().unwrap().as_slice(),
+            format!("{line}\n").as_bytes()
+        );
+        assert_eq!(open.lock().unwrap().tool("req-1"), None);
+    }
+
+    /// What `send` passes: a command that carries the prompt's id but is not
+    /// an `extension_ui_response` answers nothing.
+    #[test]
+    fn a_command_that_answers_nothing_leaves_the_prompt_open() {
+        let stdin: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+        let open = open_prompt("req-1");
+        let line = r#"{"type":"get_state","id":"req-1"}"#;
+        let command = validate_command_type(line).unwrap();
+        let answered = approvals::answered_id(&command).map(|id| (id, &open));
+        write_command(&stdin, line, answered).unwrap();
+        assert_eq!(open.lock().unwrap().tool("req-1"), Some("bash"));
+    }
+
+    #[test]
+    fn an_answer_omp_never_received_leaves_the_prompt_open() {
+        let open = open_prompt("req-1");
+        let line = r#"{"type":"extension_ui_response","id":"req-1","value":"Approve"}"#;
+        assert!(write_command(&Mutex::new(Broken), line, Some(("req-1", &open))).is_err());
+        assert_eq!(open.lock().unwrap().tool("req-1"), Some("bash"));
+    }
+
+    /// A stdin whose every write fails, as a pipe omp closed does.
+    pub(super) struct Broken;
+
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// omp's tool-approval prompt `id` for `tool`, as the reader sees it.
+    pub(super) fn approval_prompt(id: &str, tool: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "extension_ui_request", "id": id, "method": "select",
+            "title": format!("Allow tool: {tool}\nCommand: ls"), "options": ["Approve", "Deny"],
+        })
+    }
+
     /// A map entry with no process behind it (generation 1, empty journal and
     /// extension state); a test overrides the fields it exercises.
-    fn idle_inner(alive: Arc<AtomicBool>) -> BridgeInner {
+    pub(super) fn idle_inner(alive: Arc<AtomicBool>) -> BridgeInner {
         BridgeInner {
             gen: 1,
             stdin: None,
@@ -650,6 +751,7 @@ mod tests {
                 EVENT_JOURNAL_MAX_BYTES,
             ))),
             ext_ui: Arc::default(),
+            approvals: Arc::new(Mutex::new(PendingApprovals::new(None))),
             alive,
         }
     }

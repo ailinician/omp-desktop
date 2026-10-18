@@ -120,4 +120,6 @@ function useGoalMode({ bridge, tabId, sessionIds, goal, planMode, profileId, run
   return { mode, tint, goalBlocked, planBlocked, toggle, enter, start, strip };
 }
 
-Object.assign(window, { useGoalMode });
+// `_UG_useContinuation` also backs Settings → Agent → Goals
+// (design/settings/rows-agent.jsx, read at render time).
+Object.assign(window, { useGoalMode, useGoalContinuation: _UG_useContinuation });

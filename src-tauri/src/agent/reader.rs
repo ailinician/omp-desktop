@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter};
 use crate::approval::{self, RuleBook};
 use crate::redaction::{is_credential_key, REDACTED_PLACEHOLDER};
 
+use super::approvals::{self, PendingApprovals};
 use super::ext_ui::{self, ExtUiState};
 use super::inner::BridgeInner;
 use super::journal::EventJournal;
@@ -151,6 +152,27 @@ fn try_auto_approve<W: std::io::Write>(
     )
 }
 
+/// The reader's approval step for one parsed frame: a rule-covered prompt is
+/// answered by [`try_auto_approve`] and its notice returned; any other frame
+/// goes to the frontend as is and is shown to `approvals` first — a prompt
+/// the human will see is one a grant may name, and omp's `cancel` settles
+/// one. A prompt answered here is never recorded, so it cannot be granted.
+fn auto_approve_or_track<W: std::io::Write>(
+    frame: &serde_json::Value,
+    frame_type: Option<&str>,
+    rule_book: &RuleBook,
+    sid: &str,
+    project_root: Option<&std::path::Path>,
+    stdin: &Mutex<W>,
+    approvals: &Mutex<PendingApprovals>,
+) -> Option<String> {
+    let notice = try_auto_approve(frame, rule_book, sid, project_root, stdin);
+    if notice.is_none() {
+        approvals::observe(approvals, frame_type, frame);
+    }
+    notice
+}
+
 /// Grouped arguments for [`spawn_stdout_reader`] — bundled into one struct
 /// rather than twelve positional parameters.
 pub(super) struct StdoutReaderConfig {
@@ -161,6 +183,8 @@ pub(super) struct StdoutReaderConfig {
     /// This session's extension status lines and widgets, kept up to date
     /// for a tab that comes back with a `dropped` replay.
     pub(super) ext_ui: Arc<Mutex<ExtUiState>>,
+    /// This process's open approval prompts, for a grant to bind to.
+    pub(super) approvals: Arc<Mutex<PendingApprovals>>,
     pub(super) stdin: Arc<Mutex<ChildStdin>>,
     pub(super) rule_book: Arc<RuleBook>,
     pub(super) project_root: Option<PathBuf>,
@@ -201,6 +225,7 @@ pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
         gen,
         journal,
         ext_ui,
+        approvals,
         stdin,
         rule_book,
         project_root,
@@ -251,6 +276,10 @@ pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
                     // instead would let either of those silently disable
                     // the stderr fallback this flag exists to gate.
                     saw_frame |= parsed.is_some();
+                    let frame_type = parsed
+                        .as_ref()
+                        .and_then(|frame| frame.get("type"))
+                        .and_then(serde_json::Value::as_str);
                     // A rule-covered approval prompt is answered directly on
                     // stdin and replaced with a synthetic notice — the human
                     // never sees the original ask, but does see that it was
@@ -258,19 +287,17 @@ pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
                     let text = parsed
                         .as_ref()
                         .and_then(|frame| {
-                            try_auto_approve(
+                            auto_approve_or_track(
                                 frame,
+                                frame_type,
                                 &rule_book,
                                 &sid,
                                 project_root.as_deref(),
                                 &stdin,
+                                &approvals,
                             )
                         })
                         .unwrap_or(sanitized);
-                    let frame_type = parsed
-                        .as_ref()
-                        .and_then(|frame| frame.get("type"))
-                        .and_then(serde_json::Value::as_str);
                     // One allocation for the line, shared with the journal
                     // by refcount rather than copied into it.
                     let shared: std::sync::Arc<str> = std::sync::Arc::from(text);
@@ -484,6 +511,7 @@ fn read_until_capped<R: BufRead>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::tests::approval_prompt;
     use serde_json::json;
 
     #[test]
@@ -736,6 +764,44 @@ mod tests {
             stdin.lock().unwrap().is_empty(),
             "no rule granted — nothing should be written to stdin"
         );
+    }
+
+    #[test]
+    fn only_a_prompt_the_human_will_answer_is_recorded_for_a_grant() {
+        let dir = crate::test_support::TempDir::new("reader", "approval-track");
+        let rule_book = RuleBook::new(dir.path().to_path_buf());
+        rule_book
+            .grant("sess-1", None, "edit", approval::RuleScope::Session)
+            .unwrap();
+        let stdin: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+        let open = Mutex::new(PendingApprovals::new(None));
+        let step = |frame: &serde_json::Value| {
+            auto_approve_or_track(
+                frame,
+                Some("extension_ui_request"),
+                &rule_book,
+                "sess-1",
+                None,
+                &stdin,
+                &open,
+            )
+        };
+
+        assert!(
+            step(&approval_prompt("req-1", "edit")).is_some(),
+            "rule-covered"
+        );
+        assert!(
+            step(&approval_prompt("req-2", "bash")).is_none(),
+            "forwarded"
+        );
+        let open = open.lock().unwrap();
+        assert_eq!(
+            open.tool("req-1"),
+            None,
+            "answered by the rule, not grantable"
+        );
+        assert_eq!(open.tool("req-2"), Some("bash"));
     }
 
     #[test]

@@ -9,9 +9,10 @@
 //                                   (shape of src-tauri/src/browser/view/ `InputEvent`)
 //   EMPTY / chipsOf / addChip / removeChip / removeChips / restoreChips
 //                                   per-tab chips (OMP_SESSION_UI's per-tab map)
-//   clampWidth(px, stageWidth)      panel width bounds
+//   clampWidth(px, stageWidth)      panel width bounds (MIN_WIDTH .. maxWidth)
+//   maxWidth(stageWidth)            the widest the panel goes
 //   popoverTop(rect, pageH, popH, margin)  annotate popover's top, view fraction
-//   pathMenu(settings)              Tweaks → Browser's Chromium menu rows
+//   pathMenu(settings)              Settings → Browser's Chromium menu rows
 // Which keys the page gives back to the app is OMP_KEYMAP.guestShouldBypass
 // (shared with the terminal). Whether the panel follows the agent's page is
 // decided in Rust (the view holds the user's tab choice for 5 s), so there is
@@ -20,7 +21,7 @@
   const MAX_IMAGES = window.OMP_IMAGES.MAX_ATTACHMENTS;
   const HTML_MAX = 1500;
   const MIN_WIDTH = 360;
-  const CHAT_MIN = 420;
+  const CHAT_MIN = window.OMP_LAYOUT_WIDTHS.CHAT_MIN;
 
   // ---- URL -----------------------------------------------------------------
 
@@ -295,11 +296,14 @@
 
   // ---- Layout --------------------------------------------------------------
 
+  // The widest panel that leaves the chat CHAT_MIN, never under MIN_WIDTH.
+  const maxWidth = (stageWidth) => Math.max(MIN_WIDTH, stageWidth - CHAT_MIN);
+
   // Panel width in px: `px <= 0` means the default, half the stage; never
-  // narrower than 360 and never leaving the chat less than 420.
+  // narrower than MIN_WIDTH nor wider than maxWidth.
   function clampWidth(px, stageWidth) {
     const want = Number.isFinite(px) && px > 0 ? px : Math.round(stageWidth / 2);
-    return Math.max(MIN_WIDTH, Math.min(want, stageWidth - CHAT_MIN));
+    return Math.max(MIN_WIDTH, Math.min(want, maxWidth(stageWidth)));
   }
 
   // Where the annotate popover's top edge goes, as a fraction of the view's
@@ -321,7 +325,7 @@
   const browserName = (path) => window.OMP_PATH_SETTING.programName(path, "browser");
 
   /**
-   * Tweaks → Browser's Chromium button and menu for Rust's `BrowserSettings`
+   * Settings → Browser's Chromium button and menu for Rust's `BrowserSettings`
    * (`{ path, automatic, installed, error }`, null before it loaded):
    * `OMP_PATH_SETTING.menu`'s `{ label, rows }`. `label` names what the
    * panel launches (the stored path, else what auto-detection finds); the
@@ -368,6 +372,8 @@
     removeChip,
     removeChips,
     restoreChips,
+    MIN_WIDTH,
+    maxWidth,
     clampWidth,
     popoverTop,
     pathMenu,

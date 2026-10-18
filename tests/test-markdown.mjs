@@ -111,6 +111,10 @@ const PAYLOADS = {
   "reference javascript: link": `[x][r]\n\n[r]: &#106;avascript:alert(1)`,
   "javascript: autolink": `<javascript:alert(1)>`,
   "data: link": `[a](data:text/html,<script>alert(1)</script>)`,
+  // The file-path exceptions (#39) need a slash after a drive letter and a
+  // `.ext:N` line suffix on a bare name.
+  "drive-letter-shaped javascript: link": `[a](j:javascript:alert(1))`,
+  "line-suffix-shaped javascript: link": `[a](javascript:1)`,
 };
 
 for (const [label, md] of Object.entries(PAYLOADS)) {
@@ -153,6 +157,17 @@ check("inline markdown, links and autolinks still render", () => {
   assert.equal(marked.parse("**b** _i_ `c` [l](https://x.y) <https://a.b> & 1 < 2"),
     '<p><strong>b</strong> <em>i</em> <code>c</code> <a href="https://x.y">l</a> ' +
     '<a href="https://a.b">https://a.b</a> &amp; 1 &lt; 2</p>\n');
+});
+
+// The file preview (#39) claims clicks on file links: a Windows drive path
+// and a bare `name.ext:N`, which `new URL` reads as schemes, stay links.
+check("drive-letter and bare file:line links render as anchors", () => {
+  assert.equal(marked.parse("[a](C:/proj/a.rs#L3)"), '<p><a href="C:/proj/a.rs#L3">a</a></p>\n');
+  assert.equal(marked.parse("[m](main.rs:12)"), '<p><a href="main.rs:12">m</a></p>\n');
+  assert.equal(marked.parse("[m](main.rs:12-20)"), '<p><a href="main.rs:12-20">m</a></p>\n');
+  // Other scheme-shaped hrefs still render as text.
+  assert.equal(marked.parse("[x](vscode:open)"), "<p>x</p>\n");
+  assert.equal(marked.parse("[x](C:relative.rs)"), "<p>x</p>\n");
 });
 
 check("HTML inside a code span stays escaped code", () => {

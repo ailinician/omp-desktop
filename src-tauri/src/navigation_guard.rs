@@ -101,14 +101,19 @@ pub fn classify(url: &Url, dev_url: Option<&Url>) -> Navigation {
 /// intermediate child, so the launched handler neither blocks this call nor
 /// lingers as a zombie. On macOS it waits for `/usr/bin/open`, which hands
 /// the URL to `LaunchServices` and returns at once — it does not wait for the
-/// browser.
+/// browser. The launch holds the spawn gate ([`crate::spawn_gate`]).
 ///
 /// # Errors
 /// The URL is app-local or not a web/mail URL, or the launcher failed to
 /// start.
 pub fn open_external(url: &Url) -> Result<(), String> {
     match classify(url, None) {
-        Navigation::OpenExternal => open::that_detached(url.as_str()).map_err(|e| e.to_string()),
+        Navigation::OpenExternal => {
+            let _gate = crate::spawn_gate::shared();
+            #[allow(clippy::disallowed_methods)] // under the gate
+            let opened = open::that_detached(url.as_str());
+            opened.map_err(|e| e.to_string())
+        }
         Navigation::Stay | Navigation::Block => Err(format!("refusing to open {url} externally")),
     }
 }

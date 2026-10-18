@@ -1,57 +1,30 @@
-//! Proxy tests: admission before the lazy launch, the connection cap,
-//! `/json` rewriting, the splice, shutdown, and what the tap reports through
-//! it. Also the WebSocket frame builders and the report recorder the other
-//! proxy modules' tests share.
+//! Proxy tests: admission before the lazy launch, the connection caps,
+//! discovery answered from the broker, agent WebSocket connections pumped
+//! through it, shutdown, and what the tap reports along the way. Also the
+//! report recorder the other proxy modules' tests share.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+use std::io::{self, Cursor, Read, Write};
+use std::net::{Ipv4Addr, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::http::{rewrite_json, MAX_HEAD};
+use serde_json::{json, Value};
+use tungstenite::error::Error as WsError;
+use tungstenite::protocol::frame::coding::CloseCode;
+use tungstenite::protocol::Role;
+use tungstenite::{Message, WebSocket};
+
+use super::http::MAX_HEAD;
 use super::{AgentTarget, Ensure, Proxy, MAX_CONNECTIONS, MAX_UNVETTED};
+use crate::browser::broker::fake::fake_browser;
+use crate::browser::broker::Broker;
 use crate::browser::lock;
-use crate::browser::tests::http_get;
+use crate::browser::tests::{
+    cdp_error, cdp_result, http_get, http_request, http_roundtrip, split_response, PEER_CHECK,
+};
 use crate::test_support::eventually;
-
-const MASK: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
-
-/// One frame as a client (`masked`) or a server sends it, with the shortest
-/// length encoding.
-pub(super) fn frame(opcode: u8, fin: bool, masked: bool, payload: &[u8]) -> Vec<u8> {
-    let mut out = vec![if fin { 0x80 | opcode } else { opcode }];
-    let flag = if masked { 0x80 } else { 0 };
-    match payload.len() {
-        n @ 0..=125 => out.push(flag | u8::try_from(n).unwrap()),
-        n @ 126..=0xFFFF => {
-            out.push(flag | 0x7E);
-            out.extend_from_slice(&u16::try_from(n).unwrap().to_be_bytes());
-        }
-        n => {
-            out.push(flag | 0x7F);
-            out.extend_from_slice(&u64::try_from(n).unwrap().to_be_bytes());
-        }
-    }
-    if masked {
-        out.extend_from_slice(&MASK);
-        out.extend(payload.iter().enumerate().map(|(i, b)| b ^ MASK[i % 4]));
-    } else {
-        out.extend_from_slice(payload);
-    }
-    out
-}
-
-/// A client's text message in one frame.
-pub(super) fn masked_text(text: &str) -> Vec<u8> {
-    frame(0x1, true, true, text.as_bytes())
-}
-
-/// A server's text message in one frame.
-pub(super) fn text(text: &str) -> Vec<u8> {
-    frame(0x1, true, false, text.as_bytes())
-}
 
 /// The targets a tap reported.
 #[derive(Clone, Default)]
@@ -84,80 +57,73 @@ fn refusing_ensure() -> (Ensure, Arc<AtomicUsize>) {
     (ensure, calls)
 }
 
-/// The head of an agent's WebSocket upgrade to `path`.
+/// The fake Chromium's answers: discovery, page creation and attaching,
+/// `Echo` (its params back), a crash on `Crash`.
+fn chromium(request: &Value) -> Option<Vec<Value>> {
+    let result = match request["method"].as_str().unwrap_or_default() {
+        "Target.getTargets" => json!({ "targetInfos": [
+            { "targetId": "B0", "type": "browser", "title": "", "url": "" },
+            { "targetId": "TAB0", "type": "tab", "title": "One", "url": "about:blank" },
+            { "targetId": "P1", "type": "page", "title": "One", "url": "about:blank",
+              "attached": false },
+        ] }),
+        "Target.createTarget" => json!({ "targetId": "T9" }),
+        "Target.attachToTarget" => json!({ "sessionId": "S1" }),
+        "Target.activateTarget" | "Target.closeTarget" if request["params"]["targetId"] == "P1" => {
+            json!({})
+        }
+        "Target.activateTarget" | "Target.closeTarget" => {
+            return Some(vec![cdp_error(request, "No target with given id found")])
+        }
+        "Crash" => return None,
+        _ => json!({ "echo": request["params"] }),
+    };
+    Some(vec![cdp_result(request, result)])
+}
+
+/// A proxy in front of `broker`.
+fn serving(broker: Arc<Broker>, on_target: AgentTarget) -> Proxy {
+    Proxy::bind(Arc::new(move || Ok(Arc::clone(&broker))), on_target).unwrap()
+}
+
+/// A proxy in front of a fresh [`chromium`].
+fn proxy() -> Proxy {
+    serving(fake_browser(chromium), nobody())
+}
+
+/// The head of a bare WebSocket upgrade to `path` (no key, no version).
 fn upgrade(path: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n\r\n")
 }
 
-/// Serves `/json/version` and, for any other request, echoes whatever the
-/// client sends after the request head.
-fn fake_upstream() -> u16 {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            thread::spawn(move || serve_fake(&stream, port));
-        }
-    });
-    port
-}
-
-fn serve_fake(stream: &TcpStream, port: u16) {
-    let mut reader = BufReader::new(stream);
-    let mut request_line = String::new();
-    reader.read_line(&mut request_line).unwrap();
-    skip_head(&mut reader);
-    let mut out = stream;
-    if request_line.starts_with("GET /json/version") {
-        let body =
-            format!(r#"{{"webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/browser/x"}}"#);
-        write!(
-            out,
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        )
-        .unwrap();
-    } else {
-        let _ = io::copy(&mut reader, &mut out);
-    }
-}
-
-/// Reads the rest of a request head, up to its blank line.
-fn skip_head(reader: &mut impl BufRead) {
-    loop {
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        if line.trim().is_empty() {
-            break;
-        }
-    }
-}
-
-/// Sends `request`, then collects the reply until EOF or a quiet second.
+/// [`http_roundtrip`], which must reach the proxy.
 fn raw_roundtrip(port: u16, request: &[u8]) -> Vec<u8> {
-    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(1)))
-        .unwrap();
-    stream.write_all(request).unwrap();
-    let mut got = Vec::new();
-    let mut chunk = [0u8; 256];
-    while let Ok(n @ 1..) = stream.read(&mut chunk) {
-        got.extend_from_slice(&chunk[..n]);
-    }
-    got
+    http_roundtrip(port, request).unwrap()
 }
 
-/// Reads from `stream` until what arrived ends with `tail`.
-fn read_until_ends_with(stream: &mut TcpStream, tail: &[u8]) -> Vec<u8> {
-    let mut got = Vec::new();
-    let mut chunk = [0u8; 16 * 1024];
-    while !got.ends_with(tail) {
-        let n = stream.read(&mut chunk).unwrap();
-        assert!(n > 0, "closed before the end: {} bytes", got.len());
-        got.extend_from_slice(&chunk[..n]);
-    }
-    got
+/// [`http_request`], which must reach the proxy.
+fn request(port: u16, method: &str, path: &str) -> (String, String) {
+    http_request(port, method, path).unwrap()
+}
+
+/// The ids of the connections waiting for their head, oldest first.
+fn unvetted_ids(proxy: &Proxy) -> Vec<u64> {
+    lock(&proxy.shared.unvetted)
+        .iter()
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// A connection that sends nothing, once it waits for its head (its peer
+/// check passed).
+fn idle_socket(proxy: &Proxy) -> TcpStream {
+    let newest = unvetted_ids(proxy).last().copied();
+    let socket = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
+    let waiting = eventually(PEER_CHECK, || {
+        (unvetted_ids(proxy).last().copied() != newest).then_some(())
+    });
+    assert!(waiting.is_some(), "the idle socket waits for its head");
+    socket
 }
 
 /// Whether the proxy closed `stream` (an EOF or a reset) before its read
@@ -168,65 +134,53 @@ fn closed_unanswered(stream: &mut TcpStream) -> Result<bool, String> {
     match stream.read(&mut buf) {
         Ok(0) => Ok(true),
         Ok(n) => Err(String::from_utf8_lossy(&buf[..n]).into_owned()),
-        Err(e) => Ok(!matches!(
-            e.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-        )),
+        Err(e) => Ok(!timed_out(&e)),
     }
 }
 
-#[test]
-fn json_bodies_point_at_the_proxy() {
-    assert_eq!(
-        rewrite_json(
-            r#"{"a":"ws://127.0.0.1:9222/x","b":"ws://localhost:9222/y"}"#,
-            9222,
-            4000
-        ),
-        r#"{"a":"ws://127.0.0.1:4000/x","b":"ws://127.0.0.1:4000/y"}"#
-    );
+fn timed_out(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
 }
 
-#[test]
-fn version_is_rewritten_and_raw_traffic_is_spliced() {
-    let up = fake_upstream();
-    let proxy = Proxy::bind(Arc::new(move || Ok(up)), nobody()).unwrap();
-    let body = http_get(proxy.port(), "/json/version").unwrap();
-    assert!(
-        body.contains(&format!("127.0.0.1:{}", proxy.port())),
-        "{body}"
-    );
-    // `PING` rides in the same write as the head: it must reach upstream.
-    let request = format!("{}PING", upgrade("/devtools/browser/x"));
-    let echoed = raw_roundtrip(proxy.port(), request.as_bytes());
-    assert!(echoed.ends_with(b"PING"), "{echoed:?}");
+/// An agent's WebSocket to `path` through `proxy`.
+fn agent_socket(proxy: &Proxy, path: &str) -> WebSocket<TcpStream> {
+    let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let url = format!("ws://127.0.0.1:{}{path}", proxy.port());
+    let (ws, response) = tungstenite::client(url, stream).unwrap();
+    assert_eq!(response.status(), 101);
+    ws
 }
 
-/// The proxy asks `ensure` on every admitted connection, concurrently: a
-/// slow launch holds no other connection back (launching once is
-/// `Slot::ensure`'s job).
-#[test]
-fn concurrent_discoveries_through_one_slow_ensure_all_succeed() {
-    let up = fake_upstream();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let c = Arc::clone(&calls);
-    let ensure: Ensure = Arc::new(move || {
-        c.fetch_add(1, Ordering::SeqCst);
-        thread::sleep(Duration::from_millis(200));
-        Ok(up)
-    });
-    let proxy = Proxy::bind(ensure, nobody()).unwrap();
-    let handles: Vec<_> = (0..5)
-        .map(|_| {
-            let p = proxy.port();
-            thread::spawn(move || http_get(p, "/json/version"))
-        })
-        .collect();
-    for h in handles {
-        let body = h.join().unwrap().unwrap();
-        assert!(body.contains("webSocketDebuggerUrl"), "{body}");
+fn send(ws: &mut WebSocket<TcpStream>, message: &Value) {
+    ws.send(Message::text(message.to_string())).unwrap();
+}
+
+/// The next text message.
+fn next_text(ws: &mut WebSocket<TcpStream>) -> Value {
+    loop {
+        if let Message::Text(text) = ws.read().unwrap() {
+            return serde_json::from_str(&text).unwrap();
+        }
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 5);
+}
+
+/// Whether `ws` ends (closed or reset by the proxy) within its read timeout
+/// without another text message.
+fn ends_without_text(ws: &mut WebSocket<TcpStream>) -> bool {
+    loop {
+        match ws.read() {
+            Ok(Message::Text(text)) => panic!("unexpected message: {text}"),
+            Ok(_) => {}
+            Err(WsError::Io(e)) => return !timed_out(&e),
+            Err(_) => return true,
+        }
+    }
 }
 
 /// Refused requests get a 403 and never launch Chromium.
@@ -240,6 +194,185 @@ fn assert_forbidden(request: &[u8]) {
         String::from_utf8_lossy(request)
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0, "no lazy launch");
+}
+
+#[test]
+fn version_points_at_the_proxy_and_the_broker() {
+    let broker = fake_browser(chromium);
+    let proxy = serving(Arc::clone(&broker), nobody());
+    let body = http_get(proxy.port(), "/json/version").unwrap();
+    let version: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        version,
+        json!({
+            "Browser": "FakeChrome/1.0",
+            "Protocol-Version": "1.3",
+            "User-Agent": "FakeChrome",
+            "V8-Version": "0.0",
+            "WebKit-Version": "@0",
+            "webSocketDebuggerUrl": format!(
+                "ws://127.0.0.1:{}/devtools/browser/{}", proxy.port(), broker.id()
+            ),
+        })
+    );
+}
+
+#[test]
+fn the_target_list_has_the_pages_with_proxy_urls() {
+    let proxy = proxy();
+    let expected = json!([{
+        "description": "",
+        "devtoolsFrontendUrl": "",
+        "id": "P1",
+        "title": "One",
+        "type": "page",
+        "url": "about:blank",
+        "webSocketDebuggerUrl": format!("ws://127.0.0.1:{}/devtools/page/P1", proxy.port()),
+    }]);
+    for path in ["/json", "/json/list", "/json/list?t=1"] {
+        let body = http_get(proxy.port(), path).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn a_new_page_takes_a_put_and_its_url() {
+    let created = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&created);
+    let broker = fake_browser(move |request| {
+        if request["method"] == "Target.createTarget" {
+            lock(&seen).push(request["params"]["url"].as_str().map(str::to_owned));
+        }
+        chromium(request)
+    });
+    let proxy = serving(broker, nobody());
+    let (status, body) = request(proxy.port(), "PUT", "/json/new?https://e.example/a%20b");
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    let entry: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(entry["id"], "T9");
+    assert_eq!(entry["type"], "page");
+    assert_eq!(entry["url"], "https://e.example/a b");
+    assert_eq!(
+        entry["webSocketDebuggerUrl"],
+        format!("ws://127.0.0.1:{}/devtools/page/T9", proxy.port())
+    );
+    let (status, _) = request(proxy.port(), "PUT", "/json/new");
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(
+        *lock(&created),
+        [
+            Some("https://e.example/a b".to_owned()),
+            Some("about:blank".to_owned())
+        ]
+    );
+}
+
+#[test]
+fn activate_and_close_answer_like_chrome() {
+    let proxy = proxy();
+    assert_eq!(
+        request(proxy.port(), "GET", "/json/activate/P1"),
+        ("HTTP/1.1 200 OK".to_owned(), "Target activated".to_owned())
+    );
+    assert_eq!(
+        request(proxy.port(), "GET", "/json/close/P1"),
+        ("HTTP/1.1 200 OK".to_owned(), "Target is closing".to_owned())
+    );
+    for path in ["/json/activate/nope", "/json/close/nope"] {
+        assert_eq!(
+            request(proxy.port(), "GET", path),
+            (
+                "HTTP/1.1 404 Not Found".to_owned(),
+                "No such target id: nope".to_owned()
+            ),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn unknown_endpoints_and_bad_upgrades_never_launch() {
+    let (ensure, calls) = refusing_ensure();
+    let proxy = Proxy::bind(ensure, nobody()).unwrap();
+    for (method, path, status) in [
+        (
+            "GET",
+            "/json/new?about:blank",
+            "HTTP/1.1 405 Method Not Allowed",
+        ),
+        ("GET", "/json/protocol", "HTTP/1.1 404 Not Found"),
+        ("GET", "/json/activate/", "HTTP/1.1 404 Not Found"),
+    ] {
+        assert_eq!(request(proxy.port(), method, path).0, status, "{path}");
+    }
+    let key = "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
+    let version = "Sec-WebSocket-Version: 13\r\n";
+    for (path, headers, status) in [
+        ("/x", format!("{key}{version}"), "HTTP/1.1 404 Not Found"),
+        (
+            "/devtools/page/",
+            format!("{key}{version}"),
+            "HTTP/1.1 404 Not Found",
+        ),
+        (
+            "/devtools/browser/x",
+            String::new(),
+            "HTTP/1.1 400 Bad Request",
+        ),
+        (
+            "/devtools/browser/x",
+            key.to_owned(),
+            "HTTP/1.1 400 Bad Request",
+        ),
+        (
+            "/devtools/browser/x",
+            version.to_owned(),
+            "HTTP/1.1 400 Bad Request",
+        ),
+        (
+            "/devtools/browser/x",
+            format!("{key}Sec-WebSocket-Version: 8\r\n"),
+            "HTTP/1.1 400 Bad Request",
+        ),
+    ] {
+        let head = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n{headers}\r\n"
+        );
+        let (got, _) = split_response(&raw_roundtrip(proxy.port(), head.as_bytes()));
+        assert_eq!(got, status, "{path} {headers}");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no lazy launch");
+}
+
+/// The proxy asks `ensure` on every admitted connection, concurrently: a
+/// slow launch holds no other connection back (launching once is
+/// `Slot::ensure`'s job).
+#[test]
+fn concurrent_discoveries_through_one_slow_ensure_all_succeed() {
+    let broker = fake_browser(chromium);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+    let ensure: Ensure = Arc::new(move || {
+        c.fetch_add(1, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(200));
+        Ok(Arc::clone(&broker))
+    });
+    let proxy = Proxy::bind(ensure, nobody()).unwrap();
+    let handles: Vec<_> = (0..5)
+        .map(|_| {
+            let p = proxy.port();
+            thread::spawn(move || http_get(p, "/json/version"))
+        })
+        .collect();
+    for h in handles {
+        let body = h.join().unwrap().unwrap();
+        assert!(body.contains("webSocketDebuggerUrl"), "{body}");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
 }
 
 #[test]
@@ -275,8 +408,7 @@ fn a_request_from_a_web_page_never_launches() {
 fn node_fetch_metadata_alone_is_admitted() {
     // Node's `fetch` sends `Sec-Fetch-Mode: cors` and nothing else of the
     // fetch metadata; puppeteer's discovery may run there.
-    let up = fake_upstream();
-    let proxy = Proxy::bind(Arc::new(move || Ok(up)), nobody()).unwrap();
+    let proxy = proxy();
     let response = raw_roundtrip(
         proxy.port(),
         b"GET /json/version HTTP/1.1\r\nHost: 127.0.0.1\r\nsec-fetch-mode: cors\r\n\r\n",
@@ -333,30 +465,8 @@ fn absolute_form_target_is_rejected_before_ensure() {
 }
 
 #[test]
-fn websocket_upgrade_head_reaches_upstream_unchanged() {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let request =
-        b"GET /devtools/browser/x HTTP/1.1\r\nHost: localhost:9222\r\nUpgrade: websocket\r\nX-Extra: kept\r\n\r\n";
-    let upstream = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        let mut received = vec![0; request.len()];
-        stream.read_exact(&mut received).unwrap();
-        stream.write_all(b"unchanged").unwrap();
-        received
-    });
-    let proxy = Proxy::bind(Arc::new(move || Ok(port)), nobody()).unwrap();
-    assert_eq!(raw_roundtrip(proxy.port(), request), b"unchanged");
-    assert_eq!(upstream.join().unwrap(), request);
-}
-
-#[test]
 fn discovery_accepts_loopback_authorities_with_any_port() {
-    let up = fake_upstream();
-    let proxy = Proxy::bind(Arc::new(move || Ok(up)), nobody()).unwrap();
+    let proxy = proxy();
     for host in [
         "localhost",
         "LoCaLhOsT:12345",
@@ -373,7 +483,7 @@ fn discovery_accepts_loopback_authorities_with_any_port() {
             "{host}: {response:?}"
         );
         assert!(String::from_utf8_lossy(&response).contains(&format!(
-            "ws://127.0.0.1:{}/devtools/browser/x",
+            "ws://127.0.0.1:{}/devtools/browser/",
             proxy.port()
         )));
     }
@@ -397,7 +507,7 @@ fn oversized_head_is_closed_unanswered() {
     let mut request = b"GET /json HTTP/1.1\r\nHost: localhost\r\nX: ".to_vec();
     request.resize(MAX_HEAD + 100, b'a');
     let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.set_read_timeout(Some(PEER_CHECK)).unwrap();
     s.write_all(&request).unwrap();
     assert_eq!(closed_unanswered(&mut s), Ok(true));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -405,20 +515,15 @@ fn oversized_head_is_closed_unanswered() {
 
 #[test]
 fn admitted_connections_over_the_cap_are_refused_until_one_closes() {
-    let up = fake_upstream();
-    let proxy = Proxy::bind(Arc::new(move || Ok(up)), nobody()).unwrap();
-    // Live splices: each holds a slot until it closes.
-    let mut spliced: Vec<TcpStream> = (0..MAX_CONNECTIONS)
-        .map(|_| {
-            let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
-            s.write_all(upgrade("/devtools/x").as_bytes()).unwrap();
-            s
-        })
+    let proxy = proxy();
+    // Live WebSockets: each holds a slot until it closes.
+    let mut sockets: Vec<_> = (0..MAX_CONNECTIONS)
+        .map(|_| agent_socket(&proxy, "/devtools/browser/x"))
         .collect();
     let full = eventually(Duration::from_secs(3), || {
         (proxy.shared.connections.load(Ordering::SeqCst) == MAX_CONNECTIONS).then_some(())
     });
-    assert!(full.is_some(), "every splice holds a slot");
+    assert!(full.is_some(), "every WebSocket holds a slot");
     let refused = raw_roundtrip(
         proxy.port(),
         b"GET /json/version HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -428,24 +533,24 @@ fn admitted_connections_over_the_cap_are_refused_until_one_closes() {
         "{}",
         String::from_utf8_lossy(&refused)
     );
-    drop(spliced.pop());
+    drop(sockets.pop());
     let served = eventually(Duration::from_secs(3), || {
         http_get(proxy.port(), "/json/version")
             .ok()
             .filter(|body| body.contains("webSocketDebuggerUrl"))
     });
     assert!(served.is_some(), "a freed slot serves again");
-    drop(spliced);
+    drop(sockets);
 }
 
 #[test]
 fn idle_sockets_never_starve_the_agent() {
-    let up = fake_upstream();
-    let proxy = Proxy::bind(Arc::new(move || Ok(up)), nobody()).unwrap();
+    let proxy = proxy();
     // Twice as many sockets that never send a head as may wait for one,
-    // more than the connection cap too.
+    // more than the connection cap too; each connects once the one before
+    // waits, so they wait in connection order.
     let mut idle: Vec<TcpStream> = (0..2 * MAX_UNVETTED.max(MAX_CONNECTIONS))
-        .map(|_| TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap())
+        .map(|_| idle_socket(&proxy))
         .collect();
     let body = http_get(proxy.port(), "/json/version").unwrap();
     assert!(
@@ -455,7 +560,7 @@ fn idle_sockets_never_starve_the_agent() {
     // The longest waiting were cut to make room; the newest still wait.
     let cut = idle.len() - MAX_UNVETTED + 1; // the agent's took one more
     for (i, s) in idle[..cut].iter_mut().enumerate() {
-        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         assert_eq!(closed_unanswered(s), Ok(true), "idle socket {i}");
     }
     let newest = idle.last_mut().unwrap();
@@ -465,15 +570,80 @@ fn idle_sockets_never_starve_the_agent() {
     assert_eq!(closed_unanswered(newest), Ok(false));
 }
 
+/// Another OS user's connection gets nothing and is closed before its head
+/// is read; it never launches Chromium, and never waits among (or cuts)
+/// the connections of our user that wait for their head.
+#[test]
+fn a_foreign_peer_is_closed_unanswered_and_displaces_no_one() {
+    let (ensure, calls) = refusing_ensure();
+    // A head timeout far beyond the test: only a cut ends an idle socket.
+    let proxy = Proxy::bind_with(ensure, nobody(), Duration::from_secs(60)).unwrap();
+    let mut ours: Vec<TcpStream> = (0..MAX_UNVETTED).map(|_| idle_socket(&proxy)).collect();
+    let waiting = unvetted_ids(&proxy);
+    proxy.shared.force_foreign.store(true, Ordering::SeqCst);
+    for i in 0..=MAX_UNVETTED {
+        let mut foreign = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
+        foreign.set_read_timeout(Some(PEER_CHECK)).unwrap();
+        // The proxy may have closed it already.
+        let _ = foreign.write_all(b"GET /json/version HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+        assert_eq!(closed_unanswered(&mut foreign), Ok(true), "foreign {i}");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no lazy launch");
+    assert_eq!(unvetted_ids(&proxy), waiting, "the same connections wait");
+    for (i, s) in ours.iter_mut().enumerate() {
+        s.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        assert_eq!(closed_unanswered(s), Ok(false), "our socket {i}");
+    }
+}
+
+/// A client in another process of our OS user: the peer check goes through
+/// the other process's token (and creation time), not our own pid.
+#[cfg(windows)]
+#[test]
+fn a_client_in_another_process_of_ours_is_served() {
+    let Some(root) = std::env::var_os("SystemRoot") else {
+        eprintln!("skipped: %SystemRoot% is not set");
+        return;
+    };
+    let curl = std::path::Path::new(&root).join(r"System32\curl.exe");
+    if !curl.is_file() {
+        eprintln!("skipped: no {}", curl.display());
+        return;
+    }
+    let proxy = proxy();
+    let output = std::process::Command::new(&curl)
+        .args([
+            "-s",
+            "--max-time",
+            "20",
+            "-w",
+            "\n%{http_code}",
+            &format!("http://127.0.0.1:{}/json/version", proxy.port()),
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "curl failed: {output:?}");
+    let (body, status) = stdout.rsplit_once('\n').unwrap_or_default();
+    assert_eq!(status, "200", "{stdout}");
+    let version: Value = serde_json::from_str(body).unwrap();
+    assert!(version["webSocketDebuggerUrl"].is_string(), "{body}");
+}
+
 #[test]
 fn finished_connections_are_untracked() {
-    let up = fake_upstream();
-    let proxy = Proxy::bind(Arc::new(move || Ok(up)), nobody()).unwrap();
+    let proxy = proxy();
     for _ in 0..3 {
         http_get(proxy.port(), "/json/version").unwrap();
     }
     let _ = raw_roundtrip(proxy.port(), upgrade("/x").as_bytes());
     let _ = raw_roundtrip(proxy.port(), b"GET /x HTTP/1.1\r\n\r\n");
+    let mut ws = agent_socket(&proxy, "/devtools/browser/x");
+    send(&mut ws, &json!({ "id": 1, "method": "Echo", "params": {} }));
+    next_text(&mut ws);
+    ws.close(None).unwrap();
+    drop(ws);
     let drained = eventually(Duration::from_secs(3), || {
         let idle = proxy.shared.live().is_empty()
             && lock(&proxy.shared.unvetted).is_empty()
@@ -486,88 +656,56 @@ fn finished_connections_are_untracked() {
     );
 }
 
-/// Upstream that reads until the client's EOF, then replies and closes.
-fn reply_after_eof_upstream() -> u16 {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    thread::spawn(move || {
-        for mut stream in listener.incoming().flatten() {
-            thread::spawn(move || {
-                let mut received = Vec::new();
-                stream.read_to_end(&mut received).unwrap();
-                write!(stream, "REPLY:{}", received.ends_with(b"PING")).unwrap();
-            });
-        }
-    });
-    port
-}
-
-#[test]
-fn client_half_close_keeps_the_reply_path_open() {
-    let up = reply_after_eof_upstream();
-    let proxy = Proxy::bind(Arc::new(move || Ok(up)), nobody()).unwrap();
-    let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-    s.write_all(format!("{}PING", upgrade("/devtools/x")).as_bytes())
-        .unwrap();
-    s.shutdown(Shutdown::Write).unwrap();
-    let mut reply = Vec::new();
-    s.read_to_end(&mut reply).unwrap();
-    assert_eq!(reply, b"REPLY:true");
-    let drained = eventually(Duration::from_secs(3), || {
-        proxy.shared.live().is_empty().then_some(())
-    });
-    assert!(
-        drained.is_some(),
-        "finished half-closed splice must leave the live map"
-    );
-}
-
 #[test]
 fn trickled_head_is_cut_at_the_absolute_deadline() {
     let (ensure, _) = refusing_ensure();
     let proxy = Proxy::bind_with(ensure, nobody(), Duration::from_millis(300)).unwrap();
     let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
     let mut writer = s.try_clone().unwrap();
-    // One byte every 100 ms: each read arrives well inside a per-read
-    // timeout of 300 ms, yet the head never completes.
+    // One byte every 100 ms for 10 s: each read arrives well inside a
+    // per-read timeout of 300 ms, yet the head never completes.
     let trickle = thread::spawn(move || {
-        for _ in 0..40 {
+        for _ in 0..100 {
             if writer.write_all(b"a").is_err() {
                 return;
             }
             thread::sleep(Duration::from_millis(100));
         }
     });
-    s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-    let start = Instant::now();
+    // The deadline runs from when the head is awaited, after the peer
+    // check, however long that took.
+    let awaited = eventually(PEER_CHECK, || {
+        (!unvetted_ids(&proxy).is_empty()).then(Instant::now)
+    });
+    let awaited = awaited.expect("the head is awaited");
+    s.set_read_timeout(Some(PEER_CHECK)).unwrap();
     let closed = closed_unanswered(&mut s);
     assert!(
         closed == Ok(true),
         "proxy must close the connection, not time out the client"
     );
     assert!(
-        start.elapsed() < Duration::from_secs(2),
+        awaited.elapsed() < Duration::from_secs(2),
         "closed late: {:?}",
-        start.elapsed()
+        awaited.elapsed()
     );
     trickle.join().unwrap();
 }
 
 #[test]
-fn shutdown_cuts_live_splices() {
-    let up = fake_upstream();
-    let proxy = Proxy::bind(Arc::new(move || Ok(up)), nobody()).unwrap();
-    let mut s = TcpStream::connect(("127.0.0.1", proxy.port())).unwrap();
-    s.write_all(upgrade("/devtools/x").as_bytes()).unwrap();
-    let spliced = eventually(Duration::from_secs(3), || {
-        (proxy.shared.live().values().map(Vec::len).sum::<usize>() == 2).then_some(())
+fn shutdown_cuts_live_websockets() {
+    let proxy = proxy();
+    let mut ws = agent_socket(&proxy, "/devtools/browser/x");
+    let tracked = eventually(Duration::from_secs(3), || {
+        (proxy.shared.live().len() == 1).then_some(())
     });
-    assert!(spliced.is_some(), "client and upstream are tracked");
+    assert!(tracked.is_some(), "the agent's socket is tracked");
     proxy.shutdown();
-    s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-    // A timeout here would mean the splice outlived the shutdown.
-    assert_eq!(closed_unanswered(&mut s), Ok(true), "socket cut");
+    ws.get_mut()
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    // A timeout here would mean the WebSocket outlived the shutdown.
+    assert!(ends_without_text(&mut ws), "socket cut");
     let mut buf = [0u8; 64];
     // The accept loop is gone: a new connection is refused or closed at once.
     match TcpStream::connect(("127.0.0.1", proxy.port())) {
@@ -583,183 +721,225 @@ fn shutdown_cuts_live_splices() {
     }
 }
 
-const CREATE_TARGET: &str =
-    r#"{"id":1,"method":"Target.createTarget","params":{"url":"about:blank"}}"#;
-const CREATE_REPLY: &str = r#"{"id":1,"result":{"targetId":"T9"}}"#;
+#[test]
+fn a_websocket_round_trips_through_the_broker() {
+    let proxy = proxy();
+    let mut ws = agent_socket(&proxy, "/devtools/browser/x");
+    send(
+        &mut ws,
+        &json!({ "id": 7, "method": "Echo", "params": { "n": 1 } }),
+    );
+    assert_eq!(
+        next_text(&mut ws),
+        json!({ "id": 7, "result": { "echo": { "n": 1 } } })
+    );
+    // What the broker refuses is answered on the socket, as Chromium would.
+    ws.send(Message::text("not json")).unwrap();
+    assert!(next_text(&mut ws)["error"].is_object());
+}
 
-/// A stand-in for Chromium that accepts a WebSocket upgrade (`101` and
-/// `extension_header`), waits for the client's first frame (`first_frame`
-/// bytes), sends `before` (e.g. a screenshot reply), then `reply` once
-/// `delay` has passed.
-fn fake_chromium(
-    extension_header: &'static str,
-    first_frame: usize,
-    before: Arc<Vec<u8>>,
-    reply: &'static str,
-    delay: Duration,
-) -> u16 {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    thread::spawn(move || {
-        for mut stream in listener.incoming().flatten() {
-            let before = Arc::clone(&before);
-            thread::spawn(move || {
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                skip_head(&mut reader);
-                write!(
-                    stream,
-                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n{extension_header}\r\n"
-                )
-                .unwrap();
-                let mut frame = vec![0; first_frame];
-                reader.read_exact(&mut frame).unwrap();
-                thread::sleep(delay);
-                stream.write_all(&before).unwrap();
-                stream.write_all(&text(reply)).unwrap();
-                let _ = io::copy(&mut reader, &mut io::sink());
-            });
+#[test]
+fn a_utf8_binary_message_passes_as_text_and_any_other_closes_with_1003() {
+    let proxy = proxy();
+    let mut ws = agent_socket(&proxy, "/devtools/browser/x");
+    ws.send(Message::binary(
+        br#"{"id":3,"method":"Echo","params":{"n":3}}"#.to_vec(),
+    ))
+    .unwrap();
+    assert_eq!(
+        next_text(&mut ws),
+        json!({ "id": 3, "result": { "echo": { "n": 3 } } })
+    );
+    ws.send(Message::binary(vec![0xFF, 0xFE])).unwrap();
+    let close = loop {
+        match ws.read() {
+            Ok(Message::Close(frame)) => break frame,
+            Ok(Message::Text(text)) => panic!("unexpected message: {text}"),
+            Ok(_) => {}
+            Err(e) => panic!("no close frame: {e}"),
         }
-    });
-    port
+    };
+    assert_eq!(close.map(|frame| frame.code), Some(CloseCode::Unsupported));
 }
 
-/// An agent's browser WebSocket after [`agent_exchange`].
-struct AgentSocket {
-    _proxy: Proxy, // keeps the splice alive while the test talks
-    socket: TcpStream,
-    reported: Reported,
-    got: Vec<u8>,
-}
-
-/// Opens an agent's browser WebSocket through a fresh proxy in front of the
-/// fake Chromium on `up`: the upgrade head goes out with `first` (`split`:
-/// the frame in a write of its own), then the agent reads until `reply`'s
-/// text frame arrived. `client_push_delay_ms` slows the client-side feed of
-/// the connection (0: none).
-fn agent_exchange(
-    up: u16,
-    first: &[u8],
-    reply: &str,
-    split: bool,
-    client_push_delay_ms: u64,
-) -> AgentSocket {
-    let reported = Reported::default();
-    let proxy = Proxy::bind(Arc::new(move || Ok(up)), reported.callback()).unwrap();
-    proxy.set_client_push_delay_ms(client_push_delay_ms);
-    let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
-    socket
+#[test]
+fn frames_sent_with_the_upgrade_head_are_not_lost() {
+    let proxy = proxy();
+    // A client frame, encoded by a client WebSocket writing to memory.
+    let mut encoder = WebSocket::from_raw_socket(Cursor::new(Vec::new()), Role::Client, None);
+    encoder
+        .send(Message::text(
+            r#"{"id":1,"method":"Echo","params":{"n":2}}"#,
+        ))
+        .unwrap();
+    let frame = std::mem::take(encoder.get_mut().get_mut());
+    let head = "GET /devtools/browser/x HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\n\
+                Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
+                Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
+    stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let head = upgrade("/devtools/browser/x");
-    if split {
-        socket.write_all(head.as_bytes()).unwrap();
-        thread::sleep(Duration::from_millis(50));
-        socket.write_all(first).unwrap();
-    } else {
-        socket
-            .write_all(&[head.as_bytes(), first].concat())
-            .unwrap();
+    stream
+        .write_all(&[head.as_bytes(), frame.as_slice()].concat())
+        .unwrap();
+    // The response head, byte by byte so no frame is read past it.
+    let mut response = Vec::new();
+    let mut byte = [0u8; 1];
+    while !response.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).unwrap();
+        response.push(byte[0]);
     }
-    let got = read_until_ends_with(&mut socket, &text(reply));
-    AgentSocket {
-        _proxy: proxy,
-        socket,
-        reported,
-        got,
+    let response = String::from_utf8(response).unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 101 Switching Protocols\r\n"),
+        "{response}"
+    );
+    assert!(
+        response.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"),
+        "{response}"
+    );
+    let mut ws = WebSocket::from_raw_socket(stream, Role::Client, None);
+    assert_eq!(next_text(&mut ws)["result"]["echo"]["n"], 2);
+}
+
+#[test]
+fn two_agents_are_isolated() {
+    let proxy = proxy();
+    let mut a = agent_socket(&proxy, "/devtools/browser/x");
+    let mut b = agent_socket(&proxy, "/devtools/browser/x");
+    send(
+        &mut a,
+        &json!({ "id": 1, "method": "Echo", "params": { "who": "a" } }),
+    );
+    send(
+        &mut b,
+        &json!({ "id": 1, "method": "Echo", "params": { "who": "b" } }),
+    );
+    assert_eq!(next_text(&mut a)["result"]["echo"]["who"], "a");
+    assert_eq!(next_text(&mut b)["result"]["echo"]["who"], "b");
+    a.get_mut()
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    match a.read() {
+        Err(WsError::Io(e)) if timed_out(&e) => {}
+        other => panic!("a got more: {other:?}"),
     }
 }
 
-/// An agent that asks for a new page through a proxy in front of
-/// [`fake_chromium`], which sends `before` ahead of the reply; returns what
-/// the tap reported once the reply arrived and the bytes the agent got.
-/// `split`: the first frame comes in a write of its own, not with the head.
-fn agent_creates_a_page(
-    extension_header: &'static str,
-    split: bool,
-    before: Vec<u8>,
-) -> (Vec<String>, Vec<u8>) {
-    let frame = masked_text(CREATE_TARGET);
-    let up = fake_chromium(
-        extension_header,
-        frame.len(),
-        Arc::new(before),
-        CREATE_REPLY,
-        Duration::from_millis(100),
+#[test]
+fn a_page_socket_works_in_its_page() {
+    let reported = Reported::default();
+    let proxy = serving(fake_browser(chromium), reported.callback());
+    // The page is the path's, without the query.
+    let mut ws = agent_socket(&proxy, "/devtools/page/P1?x=1");
+    send(
+        &mut ws,
+        &json!({ "id": 1, "method": "Page.bringToFront", "params": {} }),
     );
-    let agent = agent_exchange(up, &frame, CREATE_REPLY, split, 0);
+    assert_eq!(next_text(&mut ws)["id"], 1);
+    let _ = eventually(Duration::from_secs(3), || {
+        (!reported.all().is_empty()).then_some(())
+    });
+    assert_eq!(reported.all(), ["P1"]);
+}
+
+#[test]
+fn a_browser_crash_closes_the_socket() {
+    let proxy = proxy();
+    let mut ws = agent_socket(&proxy, "/devtools/browser/x");
+    send(
+        &mut ws,
+        &json!({ "id": 1, "method": "Crash", "params": {} }),
+    );
+    assert!(ends_without_text(&mut ws), "the socket closes");
+    // The broker is gone: discovery says so instead of hanging.
+    let (status, _) = request(proxy.port(), "GET", "/json/version");
+    assert_eq!(status, "HTTP/1.1 503 Service Unavailable");
+}
+
+const CREATE_TARGET: &str =
+    r#"{"id":1,"method":"Target.createTarget","params":{"url":"about:blank"}}"#;
+
+/// An agent that asks for a new page through a proxy whose Chromium sends
+/// `before` ahead of the reply; returns what the tap reported once the
+/// reply arrived and the messages the agent got before it.
+fn agent_creates_a_page(before: Vec<Value>) -> (Vec<String>, Vec<Value>) {
+    let mut before = Some(before);
+    let broker = fake_browser(move |request| {
+        let mut answers = if request["method"] == "Target.createTarget" {
+            before.take().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        answers.extend(chromium(request)?);
+        Some(answers)
+    });
+    let reported = Reported::default();
+    let proxy = serving(broker, reported.callback());
+    let mut ws = agent_socket(&proxy, "/devtools/browser/x");
+    ws.send(Message::text(CREATE_TARGET)).unwrap();
+    let mut got = Vec::new();
+    let reply = loop {
+        let message = next_text(&mut ws);
+        if message["id"] == 1 {
+            break message;
+        }
+        got.push(message);
+    };
+    assert_eq!(reply["result"]["targetId"], "T9");
     // The tap is fed before the forward, but observes on its own thread.
     let _ = eventually(Duration::from_secs(1), || {
-        (!agent.reported.all().is_empty()).then_some(())
+        (!reported.all().is_empty()).then_some(())
     });
     thread::sleep(Duration::from_millis(100)); // nothing more arrives
-    (agent.reported.all(), agent.got)
+    (reported.all(), got)
 }
 
 #[test]
-fn the_tap_sees_a_page_the_agent_creates_and_the_bytes_arrive_unchanged() {
-    for split in [false, true] {
-        let (reported, got) = agent_creates_a_page("", split, Vec::new());
-        assert_eq!(reported, ["T9"], "split: {split}");
-        assert!(
-            got.starts_with(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n"),
-            "{got:?}"
-        );
-    }
-}
-
-#[test]
-fn a_large_reply_does_not_switch_follow_off() {
-    // Two screenshot replies far bigger than the observer's queue.
-    let screenshot = format!(
-        r#"{{"id":0,"result":{{"data":"{}"}}}}"#,
-        "A".repeat(6 << 20)
-    );
-    let mut before = text(&screenshot);
-    before.extend(text(&screenshot));
-    let (reported, got) = agent_creates_a_page("", false, before);
+fn the_tap_sees_a_page_the_agent_creates() {
+    let (reported, got) = agent_creates_a_page(Vec::new());
     assert_eq!(reported, ["T9"]);
-    assert!(got.len() > 12 << 20, "the screenshots were spliced");
+    assert!(got.is_empty(), "{got:?}");
 }
 
 #[test]
-fn a_negotiated_extension_blinds_the_tap_but_not_the_splice() {
-    let (reported, got) = agent_creates_a_page(
-        "Sec-WebSocket-Extensions: permessage-deflate\r\n",
-        false,
-        Vec::new(),
-    );
-    assert!(reported.is_empty(), "{reported:?}");
-    assert!(got.ends_with(&text(CREATE_REPLY)));
+fn a_large_message_does_not_switch_follow_off() {
+    // Two screencast frames far bigger than the observer's queue.
+    let frame =
+        || json!({ "method": "Page.screencastFrame", "params": { "data": "A".repeat(6 << 20) } });
+    let (reported, got) = agent_creates_a_page(vec![frame(), frame()]);
+    assert_eq!(reported, ["T9"]);
+    assert_eq!(got.len(), 2, "the frames were forwarded");
+    assert!(got
+        .iter()
+        .all(|m| m["params"]["data"].as_str().map(str::len) == Some(6 << 20)));
 }
 
 const ATTACH: &str =
     r#"{"id":1,"method":"Target.attachToTarget","params":{"targetId":"T1","flatten":true}}"#;
-const ATTACH_REPLY: &str = r#"{"id":1,"result":{"sessionId":"S1"}}"#;
 const NAVIGATE: &str =
     r#"{"id":2,"method":"Page.navigate","params":{"url":"about:blank"},"sessionId":"S1"}"#;
 
 /// An agent that attaches to `T1` through a Chromium that answers the
-/// instant the attach frame is in, and the moment the reply is in, works in
-/// the new session. The tap must have the session by then: the reply was
-/// observed after the attach, the navigate after the reply. `split`: the
-/// attach frame comes in a write of its own, not with the head.
+/// instant the attach is in, and the moment the reply is in, works in the
+/// new session. The tap must have the session by then: the reply was
+/// observed after the attach, the navigate after the reply.
 /// `client_push_delay_ms` slows the client-side feed of this connection
 /// (0: none). Returns what the tap reported.
-fn attach_then_navigate_at_once(split: bool, client_push_delay_ms: u64) -> Vec<String> {
-    let attach = masked_text(ATTACH);
-    let up = fake_chromium(
-        "",
-        attach.len(),
-        Arc::new(Vec::new()),
-        ATTACH_REPLY,
-        Duration::ZERO,
-    );
-    let mut agent = agent_exchange(up, &attach, ATTACH_REPLY, split, client_push_delay_ms);
-    agent.socket.write_all(&masked_text(NAVIGATE)).unwrap();
+fn attach_then_navigate_at_once(client_push_delay_ms: u64) -> Vec<String> {
+    let reported = Reported::default();
+    let proxy = serving(fake_browser(chromium), reported.callback());
+    proxy.set_client_push_delay_ms(client_push_delay_ms);
+    let mut ws = agent_socket(&proxy, "/devtools/browser/x");
+    ws.send(Message::text(ATTACH)).unwrap();
+    assert_eq!(next_text(&mut ws)["result"]["sessionId"], "S1");
+    ws.send(Message::text(NAVIGATE)).unwrap();
+    assert_eq!(next_text(&mut ws)["sessionId"], "S1");
     let _ = eventually(Duration::from_secs(3), || {
-        (!agent.reported.all().is_empty()).then_some(())
+        (!reported.all().is_empty()).then_some(())
     });
-    agent.reported.all()
+    reported.all()
 }
 
 #[test]
@@ -767,22 +947,12 @@ fn a_reply_is_observed_after_its_command_even_when_the_client_push_is_slow() {
     // Were the command queued after it was forwarded, the 150 ms delay of
     // this connection's push would let the reply (and the dependent
     // navigate) overtake it.
-    for split in [true, false] {
-        assert_eq!(
-            attach_then_navigate_at_once(split, 150),
-            ["T1"],
-            "split: {split}"
-        );
-    }
+    assert_eq!(attach_then_navigate_at_once(150), ["T1"]);
 }
 
 #[test]
 fn an_instant_reply_never_overtakes_its_command() {
     for round in 0..40 {
-        assert_eq!(
-            attach_then_navigate_at_once(round % 2 == 0, 0),
-            ["T1"],
-            "round {round}"
-        );
+        assert_eq!(attach_then_navigate_at_once(0), ["T1"], "round {round}");
     }
 }

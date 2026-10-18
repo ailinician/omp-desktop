@@ -3,7 +3,8 @@
 //! Rust; the frontend only reports what the rail shows and renders results.
 //!
 //! - `config.rs` reads `widgets.json`; `schedule.rs` is the pure scheduler
-//!   state machine; `trust.rs` fingerprints plugins and stores approvals.
+//!   state machine; `trust.rs` fingerprints plugins and stores approvals;
+//!   `snapshot.rs` copies a run's scripts while checking that fingerprint.
 //! - `host.rs` owns the scheduler thread, the running processes and the
 //!   `widgets://` events (managed as `Arc<WidgetHost>`).
 //! - `run.rs` (with `child.rs`) executes one plugin; `context.rs` computes a
@@ -23,6 +24,7 @@ pub mod host;
 pub mod redact;
 pub mod run;
 pub mod schedule;
+pub mod snapshot;
 pub mod trust;
 
 pub use host::{ViewArgs, WidgetHost, WidgetsSnapshot};

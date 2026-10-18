@@ -14,13 +14,16 @@
 //! One list for every profile, keyed per entry, so a profile's recents never
 //! leak into another profile's sidebar and a profile deleted from the menu
 //! leaves only inert entries behind.
+//!
+//! Without a resolvable config folder the list lives in memory for the app
+//! run and no file is read or written.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::json_store;
+use crate::config_file::ConfigFile;
 
 /// Entries kept per profile; older ones are dropped on the next touch.
 pub const MAX_PER_PROFILE: usize = 20;
@@ -50,25 +53,27 @@ pub struct RecentProject {
 
 /// Manages `<app config dir>/recent-projects.json`.
 pub struct RecentProjectsStore {
-    path: PathBuf,
-    /// `path.with_extension("lock")`, computed once (same as `OverlayStore`).
-    lock: PathBuf,
+    /// The file, or memory (no app config folder: the list lasts for the
+    /// app run).
+    backing: ConfigFile,
 }
 
 impl RecentProjectsStore {
-    /// Create a store pointing at `path`. The file need not exist yet.
-    pub fn new(path: PathBuf) -> Self {
-        let lock = path.with_extension("lock");
-        Self { path, lock }
+    /// Create a store pointing at `path` (the file need not exist yet), or
+    /// a memory-only one for `None`.
+    pub fn new(path: Option<PathBuf>) -> Self {
+        Self {
+            backing: ConfigFile::new(path),
+        }
     }
 
     /// `profile`'s recent folders, newest first, minus folders that no
     /// longer exist.
     ///
-    /// Unlocked: `write_atomic` never exposes a half-written file, and a
-    /// read racing a write only sees the previous list.
+    /// Unlocked, since `write_atomic` never exposes a half-written file and
+    /// a read racing a write only sees the previous list.
     pub fn list(&self, profile: &str) -> Vec<RecentProject> {
-        entries_for(self.read(), profile)
+        entries_for(self.backing.read_or_default(), profile)
     }
 
     /// Record `path` (already canonical) as opened now under `profile` and
@@ -93,26 +98,14 @@ impl RecentProjectsStore {
         })
     }
 
-    /// Missing or unreadable ⇒ empty (see [`json_store::read_or_default`]).
-    fn read(&self) -> RecentFile {
-        json_store::read_or_default(&self.path)
-    }
-
     /// Locked read-modify-write; returns `profile`'s list after `f`.
-    /// `with_lock_str` creates the parent directory before locking.
+    /// Missing or unreadable ⇒ empty (see [`ConfigFile::update`]).
     fn mutate(
         &self,
         profile: &str,
         f: impl FnOnce(&mut RecentFile),
     ) -> Result<Vec<RecentProject>, String> {
-        json_store::with_lock_str(&self.lock, || {
-            let mut file = self.read();
-            f(&mut file);
-            let bytes = serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())?;
-            json_store::write_atomic(&self.path, &bytes)
-                .map_err(|e| format!("write {}: {e}", self.path.display()))?;
-            Ok(entries_for(file, profile))
-        })
+        self.backing.update(f, |file| entries_for(file, profile))
     }
 }
 
@@ -194,8 +187,15 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);
-        let store = RecentProjectsStore::new(dir.join("recent-projects.json"));
+        let store = RecentProjectsStore::new(Some(dir.join("recent-projects.json")));
         (store, ScratchGuard(dir))
+    }
+
+    impl RecentProjectsStore {
+        /// The file of a [`scratch_store`] store.
+        fn file(&self) -> &Path {
+            self.backing.path().expect("a file-backed store")
+        }
     }
 
     fn paths(list: &[RecentProject]) -> Vec<&str> {
@@ -278,7 +278,7 @@ mod tests {
         let returned = touch_at(&store, "default", &b, 20);
         assert_eq!(paths(&returned), vec![b.as_str(), a.as_str()]);
 
-        let reopened = RecentProjectsStore::new(scratch.0.join("recent-projects.json"));
+        let reopened = RecentProjectsStore::new(Some(scratch.0.join("recent-projects.json")));
         let listed = reopened.list("default");
         assert_eq!(paths(&listed), vec![b.as_str(), a.as_str()]);
         assert_eq!(listed[0].opened_at, 20);
@@ -289,12 +289,12 @@ mod tests {
     fn corrupt_file_lists_empty_and_touch_rewrites_it() {
         let (store, scratch) = scratch_store();
         let a = scratch.folder("a");
-        fs::write(&store.path, b"{ not json").expect("write corrupt file");
+        fs::write(store.file(), b"{ not json").expect("write corrupt file");
 
         assert!(store.list("default").is_empty());
         touch_at(&store, "default", &a, 1);
 
-        let bytes = fs::read(&store.path).expect("read rewritten file");
+        let bytes = fs::read(store.file()).expect("read rewritten file");
         let file: RecentFile = serde_json::from_slice(&bytes).expect("valid json");
         assert_eq!(file.entries.len(), 1);
         assert_eq!(paths(&store.list("default")), vec![a.as_str()]);
@@ -310,6 +310,27 @@ mod tests {
         fs::remove_dir(&b).expect("delete b");
 
         assert_eq!(paths(&store.list("default")), vec![a.as_str()]);
-        assert_eq!(store.read().entries.len(), 2);
+        let file: RecentFile = crate::json_store::read_or_default(store.file());
+        assert_eq!(file.entries.len(), 2);
+    }
+
+    #[test]
+    fn a_memory_only_store_keeps_its_list_for_its_lifetime_only() {
+        let (_unused, scratch) = scratch_store();
+        let a = scratch.folder("a");
+        let b = scratch.folder("b");
+        let store = RecentProjectsStore::new(None);
+        assert!(store.list("default").is_empty());
+        touch_at(&store, "default", &a, 1);
+        touch_at(&store, "work", &b, 2);
+        let listed = touch_at(&store, "default", &b, 3);
+        assert_eq!(paths(&listed), vec![b.as_str(), a.as_str()]);
+        assert_eq!(paths(&store.list("work")), vec![b.as_str()]);
+        let left = store.remove("default", &b).expect("remove");
+        assert_eq!(paths(&left), vec![a.as_str()]);
+        // A gone folder is hidden here too.
+        fs::remove_dir(&a).expect("delete a");
+        assert!(store.list("default").is_empty());
+        assert!(RecentProjectsStore::new(None).list("work").is_empty());
     }
 }

@@ -1,4 +1,4 @@
-//! The shells Tweaks → Terminal offers: a fixed list per platform, trimmed
+//! The shells Settings → Terminal offers: a fixed list per platform, trimmed
 //! to the ones installed here (an executable file where the list looks).
 
 use std::ffi::OsString;

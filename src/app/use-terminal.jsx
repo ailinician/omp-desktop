@@ -39,6 +39,7 @@ const {
   SKIPPED_LINE: _UT_SKIPPED, exitLine: _UT_exitLine, failLine: _UT_failLine,
   fontFamily: _UT_fontFamily, theme: _UT_theme,
   applyWindowsPty: _UT_applyWindowsPty, createXterm: _UT_createXterm, copySelection: _UT_copySelection,
+  scrollbackLines: _UT_scrollbackLines,
 } = window.OMP_TERMINAL_XTERM;
 const {
   EMPTY: _UT_STREAM, beginSync: _UT_beginSync, onEvent: _UT_onEvent, replayCursor: _UT_replayCursor,
@@ -67,6 +68,9 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
   // Read by `create`, whose ref callback outlives the render that made it.
   const fontSizeRef = React.useRef(fontSize);
   fontSizeRef.current = fontSize;
+  const scrollback = _UT_scrollbackLines(tweaks.terminalScrollback);
+  const scrollbackRef = React.useRef(scrollback);
+  scrollbackRef.current = scrollback;
   const height = tweaks.terminalHeight;
 
   const fit = React.useCallback((sid) => {
@@ -204,6 +208,7 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
     const { term, fit: fitAddon } = _UT_createXterm({
       fontSize: fontSizeRef.current,
       fontFamily: _UT_fontFamily(),
+      scrollback: scrollbackRef.current,
       theme: _UT_theme(),
       tryRestart: () => {
         if (!_UT_canRestart(_UT_entryOf(stateRef.current, sid), rec.opened)) return false;
@@ -323,15 +328,16 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
     for (const sid of [...recs.current.keys()]) if (!sessionIds.includes(sid)) dispose(sid);
   }, [idsKey, dispose]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Theme and font follow the tweaks for every instance.
+  // Theme, font and scrollback follow the tweaks for every instance.
   React.useEffect(() => {
     for (const [sid, rec] of recs.current) {
       rec.term.options.theme = _UT_theme();
       rec.term.options.fontFamily = _UT_fontFamily();
       rec.term.options.fontSize = fontSize;
+      if (rec.term.options.scrollback !== scrollback) rec.term.options.scrollback = scrollback;
       fit(sid);
     }
-  }, [tweaks.theme, tweaks.accent, fontSize, fit]);
+  }, [tweaks.theme, tweaks.accent, fontSize, scrollback, fit]);
 
   return { state, height, toggle, close, setHeight, mountFor, copySelection };
 }

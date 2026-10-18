@@ -69,7 +69,7 @@ fn diff<'repo>(
 
 /// `git_browser_commit(path, sha)`.
 pub fn commit(path: &Path, sha: &str) -> Result<CommitView, String> {
-    let (repo, _) = open(path)?;
+    let (_gate, repo, _) = open(path)?;
     let id = parse_id(sha)?;
     let commit = repo
         .find_commit(id)
@@ -111,7 +111,7 @@ pub fn commit(path: &Path, sha: &str) -> Result<CommitView, String> {
 /// ([`crate::workspace::validate_path_text`]): today's file system (a
 /// directory since replaced by a symlink) has no say in it.
 pub fn commit_file(path: &Path, sha: &str, rel_path: &str) -> Result<FileView, String> {
-    let (repo, _) = open(path)?;
+    let (_gate, repo, _) = open(path)?;
     let rel = crate::workspace::validate_path_text(rel_path)?;
     let commit = repo
         .find_commit(parse_id(sha)?)

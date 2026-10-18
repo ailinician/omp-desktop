@@ -141,11 +141,20 @@ fn event(item: &gix::status::Item) -> Option<Event> {
 /// listed individually, ignored ones never) and merge it per path. Rename
 /// tracking follows the repo's config for `HEAD` → index (git's default:
 /// on) and stays off for index → work tree, as in `git status`.
+///
+/// A submodule counts as changed only when it has a different commit
+/// checked out (`ignore = dirty`): its own work tree is never read, because
+/// gix opens it with the submodule's config, whose filter drivers
+/// [`super::open`] cannot strip.
 pub(super) fn changes(repo: &gix::Repository) -> Result<Changes, String> {
     let items = repo
         .status(gix::progress::Discard)
         .map_err(fail("failed to start status"))?
         .untracked_files(gix::status::UntrackedFiles::Files)
+        .index_worktree_submodules(gix::status::Submodule::Given {
+            ignore: gix::submodule::config::Ignore::Dirty,
+            check_dirty: false,
+        })
         .into_iter(None)
         .map_err(fail("failed to run status"))?;
     let mut failure = None;
@@ -186,7 +195,7 @@ fn listed<'a>(
 
 /// `git_browser_status(path)`.
 pub fn status(path: &Path) -> Result<StatusView, String> {
-    let (repo, work_dir) = open(path)?;
+    let (_gate, repo, work_dir) = open(path)?;
     let changes = changes(&repo)?;
     let index = repo
         .index_or_empty()
@@ -535,6 +544,61 @@ mod tests {
         let view = status(repo.path()).expect("status");
         assert_eq!(view.repo.branch, None);
         assert_eq!(view.repo.head.as_deref(), Some(first.as_str()));
+    }
+
+    #[test]
+    fn status_runs_no_clean_filter_of_a_submodule_and_still_sees_its_commit_move() {
+        let (Some(outer), Some(inner)) = (
+            fixture::init("status-sub-filter"),
+            fixture::init("status-sub-filter-inner"),
+        ) else {
+            return;
+        };
+        inner.write("a.txt", "one\n");
+        inner.git(&["add", "."]);
+        inner.commit("inner", 1_700_000_000);
+        let url = inner.path().to_string_lossy().replace('\\', "/");
+        outer.git(&[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &url,
+            "sub",
+        ]);
+        outer.commit("add sub", 1_700_000_100);
+        let marker = outer.arm_clean_filter(".git/modules/sub");
+        // Same size as the checkout (whose line endings follow the user's
+        // global config): the submodule's status would have to hash it.
+        let checkout = outer.path().join("sub").join("a.txt");
+        let on_disk = std::fs::read_to_string(&checkout).expect("read checkout");
+        outer.write("sub/a.txt", &on_disk.replace("one", "uno"));
+
+        let view = status(outer.path()).expect("status");
+        assert!(!marker.exists(), "the submodule's clean filter ran");
+        assert_eq!(
+            status_of(&view.tree, "sub"),
+            None,
+            "dirty content is ignored"
+        );
+
+        // A new commit checked out in the submodule is still a change.
+        outer.git(&[
+            "-C",
+            "sub",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "moved",
+        ]);
+        let view = status(outer.path()).expect("status");
+        assert_eq!(status_of(&view.tree, "sub"), Some(StatusKind::Modified));
     }
 
     #[test]
