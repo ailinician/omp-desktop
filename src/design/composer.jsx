@@ -189,17 +189,20 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
 
   // Grow with the text up to the CSS max-height, then scroll: hidden
   // overflow past it would leave the rest of a long draft unreachable.
-  React.useEffect(() => {
+  const prevLenRef = React.useRef(0);
+  React.useLayoutEffect(() => {
     const ta = taRef.current;
     if (!ta) return;
-    // Read before the writes below, while style is still clean. Measure
-    // without the last pass's scrollbar, whose width would change wrapping.
-    const max = parseFloat(getComputedStyle(ta).maxHeight) || Infinity;
-    ta.style.height = "auto";
-    ta.style.overflowY = "hidden";
+    const len = text.length;
+    const shrunk = len < prevLenRef.current;
+    prevLenRef.current = len;
+    if (!len) { ta.style.height = "22px"; ta.style.overflowY = "hidden"; return; }
+    if (shrunk && ta.clientHeight > 26) { ta.style.height = "auto"; ta.style.overflowY = "hidden"; }
     const full = ta.scrollHeight;
-    ta.style.height = `${Math.min(full, max)}px`;
-    if (full > max) ta.style.overflowY = "auto";
+    if (full !== ta.clientHeight || shrunk) {
+      ta.style.height = `${Math.min(full, 180)}px`;
+      ta.style.overflowY = full > 180 ? "auto" : "hidden";
+    }
   }, [text]);
 
   // Restore focus when the agent finishes streaming and the textarea
@@ -660,8 +663,8 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
                   : (microcopy?.paletteTip ?? `${_t("type / to give orders")}${bridgeHint ? ` · ${bridgeHint}${_t(" opens the bridge")}` : ""}`)
             }
             value={text}
-            onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart); }}
-            onSelect={(e) => setCaret(e.target.selectionStart)}
+            onChange={(e) => { const v = e.target.value; setText(v); if (v.includes("@") || v.includes("/")) setCaret(e.target.selectionStart); }}
+            onSelect={(e) => { if (text.includes("@") || text.includes("/")) setCaret(e.target.selectionStart); }}
             onKeyDown={onKey}
             onPaste={onPaste}
             className="selectable"

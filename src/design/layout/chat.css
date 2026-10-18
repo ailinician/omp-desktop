@@ -11,6 +11,7 @@
   flex: 1;
   overflow-y: auto; overflow-x: hidden;
   background: var(--bg-window);
+  contain: layout style paint;
 }
 
 /* Shown only while unpinned from the bottom (issue #20) — an explicit,

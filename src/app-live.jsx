@@ -513,31 +513,32 @@ function App() {
   const handleWidgetInsert = React.useCallback(text => setPromptInsert({ text, append: true, nonce: Date.now() }), []);
   const [selQuote, setSelQuote] = React.useState(null);
   React.useEffect(() => {
-    const onUp = () => requestAnimationFrame(() => {
-      const sel = window.getSelection?.();
-      if (!sel || sel.isCollapsed || !sel.rangeCount) { setSelQuote(null); return; }
-      const text = sel.toString().trim();
-      const node = sel.anchorNode;
-      const el = node?.nodeType === 1 ? node : node?.parentElement;
-      if (!text || !el?.closest?.(".chat-scroll") || el.closest?.("input, textarea")) { setSelQuote(null); return; }
-      const rect = sel.getRangeAt(0).getBoundingClientRect();
-      if (!rect || (!rect.width && !rect.height)) { setSelQuote(null); return; }
-      setSelQuote({
-        text,
-        x: Math.max(70, Math.min(window.innerWidth - 70, rect.left + rect.width / 2)),
-        y: rect.top > 48 ? rect.top - 32 : rect.bottom + 8,
+    const onUp = e => {
+      if (e.target?.closest?.("input, textarea, .sel-quote-pop")) return;
+      requestAnimationFrame(() => {
+        const sel = window.getSelection?.();
+        if (!sel || sel.isCollapsed || !sel.rangeCount) { setSelQuote(q => q ? null : q); return; }
+        const text = sel.toString().trim();
+        const node = sel.anchorNode;
+        const el = node?.nodeType === 1 ? node : node?.parentElement;
+        if (!text || !el?.closest?.(".chat-scroll") || el.closest?.("input, textarea")) { setSelQuote(q => q ? null : q); return; }
+        const rect = sel.getRangeAt(0).getBoundingClientRect();
+        if (!rect || (!rect.width && !rect.height)) { setSelQuote(q => q ? null : q); return; }
+        setSelQuote({
+          text,
+          x: Math.max(70, Math.min(window.innerWidth - 70, rect.left + rect.width / 2)),
+          y: rect.top > 48 ? rect.top - 32 : rect.bottom + 8,
+        });
       });
-    });
-    const onClear = () => { const s = window.getSelection?.(); if (!s || s.isCollapsed) setSelQuote(null); };
-    const onScroll = () => setSelQuote(null);
+    };
+    const onDown = e => { if (!e.target?.closest?.(".sel-quote-pop")) setSelQuote(q => q ? null : q); };
+    const onScroll = () => setSelQuote(q => q ? null : q);
     document.addEventListener("mouseup", onUp);
-    document.addEventListener("keyup", onUp);
-    document.addEventListener("selectionchange", onClear);
+    document.addEventListener("mousedown", onDown);
     document.addEventListener("scroll", onScroll, true);
     return () => {
       document.removeEventListener("mouseup", onUp);
-      document.removeEventListener("keyup", onUp);
-      document.removeEventListener("selectionchange", onClear);
+      document.removeEventListener("mousedown", onDown);
       document.removeEventListener("scroll", onScroll, true);
     };
   }, []);
