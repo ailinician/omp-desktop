@@ -1027,7 +1027,13 @@ function App() {
             onRules={() => setRulesOpen(true)}
             approvalMode={approvalCell}
             onStats={() => setStatsOpen(true)}
+            onRail={() => {
+              if (side !== "rail") { setSide("rail"); if (!showRail) setTweak("layout", "rail"); }
+              else setTweak("layout", showRail ? "focus" : "rail");
+            }}
+            railOpen={side === "rail" && showRail}
             onTree={() => toggleSide("tree")}
+            treeOpen={side === "tree"}
             onTerminal={() => terminal.toggle(planKey)}
             terminalOpen={_TERM_entryOf(terminal.state, planKey).open}
             onBrowser={() => toggleSide("browser")}

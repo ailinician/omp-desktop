@@ -215,7 +215,7 @@ function TabBar({
 // pills below the prompt box show (and change) both. It spans the window
 // under the workspace; the st-ctx meter, st-cost and st-tps cells (each
 // with its separator) drop out when the window is narrow (layout/rail.css).
-function StatusBar({ ctx, todoDone, todoTotal, onTodo, onSettings, settingsActive = false, onChanges, onRules, approvalMode, onStats, onTree, onTerminal, terminalOpen, onBrowser, browserOpen = false }) {
+function StatusBar({ ctx, todoDone, todoTotal, onTodo, onSettings, settingsActive = false, onChanges, onRules, approvalMode, onStats, onRail, railOpen = false, onTree, treeOpen = false, onTerminal, terminalOpen, onBrowser, browserOpen = false }) {
   return (
     <div className="status">
       <span className="status-cell"><span className="dot live" /> {_t("connected")}</span>
@@ -241,8 +241,14 @@ function StatusBar({ ctx, todoDone, todoTotal, onTodo, onSettings, settingsActiv
         <Icon name="diff2" size={11} color="var(--fg-3)" />
       </button>
       <span className="status-sep">·</span>
-      <button className="status-cell btn ghost" onClick={onTree} title={_t("conversation tree (prompt-cache status)")} style={{ height: 20, padding: "0 6px" }}>
-        <Icon name="branch" size={11} color="var(--fg-3)" />
+      <button className={`status-cell btn ghost ${railOpen ? "on" : ""}`} onClick={onRail} aria-pressed={railOpen}
+        title={_t("ambient rail")} style={{ height: 20, padding: "0 6px" }}>
+        <Icon name="sidebar" size={11} color={railOpen ? "var(--accent)" : "var(--fg-3)"} style={{ transform: "scaleX(-1)" }} />
+      </button>
+      <span className="status-sep">·</span>
+      <button className={`status-cell btn ghost ${treeOpen ? "on" : ""}`} onClick={onTree} aria-pressed={treeOpen}
+        title={_t("conversation tree (prompt-cache status)")} style={{ height: 20, padding: "0 6px" }}>
+        <Icon name="branch" size={11} color={treeOpen ? "var(--accent)" : "var(--fg-3)"} />
       </button>
       <span className="status-sep">·</span>
       <button className="status-cell btn ghost" onClick={onBrowser} aria-pressed={browserOpen}
