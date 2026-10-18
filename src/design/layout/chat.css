@@ -692,3 +692,25 @@
   -webkit-line-clamp: 1;
   line-clamp: 1;
 }
+
+/* ── Floating selection quote pill ────────────────────────────────────── */
+.sel-quote-pop {
+  position: fixed; z-index: 60;
+  transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 26px; padding: 0 10px;
+  border-radius: 999px;
+  background: var(--bg-elev);
+  border: 1px solid color-mix(in oklab, var(--accent) 45%, var(--line));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  color: var(--fg);
+  font-size: var(--d-text-xs);
+  cursor: pointer;
+  user-select: none;
+  animation: fade-up 120ms var(--ease-out);
+}
+.sel-quote-pop:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--accent);
+}

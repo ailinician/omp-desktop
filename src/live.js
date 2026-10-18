@@ -201,6 +201,7 @@
     "Scrolling": "滚动行为",
     "Follow new output": "跟随最新输出",
     "Composer": "输入框",
+    "Quote to prompt": "引用到输入框",
     "Sending": "发送快捷键",
     "Send with": "发送按键",
     "Pasting": "粘贴折叠",

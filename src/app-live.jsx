@@ -511,7 +511,36 @@ function App() {
   const [promptInsert, setPromptInsert] = React.useState(null);
   const handlePickHistoryPrompt = (text) => setPromptInsert({ text, nonce: Date.now() });
   const handleWidgetInsert = React.useCallback(text => setPromptInsert({ text, append: true, nonce: Date.now() }), []);
-
+  const [selQuote, setSelQuote] = React.useState(null);
+  React.useEffect(() => {
+    const onUp = () => requestAnimationFrame(() => {
+      const sel = window.getSelection?.();
+      if (!sel || sel.isCollapsed || !sel.rangeCount) { setSelQuote(null); return; }
+      const text = sel.toString().trim();
+      const node = sel.anchorNode;
+      const el = node?.nodeType === 1 ? node : node?.parentElement;
+      if (!text || !el?.closest?.(".chat-scroll") || el.closest?.("input, textarea")) { setSelQuote(null); return; }
+      const rect = sel.getRangeAt(0).getBoundingClientRect();
+      if (!rect || (!rect.width && !rect.height)) { setSelQuote(null); return; }
+      setSelQuote({
+        text,
+        x: Math.max(70, Math.min(window.innerWidth - 70, rect.left + rect.width / 2)),
+        y: rect.top > 48 ? rect.top - 32 : rect.bottom + 8,
+      });
+    });
+    const onClear = () => { const s = window.getSelection?.(); if (!s || s.isCollapsed) setSelQuote(null); };
+    const onScroll = () => setSelQuote(null);
+    document.addEventListener("mouseup", onUp);
+    document.addEventListener("keyup", onUp);
+    document.addEventListener("selectionchange", onClear);
+    document.addEventListener("scroll", onScroll, true);
+    return () => {
+      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("keyup", onUp);
+      document.removeEventListener("selectionchange", onClear);
+      document.removeEventListener("scroll", onScroll, true);
+    };
+  }, []);
   // Goal mode in the composer and the goal strip above it (omp's `goal`).
   const goalUi = useGoalMode({
     bridge, tabId: planKey, sessionIds, goal, planMode: plan.mode, profileId: activeProfileId,
@@ -937,6 +966,20 @@ function App() {
                     submitKey={t.submitKey}
                     pasteCollapseLines={t.pasteCollapseLines}
                   />
+                  {selQuote && (
+                    <button className="sel-quote-pop" style={{ left: selQuote.x, top: selQuote.y }}
+                      onMouseDown={e => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const quoted = selQuote.text.split("\n").map(l => `> ${l}`).join("\n") + "\n\n";
+                        setPromptInsert({ text: quoted, quote: true, nonce: Date.now() });
+                        window.getSelection?.()?.removeAllRanges();
+                        setSelQuote(null);
+                      }}>
+                      <span style={{ color: "var(--accent)", fontWeight: 700 }}>❝</span>
+                      <span>{_t("Quote to prompt")}</span>
+                    </button>
+                  )}
                 </>)}
               </main>
 

@@ -261,7 +261,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   React.useEffect(() => {
     if (!promptInsert || promptInsert.nonce === seenInsertRef.current) return;
     seenInsertRef.current = promptInsert.nonce;
-    replaceDraft(promptInsert.append ? window.OMP_WIDGETS.appendToDraft(text, promptInsert.text) : promptInsert.text);
+    replaceDraft(promptInsert.quote ? (text.trim() ? `${text.replace(/\s+$/, "")}\n\n${promptInsert.text}` : promptInsert.text) : promptInsert.append ? window.OMP_WIDGETS.appendToDraft(text, promptInsert.text) : promptInsert.text);
     const images = promptInsert.images ?? [];
     if (images.length === 0) return;
     const back = images.map(image => ({ id: `att-${++attachCounterRef.current}`, name: "", image, src: toDataUrl(image) }));
