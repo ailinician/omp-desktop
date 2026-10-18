@@ -104,7 +104,7 @@ function tabClickProps(onSelect, onClose) {
 
 function TabBar({
   projects, activeId, onSelect, onClose, onRename, onNew, onHistory, onNewInProject, onReorder,
-  sidebarOpen, onToggleSidebar,
+  sidebarOpen, onToggleSidebar, railOpen, onToggleRail,
   profiles = [], appVersion, updateVersion, onUpdate, onCheckUpdate,
   settings, onSelectSettings, onCloseSettings,
 }) {
@@ -206,6 +206,15 @@ function TabBar({
           {appVersion ? `v${appVersion}` : "—"}
         </button>
       </div>
+      {onToggleRail && (
+        <button className={`tab-add ${railOpen ? "on" : ""}`}
+          title={_t("ambient rail")}
+          aria-pressed={!!railOpen}
+          onClick={onToggleRail}
+          style={{ borderLeft: "1px solid var(--line-soft)", borderRight: 0 }}>
+          <Icon name="sidebar" size={11} style={{ transform: "scaleX(-1)" }} />
+        </button>
+      )}
     </div>
   );
 }
@@ -215,7 +224,7 @@ function TabBar({
 // pills below the prompt box show (and change) both. It spans the window
 // under the workspace; the st-ctx meter, st-cost and st-tps cells (each
 // with its separator) drop out when the window is narrow (layout/rail.css).
-function StatusBar({ ctx, todoDone, todoTotal, onTodo, onSettings, settingsActive = false, onChanges, onRules, approvalMode, onStats, onRail, railOpen = false, onTree, treeOpen = false, onTerminal, terminalOpen, onBrowser, browserOpen = false }) {
+function StatusBar({ ctx, todoDone, todoTotal, onTodo, onSettings, settingsActive = false, onChanges, onRules, approvalMode, onStats, onTree, treeOpen = false, onTerminal, terminalOpen, onBrowser, browserOpen = false }) {
   return (
     <div className="status">
       <span className="status-cell"><span className="dot live" /> {_t("connected")}</span>
@@ -239,11 +248,6 @@ function StatusBar({ ctx, todoDone, todoTotal, onTodo, onSettings, settingsActiv
       <span className="status-sep">·</span>
       <button className="status-cell btn ghost" onClick={onChanges} title={_t("git browser")} style={{ height: 20, padding: "0 6px" }}>
         <Icon name="diff2" size={11} color="var(--fg-3)" />
-      </button>
-      <span className="status-sep">·</span>
-      <button className={`status-cell btn ghost ${railOpen ? "on" : ""}`} onClick={onRail} aria-pressed={railOpen}
-        title={_t("ambient rail")} style={{ height: 20, padding: "0 6px" }}>
-        <Icon name="sidebar" size={11} color={railOpen ? "var(--accent)" : "var(--fg-3)"} style={{ transform: "scaleX(-1)" }} />
       </button>
       <span className="status-sep">·</span>
       <button className={`status-cell btn ghost ${treeOpen ? "on" : ""}`} onClick={onTree} aria-pressed={treeOpen}

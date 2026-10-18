@@ -834,6 +834,11 @@ function App() {
             onReorder={handleReorder}
             sidebarOpen={showSidebar}
             onToggleSidebar={toggleSidebar}
+            railOpen={side === "rail" && showRail}
+            onToggleRail={() => {
+              if (side !== "rail") { setSide("rail"); if (!showRail) setTweak("layout", "rail"); }
+              else setTweak("layout", showRail ? "focus" : "rail");
+            }}
             onHistory={() => setHistoryOpen(true)}
             appVersion={updater.version}
             updateVersion={updater.pillVersion}
@@ -1027,11 +1032,6 @@ function App() {
             onRules={() => setRulesOpen(true)}
             approvalMode={approvalCell}
             onStats={() => setStatsOpen(true)}
-            onRail={() => {
-              if (side !== "rail") { setSide("rail"); if (!showRail) setTweak("layout", "rail"); }
-              else setTweak("layout", showRail ? "focus" : "rail");
-            }}
-            railOpen={side === "rail" && showRail}
             onTree={() => toggleSide("tree")}
             treeOpen={side === "tree"}
             onTerminal={() => terminal.toggle(planKey)}
