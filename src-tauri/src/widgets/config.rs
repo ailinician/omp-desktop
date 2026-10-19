@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::external_open;
+
 use serde::de::IgnoredAny;
 
 pub const TIMEOUT_DEFAULT_MS: u64 = 10_000;
@@ -59,8 +61,8 @@ pub enum Scope {
 pub enum InsertTarget {
     /// Append to the active tab's draft (the default).
     Draft,
-    /// Open a new tab on `project` (absolute, `~/` expanded, an existing
-    /// directory at load) and put the text into its draft.
+    /// Open a new tab on `project` (absolute, `~/` expanded, canonicalised
+    /// existing directory at load) and put the text into its draft.
     NewTab { project: String },
 }
 
@@ -338,12 +340,12 @@ fn parse_insert(
                 ));
                 return InsertTarget::Draft;
             }
-            if !Path::new(&project).is_dir() {
+            let Ok(project) = external_open::canonical_folder(Path::new(&project)) else {
                 warnings.push(format!(
                     "{label}: insert.project \"{project}\" is not an existing directory; inserting into the draft"
                 ));
                 return InsertTarget::Draft;
-            }
+            };
             InsertTarget::NewTab { project }
         }
         Some(other) => {
@@ -868,17 +870,24 @@ mod tests {
     #[test]
     fn insert_new_tab_takes_an_existing_directory() {
         let (real, _) = insert_dirs("ok");
-        let project = real.to_string_lossy().into_owned();
-        let body = insert_body(&format!(r#"{{"target":"new-tab","project":{project:?}}}"#));
+        let expected = external_open::canonical_folder(&real).expect("canonical");
+        let raw = real.to_string_lossy().into_owned();
+        let body = insert_body(&format!(r#"{{"target":"new-tab","project":{raw:?}}}"#));
         let c = load_body("insert-ok", body.as_bytes()).expect("ok");
         let _ = std::fs::remove_dir_all(&real);
         assert_eq!(c.errors, Vec::<String>::new());
-        assert_eq!(c.plugins[0].insert, InsertTarget::NewTab { project });
+        assert_eq!(
+            c.plugins[0].insert,
+            InsertTarget::NewTab { project: expected }
+        );
     }
 
     #[test]
     fn insert_new_tab_expands_tilde() {
         let Some(home) = home_dir() else { return };
+        let Ok(expected) = external_open::canonical_folder(Path::new(&home)) else {
+            return;
+        };
         let c = load_body(
             "insert-tilde",
             insert_body(r#"{"target":"new-tab","project":"~/"}"#).as_bytes(),
@@ -887,9 +896,7 @@ mod tests {
         assert_eq!(c.errors, Vec::<String>::new());
         assert_eq!(
             c.plugins[0].insert,
-            InsertTarget::NewTab {
-                project: Path::new(&home).join("").to_string_lossy().into_owned()
-            }
+            InsertTarget::NewTab { project: expected }
         );
     }
 
@@ -937,6 +944,39 @@ mod tests {
             assert!(c.errors[0].starts_with("plugin \"a\": "), "{:?}", c.errors);
             assert!(c.errors[0].contains(needle), "{insert}: {:?}", c.errors);
         }
+        let _ = std::fs::remove_dir_all(&real);
+    }
+
+    #[test]
+    fn insert_new_tab_canonicalises_parent_segments_and_symlinks() {
+        let (real, _) = insert_dirs("canon");
+        let target = real.join("target");
+        std::fs::create_dir_all(&target).expect("target dir");
+        let expected = external_open::canonical_folder(&target).expect("canonical");
+        let via_parent = target
+            .join("..")
+            .join("target")
+            .to_string_lossy()
+            .into_owned();
+        let body = insert_body(&format!(
+            r#"{{"target":"new-tab","project":{via_parent:?}}}"#
+        ));
+        let c = load_body("insert-canon", body.as_bytes()).expect("ok");
+        assert_eq!(c.errors, Vec::<String>::new());
+        #[cfg(unix)]
+        {
+            let link = real.join("link");
+            std::os::unix::fs::symlink(&target, &link).expect("symlink");
+            let via_link = link.to_string_lossy().into_owned();
+            let body = insert_body(&format!(r#"{{"target":"new-tab","project":{via_link:?}}}"#));
+            let d = load_body("insert-canon-link", body.as_bytes()).expect("ok");
+            assert_eq!(d.errors, Vec::<String>::new());
+            assert_eq!(d.plugins[0].insert, c.plugins[0].insert);
+        }
+        assert_eq!(
+            c.plugins[0].insert,
+            InsertTarget::NewTab { project: expected }
+        );
         let _ = std::fs::remove_dir_all(&real);
     }
 

@@ -2,7 +2,7 @@
 //   parseOutput(stdout)        plugin stdout → validated, capped widget v1 or error
 //   insertText(item) / safeUrl(url) / appendToDraft(draft, insert)
 //                              what a click may do
-//   insertAction(cfg, altKey) / insertTitle(cfg)
+//   insertAction(cfg, altKey) / insertTitle(cfg) / consumePromptInsert(...)
 //                              where an insert click goes (widgets.json `insert`)
 //   runKey / mergeRun / cardRun / parsedLast
 //                              the hook's run bookkeeping (events → card props)
@@ -155,6 +155,23 @@
     return `Click: new tab in ${folder} · ⌥-click: insert here`;
   }
 
+  // consumePromptInsert: whether `Composer` should apply `promptInsert` now,
+  // or wait (when a `new-tab` insert's `sessionId` is not in `sessionIds`
+  // yet because the await continuation set `promptInsert` before the bridge
+  // snapshot's render committed). Returns `{ kind: "none" }` (already seen,
+  // absent, or waiting on `sessionIds`), `{ kind: "targeted", nonce,
+  // sessionId }` or `{ kind: "active", nonce }`.
+  function consumePromptInsert(promptInsert, seenNonce, sessionIds) {
+    if (!promptInsert || promptInsert.nonce === seenNonce) return { kind: "none" };
+    if (promptInsert.sessionId) {
+      if (!Array.isArray(sessionIds) || !sessionIds.includes(promptInsert.sessionId)) {
+        return { kind: "none" };
+      }
+      return { kind: "targeted", nonce: promptInsert.nonce, sessionId: promptInsert.sessionId };
+    }
+    return { kind: "active", nonce: promptInsert.nonce };
+  }
+
   // Namespaced per source so #52's extension widgets can use `widget:ext:<key>`.
   const TWEAK_PREFIX = "widget:plugin:";
   const tweakKey = (id) => `${TWEAK_PREFIX}${id}`;
@@ -236,7 +253,7 @@
   }
 
   window.OMP_WIDGETS = {
-    parseOutput, insertText, safeUrl, appendToDraft, insertAction, insertTitle, tweakKey, hiddenPluginIds, argvDisplay, relativeTime,
+    parseOutput, insertText, safeUrl, appendToDraft, insertAction, insertTitle, consumePromptInsert, tweakKey, hiddenPluginIds, argvDisplay, relativeTime,
     runKey, mergeRun, parsedLast, cardRun,
   };
 })();

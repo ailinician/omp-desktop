@@ -94,7 +94,7 @@ Settings → Rail has one toggle per enabled plugin, under the toggles for the b
 | `intervalMs` | no | Periodic refresh. Absent or `0` means none. Clamped to 15000..3600000 (15 s to 1 h). |
 | `enabled` | no | Default `true`. A disabled plugin is never offered for approval and never runs, and it has no Settings toggle. |
 | `scope` | no | `"tab"` (default) or `"global"`; anything else rejects the entry. A `tab` plugin keeps one result per tab. A `global` plugin keeps one result for the whole app, computed with the active tab's context. |
-| `insert` | no | Where a click on an item's `+` button puts its text: `{ "target": "draft" \| "new-tab", "project": "<path>" }`. `draft` (default, the same as leaving `insert` out) appends to the active tab's draft. `new-tab` opens a **new** tab in `project` and puts the text into that tab's draft. `project` is required for `new-tab`: an absolute path, or `~/…` (expanded like `command`), naming an existing directory when the config is loaded. There is no `send` option: a click never submits a prompt. See [Insert target](#insert-target). |
+| `insert` | no | Where a click on an item's `+` button puts its text: `{ "target": "draft" \| "new-tab", "project": "<path>" }`. `draft` (default, the same as leaving `insert` out) appends to the active tab's draft. `new-tab` opens a **new** tab in `project` and puts the text into that tab's draft. `project` is required for `new-tab`: an absolute path, or `~/…` (expanded like `command`), naming an existing directory when the config is loaded (canonicalised). There is no `send` option: a click never submits a prompt. See [Insert target](#insert-target). |
 
 How the file is read:
 

@@ -556,5 +556,24 @@ check("insertTitle: plain tooltip for draft, folder name and ⌥ hint for new-ta
   assert.equal(W.insertTitle({ target: "new-tab", project: "C:\\a\\proj" }), "Click: new tab in proj · ⌥-click: insert here");
   assert.equal(W.insertTitle({ target: "new-tab", project: "/" }), "Click: new tab in / · ⌥-click: insert here");
 });
+check("consumePromptInsert: waits for target sessionId to join sessionIds before consuming nonce", () => {
+  const targeted = { text: "fix #1", append: true, sessionId: "session-2", nonce: 100 };
+  // Before sessionIds includes session-2, the insert stays pending (kind: "none").
+  assert.deepEqual(W.consumePromptInsert(targeted, null, ["session-1"]), { kind: "none" });
+  assert.deepEqual(W.consumePromptInsert(targeted, null, []), { kind: "none" });
+  // Once session-2 is in sessionIds, it consumes the nonce.
+  assert.deepEqual(W.consumePromptInsert(targeted, null, ["session-1", "session-2"]), {
+    kind: "targeted",
+    nonce: 100,
+    sessionId: "session-2",
+  });
+  // Re-running with seenNonce === 100 does not apply it a second time.
+  assert.deepEqual(W.consumePromptInsert(targeted, 100, ["session-1", "session-2"]), { kind: "none" });
+  // Active-tab insert (no sessionId) applies immediately and is skipped once seen.
+  const active = { text: "here", append: true, nonce: 101 };
+  assert.deepEqual(W.consumePromptInsert(active, 100, []), { kind: "active", nonce: 101 });
+  assert.deepEqual(W.consumePromptInsert(active, 101, []), { kind: "none" });
+  assert.deepEqual(W.consumePromptInsert(null, 101, ["session-1"]), { kind: "none" });
+});
 
 console.log(`test-widgets: ${passed} checks passed`);

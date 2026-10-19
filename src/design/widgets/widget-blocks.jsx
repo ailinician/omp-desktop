@@ -23,6 +23,15 @@ function _wbOpen(url) {
   );
 }
 
+function WidgetInsertButton({ text, onInsert, insertCfg }) {
+  const title = _wbInsertTitle(insertCfg);
+  return (
+    <button className="btn icon ghost" title={title} aria-label={title} onClick={(e) => onInsert?.(text, _wbInsertAction(insertCfg, e.altKey))}>
+      <_WB_Icon name="plus" size={9} />
+    </button>
+  );
+}
+
 function WidgetItem({ item, now, onInsert, insertCfg }) {
   const insert = _wbInsertText(item);
   const url = _wbSafeUrl(item.url);
@@ -42,11 +51,7 @@ function WidgetItem({ item, now, onInsert, insertCfg }) {
       )}
       {(insert || url) && (
         <span className="wdg-item-actions">
-          {insert && (
-            <button className="btn icon ghost" title={_wbInsertTitle(insertCfg)} aria-label={_wbInsertTitle(insertCfg)} onClick={(e) => onInsert?.(insert, _wbInsertAction(insertCfg, e.altKey))}>
-              <_WB_Icon name="plus" size={9} />
-            </button>
-          )}
+          {insert && <WidgetInsertButton text={insert} onInsert={onInsert} insertCfg={insertCfg} />}
           {url && (
             <button className="btn icon ghost" title={url} aria-label={`open ${url}`} onClick={() => _wbOpen(url)}>
               <_WB_Icon name="external" size={9} />
@@ -121,11 +126,7 @@ function WidgetBlock({ block, onInsert, insertCfg }) {
       return (
         <div className="wdg-text-row">
           <div className={`wdg-text selectable${block.mono ? " mono" : ""}`}>{block.text}</div>
-          {block.insert && (
-            <button className="btn icon ghost" title={_wbInsertTitle(insertCfg)} aria-label={_wbInsertTitle(insertCfg)} onClick={(e) => onInsert?.(block.insert, _wbInsertAction(insertCfg, e.altKey))}>
-              <_WB_Icon name="plus" size={9} />
-            </button>
-          )}
+          {block.insert && <WidgetInsertButton text={block.insert} onInsert={onInsert} insertCfg={insertCfg} />}
         </div>
       );
     case "kv":

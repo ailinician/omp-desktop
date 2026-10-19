@@ -205,20 +205,24 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   // re-enables — unless the user is typing somewhere else by then (an
   // inline tab rename, #32, commits on blur; the ⌘K input): taking focus
   // from it would commit a half-typed name or drop the keystrokes.
+  const focusTextarea = () => {
+    const el = document.activeElement;
+    if (el && window.OMP_KEYMAP?.isTypingTarget(el)) return null;
+    const ta = taRef.current;
+    if (ta) ta.focus();
+    return ta;
+  };
+
   React.useEffect(() => {
     if (isStreaming) return;
-    requestAnimationFrame(() => {
-      const el = document.activeElement;
-      if (el && window.OMP_KEYMAP?.isTypingTarget(el)) return;
-      taRef.current?.focus();
-    });
+    requestAnimationFrame(focusTextarea);
   }, [isStreaming]);
-
   // Shared by the inline `/` popup's non-desktop pick and the ⌘K bridge's
   // draftInsert below — both replace the composer's text with a command
   // token and put the caret at its end, ready for arguments.
   const replaceDraft = (next) => {
     setText(next);
+    setCaret(next.length);
     setActiveIdx(0);
     requestAnimationFrame(() => {
       const ta = taRef.current;
@@ -256,22 +260,23 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   // included (OMP_WIDGETS.appendToDraft). An insert from before this
   // composer mounted (it unmounts while no tab is open) is not replayed
   // into the next tab's draft.
-  const seenInsertRef = React.useRef(promptInsert?.nonce);
+  const seenInsertRef = React.useRef(promptInsert?.sessionId ? null : promptInsert?.nonce);
   React.useEffect(() => {
-    if (!promptInsert || promptInsert.nonce === seenInsertRef.current) return;
-    seenInsertRef.current = promptInsert.nonce;
+    const step = window.OMP_WIDGETS.consumePromptInsert(promptInsert, seenInsertRef.current, sessionIds);
+    if (step.kind === "none") return;
+    seenInsertRef.current = step.nonce;
     // A widget insert for a freshly opened tab (`sessionId`, insert target
     // new-tab) goes into that tab's own draft, appended like any widget insert.
-    if (promptInsert.sessionId) {
-      // Guarded like the queue restore: a tab closed while omp started gets no draft back,
-      // and focus moves only if that tab is shown and the user is not typing elsewhere.
-      const target = promptInsert.sessionId;
+    if (step.kind === "targeted") {
+      const target = step.sessionId;
+      const prevText = draftEntryOf(drafts, target, DRAFT_IDLE).text;
+      const nextText = window.OMP_WIDGETS.appendToDraft(prevText, promptInsert.text);
       updateOpenDraft(target, d => ({ ...d, text: window.OMP_WIDGETS.appendToDraft(d.text, promptInsert.text), historyNav: null }));
+      if (sessionIdRef.current === target) setCaret(nextText.length);
       requestAnimationFrame(() => {
         if (sessionIdRef.current !== target) return;
-        const el = document.activeElement;
-        if (el && window.OMP_KEYMAP?.isTypingTarget(el)) return;
-        taRef.current?.focus();
+        const ta = focusTextarea();
+        if (ta) ta.selectionStart = ta.selectionEnd = ta.value.length;
       });
       return;
     }
@@ -280,7 +285,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
     if (images.length === 0) return;
     const back = images.map(image => ({ id: `att-${++attachCounterRef.current}`, name: "", image, src: toDataUrl(image) }));
     updateDraft(sessionId, d => ({ ...d, attachments: [...d.attachments, ...back].slice(0, MAX_ATTACHMENTS) }));
-  }, [promptInsert?.nonce]);
+  }, [promptInsert?.nonce, sessionIds]);
 
   const execCmd = (cmd) => {
     // A mid-prompt skill pick replaces only its `/token` with
