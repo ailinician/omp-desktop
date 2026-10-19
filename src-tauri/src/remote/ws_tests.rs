@@ -1,5 +1,7 @@
 use super::*;
 use base64::Engine;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tungstenite::protocol::Role;
 use tungstenite::Message;
@@ -151,6 +153,48 @@ impl Client {
 
     fn read_close_code(&mut self) -> Option<u16> {
         self.read_close_code_within(Duration::from_secs(5))
+    }
+
+    /// Watch the connection on a cloned TCP handle: a reader thread records
+    /// when it reaches EOF or an error, i.e. when the server closed it. It
+    /// drains the socket, so use it only where the client reads nothing
+    /// more. Peeking would not do: unread data hides the EOF behind it.
+    fn watch_close(&self) -> CloseWatch {
+        let mut tcp = self.ws.get_ref().sock.try_clone().unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (flag, quit) = (Arc::clone(&closed), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            let mut buf = [0_u8; 256];
+            while !quit.load(Ordering::Relaxed) {
+                match tcp.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) if is_idle(&error) => {}
+                    Err(_) => break,
+                }
+            }
+            flag.store(!quit.load(Ordering::Relaxed), Ordering::Relaxed);
+        });
+        CloseWatch { closed, stop }
+    }
+}
+
+/// See [`Client::watch_close`]; stops its reader thread on drop.
+struct CloseWatch {
+    closed: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+}
+
+impl CloseWatch {
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for CloseWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -408,9 +452,11 @@ fn push_subscriptions_are_stored_capped_and_acked() {
 
 /// Bytes trickled to a socket that never authenticates: the server must cut
 /// it at the auth deadline (plus the close grace), not keep reading while
-/// bytes keep coming. The write failing is how the client sees that.
+/// bytes keep coming. The close is observed on the read side: on Windows
+/// writes to a peer-closed socket keep succeeding until the RST arrives.
 fn trickle_is_cut(s: &TestServer) -> bool {
     let mut client = s.ws_connect();
+    let watch = client.watch_close();
     let start = Instant::now();
     // A masked 4000-byte text frame, one byte per 10 ms: the socket is never
     // idle long enough for a read timeout to end a poll.
@@ -420,13 +466,16 @@ fn trickle_is_cut(s: &TestServer) -> bool {
         if start.elapsed() > Duration::from_millis(7500) {
             return false;
         }
+        if watch.is_closed() {
+            return true;
+        }
         let raw = client.ws.get_mut();
         if raw.write_all(&[byte]).and_then(|()| raw.flush()).is_err() {
             return true;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    false
+    watch.is_closed()
 }
 
 #[test]
@@ -555,6 +604,7 @@ fn stalled_peers_trickling_a_frame_lose_their_sockets_not_just_their_registratio
 fn revoking_an_authenticated_socket_cuts_tcp_immediately() {
     let s = test_server("ws-revoke-physical");
     let mut client = s.authed_socket();
+    let watch = client.watch_close();
     // Keep the reader inside an unfinished frame rather than its outbox loop.
     client
         .ws
@@ -564,9 +614,7 @@ fn revoking_an_authenticated_socket_cuts_tcp_immediately() {
     let device = s.devices.list().remove(0);
     assert!(s.hub.revoke(&device.id));
     assert!(
-        crate::test_support::wait_until(Duration::from_secs(1), || {
-            client.ws.get_mut().write_all(&[0]).is_err()
-        }),
+        crate::test_support::wait_until(Duration::from_secs(1), || watch.is_closed()),
         "revocation removed the registration but left TCP open"
     );
 }
@@ -574,6 +622,7 @@ fn revoking_an_authenticated_socket_cuts_tcp_immediately() {
 fn authenticated_trickle_is_cut(delay: Duration, name: &str) {
     let s = test_server(name);
     let mut client = s.authed_socket();
+    let watch = client.watch_close();
     let started = Instant::now();
     let mut frame = vec![0x81, 0xfe, 0x0f, 0xa0];
     frame.extend(std::iter::repeat_n(0, 4004));
@@ -583,8 +632,13 @@ fn authenticated_trickle_is_cut(delay: Duration, name: &str) {
             "authenticated trickled frame kept TCP open"
         );
         let raw = client.ws.get_mut();
-        if raw.write_all(&[byte]).and_then(|()| raw.flush()).is_err() {
-            assert_eq!(s.hub.connected_devices(), Vec::<String>::new());
+        if watch.is_closed() || raw.write_all(&[byte]).and_then(|()| raw.flush()).is_err() {
+            assert!(
+                crate::test_support::wait_until(Duration::from_secs(1), || {
+                    s.hub.connected_devices().is_empty()
+                }),
+                "socket cut but device still registered"
+            );
             return;
         }
         std::thread::sleep(delay);
@@ -618,13 +672,21 @@ fn padded_frame(len: usize) -> Vec<u8> {
 }
 
 /// Send `frame` evenly over `total`, a byte at a time. Returns when the
-/// frame is out, or at the first failed write and the time it took.
-fn trickle(client: &mut Client, frame: &[u8], total: Duration) -> (bool, Duration) {
+/// frame is out, or once the server closed the connection (seen on the
+/// read side), and the time it took.
+fn trickle(
+    client: &mut Client,
+    frame: &[u8],
+    total: Duration,
+    watch_close: bool,
+) -> (bool, Duration) {
+    let watch = watch_close.then(|| client.watch_close());
     let started = Instant::now();
     let step = total / u32::try_from(frame.len()).unwrap();
     for (n, byte) in frame.iter().enumerate() {
         let raw = client.ws.get_mut();
-        if raw.write_all(&[*byte]).and_then(|()| raw.flush()).is_err() {
+        let closed = watch.as_ref().is_some_and(CloseWatch::is_closed);
+        if closed || raw.write_all(&[*byte]).and_then(|()| raw.flush()).is_err() {
             return (false, started.elapsed());
         }
         let due = started + step * u32::try_from(n + 1).unwrap();
@@ -640,7 +702,8 @@ fn a_slow_but_steady_frame_outlives_the_read_cap_and_completes() {
     // 4 s with a byte every 10 ms: longer than FRAME_READ (3 s), shorter
     // than FRAME_LIFETIME (5 s). The socket may be yielded, not closed.
     let frame = padded_frame(400);
-    let (sent, took) = trickle(&mut client, &frame, Duration::from_secs(4));
+    // Not watched: the watcher would swallow the ack read below.
+    let (sent, took) = trickle(&mut client, &frame, Duration::from_secs(4), false);
     assert!(sent, "socket was closed after {took:?}");
     let ack = client.read_json_where(|m| m["t"] == "ack");
     assert_eq!(ack["kind"], "push");
@@ -652,7 +715,7 @@ fn a_frame_trickled_past_the_lifetime_is_cut_at_five_seconds_not_three() {
     let s = test_server("ws-late-frame");
     let mut client = s.authed_socket();
     let frame = padded_frame(800);
-    let (sent, took) = trickle(&mut client, &frame, Duration::from_secs(10));
+    let (sent, took) = trickle(&mut client, &frame, Duration::from_secs(10), true);
     assert!(!sent, "an 8 s frame must not complete");
     assert!(
         took >= Duration::from_millis(4500),
