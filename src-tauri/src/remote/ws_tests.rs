@@ -4,11 +4,8 @@ use std::time::Duration;
 use tungstenite::protocol::Role;
 use tungstenite::Message;
 
-trait Rw: Read + Write {}
-impl<T: Read + Write> Rw for T {}
-
 struct Client {
-    ws: tungstenite::WebSocket<Box<dyn Rw>>,
+    ws: tungstenite::WebSocket<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>,
 }
 
 fn tab(id: &str) -> TabMeta {
@@ -39,16 +36,11 @@ impl TestServer {
     /// Completed upgrade with a same-origin request, not yet authenticated.
     fn ws_connect(&self) -> Client {
         let tcp = self.tcp();
-        let mut stream: Box<dyn Rw> = if self.tls {
-            let name = ServerName::try_from("127.0.0.1").unwrap();
-            let connection = rustls::ClientConnection::new(self.client_config(), name).unwrap();
-            Box::new(rustls::StreamOwned::new(connection, tcp))
-        } else {
-            Box::new(tcp)
-        };
-        let scheme = if self.tls { "https" } else { "http" };
+        let name = ServerName::try_from("127.0.0.1").unwrap();
+        let connection = rustls::ClientConnection::new(self.client_config(), name).unwrap();
+        let mut stream = rustls::StreamOwned::new(connection, tcp);
         let request = format!(
-            "GET /ws HTTP/1.1\r\nHost: {host}\r\nOrigin: {scheme}://{host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+            "GET /ws HTTP/1.1\r\nHost: {host}\r\nOrigin: https://{host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
             host = self.host()
         );
         stream.write_all(request.as_bytes()).unwrap();
@@ -438,13 +430,8 @@ fn trickle_is_cut(s: &TestServer) -> bool {
 }
 
 #[test]
-fn trickling_bytes_do_not_keep_an_unauthenticated_tls_socket_open() {
-    assert!(trickle_is_cut(&test_server("ws-trickle-tls")));
-}
-
-#[test]
-fn trickling_bytes_do_not_keep_an_unauthenticated_plain_socket_open() {
-    assert!(trickle_is_cut(&test_server_with(false, "ws-trickle-plain")));
+fn trickling_bytes_do_not_keep_an_unauthenticated_socket_open() {
+    assert!(trickle_is_cut(&test_server("ws-trickle")));
 }
 
 #[test]
@@ -518,7 +505,7 @@ fn upgraded_sockets_hold_their_connection_slot() {
 
 #[test]
 fn stalled_peers_trickling_a_frame_lose_their_sockets_not_just_their_registration() {
-    let s = test_server_with(false, "ws-stalled");
+    let s = test_server("ws-stalled");
     let tokens = [s.pair_named("A"), s.pair_named("B")];
     let mut clients: Vec<Client> = [0, 0, 0, 1, 1]
         .iter()
@@ -566,7 +553,7 @@ fn stalled_peers_trickling_a_frame_lose_their_sockets_not_just_their_registratio
 
 #[test]
 fn revoking_an_authenticated_socket_cuts_tcp_immediately() {
-    let s = test_server_with(false, "ws-revoke-physical");
+    let s = test_server("ws-revoke-physical");
     let mut client = s.authed_socket();
     // Keep the reader inside an unfinished frame rather than its outbox loop.
     client
@@ -584,8 +571,8 @@ fn revoking_an_authenticated_socket_cuts_tcp_immediately() {
     );
 }
 
-fn authenticated_trickle_is_cut(tls: bool, delay: Duration, name: &str) {
-    let s = test_server_with(tls, name);
+fn authenticated_trickle_is_cut(delay: Duration, name: &str) {
+    let s = test_server(name);
     let mut client = s.authed_socket();
     let started = Instant::now();
     let mut frame = vec![0x81, 0xfe, 0x0f, 0xa0];
@@ -607,17 +594,12 @@ fn authenticated_trickle_is_cut(tls: bool, delay: Duration, name: &str) {
 
 #[test]
 fn authenticated_continuous_trickle_has_an_absolute_deadline() {
-    authenticated_trickle_is_cut(false, Duration::from_millis(10), "ws-authed-trickle");
-}
-
-#[test]
-fn authenticated_tls_trickle_has_an_absolute_deadline() {
-    authenticated_trickle_is_cut(true, Duration::from_millis(10), "ws-authed-trickle-tls");
+    authenticated_trickle_is_cut(Duration::from_millis(10), "ws-authed-trickle");
 }
 
 #[test]
 fn authenticated_partial_reads_do_not_reset_the_frame_deadline() {
-    authenticated_trickle_is_cut(false, Duration::from_millis(100), "ws-authed-partials");
+    authenticated_trickle_is_cut(Duration::from_millis(100), "ws-authed-partials");
 }
 
 /// A masked client text frame (zero mask key) of a valid `push-unsubscribe`

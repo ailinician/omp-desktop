@@ -663,3 +663,18 @@ test("Enter during IME composition does not blur a settings field", () => {
   assert.equal(press({ keyCode: 229 }), 0, "keyCode 229 is a composition Enter too");
   assert.equal(press({ key: "a" }), 0, "other keys do not blur");
 });
+
+// ---- settings: the server row has no plain-HTTP switch any more -------------
+test("the server row offers no plain HTTP, even for settings that still carry allowHttp", async () => {
+  const { window, reset } = remoteRows();
+  const settings = { enabled: true, interface: "en0", port: 7470, hostName: null, allowHttp: true, cert: {}, push: {} };
+  const bridge = {
+    onRemoteEvent: () => () => {}, remoteStatus: async () => ({ settings, devices: [], listening: true, url: "https://10.0.0.2:7470" }),
+    remoteInterfaces: async () => [], remoteApply: async () => ({ ok: true, value: {} }),
+  };
+  const render = () => { reset(); return window.OMP_SETTINGS_ROWS.remoteServer({ row: {}, ctx: { bridge }, query: "" }); };
+  render(); await flush();
+  const text = JSON.stringify(render());
+  assert.match(text, /Enable remote access/, "control: the row rendered");
+  assert.doesNotMatch(text, /plain http|allowHttp|unencrypted/i);
+});

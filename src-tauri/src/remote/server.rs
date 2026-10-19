@@ -1,4 +1,4 @@
-//! TLS (or, by explicit switch, plain) HTTP server: static phone page,
+//! HTTPS server: static phone page,
 //! `POST /pair`, and the WebSocket upgrade hook.
 
 use std::collections::HashMap;
@@ -41,81 +41,52 @@ pub struct Conn {
     pub slot: Option<Slot>,
 }
 
-pub enum Transport {
-    Tls(Box<StreamOwned<ServerConnection, DeadlineSock>>),
-    Plain(DeadlineSock),
-}
+/// The TLS stream of one connection; the server never speaks plain HTTP.
+pub struct Transport(Box<StreamOwned<ServerConnection, DeadlineSock>>);
 
 impl Transport {
     /// Best-effort orderly shutdown (TLS `close_notify`, then TCP FIN).
     pub fn close(&mut self) {
-        match self {
-            Self::Tls(stream) => {
-                stream.conn.send_close_notify();
-                let _ = stream.flush();
-                let _ = stream.sock.tcp.shutdown(Shutdown::Write);
-            }
-            Self::Plain(sock) => {
-                let _ = sock.tcp.shutdown(Shutdown::Write);
-            }
-        }
+        self.0.conn.send_close_notify();
+        let _ = self.0.flush();
+        let _ = self.0.sock.tcp.shutdown(Shutdown::Write);
     }
 
     /// Bytes received on the socket so far.
     pub const fn bytes_read(&self) -> u64 {
-        match self {
-            Self::Tls(stream) => stream.sock.bytes_read,
-            Self::Plain(sock) => sock.bytes_read,
-        }
-    }
-
-    fn sock(&mut self) -> &mut DeadlineSock {
-        match self {
-            Self::Tls(stream) => &mut stream.sock,
-            Self::Plain(sock) => sock,
-        }
+        self.0.sock.bytes_read
     }
 
     /// Bound all further socket I/O (TLS handshake included) by `deadline`;
     /// `None` leaves only the per-call caps.
     pub fn set_deadline(&mut self, deadline: Option<Instant>) {
-        self.sock().deadline = deadline;
+        self.0.sock.deadline = deadline;
     }
 
     /// Longest a single read / write may block, within any deadline.
     pub fn set_caps(&mut self, read: Option<Duration>, write: Option<Duration>) {
-        let sock = self.sock();
-        sock.read_cap = read;
-        sock.write_cap = write;
+        self.0.sock.read_cap = read;
+        self.0.sock.write_cap = write;
     }
 
     fn is_handshaking(&self) -> bool {
-        matches!(self, Self::Tls(stream) if stream.conn.is_handshaking())
+        self.0.conn.is_handshaking()
     }
 }
 
 impl Read for Transport {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Self::Tls(stream) => stream.read(buf),
-            Self::Plain(sock) => sock.read(buf),
-        }
+        self.0.read(buf)
     }
 }
 
 impl Write for Transport {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self {
-            Self::Tls(stream) => stream.write(buf),
-            Self::Plain(sock) => sock.write(buf),
-        }
+        self.0.write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Self::Tls(stream) => stream.flush(),
-            Self::Plain(sock) => sock.flush(),
-        }
+        self.0.flush()
     }
 }
 
@@ -136,15 +107,14 @@ pub struct Listen {
     pub ip: Ipv4Addr,
     pub port: u16,
     pub host_name: Option<String>,
-    /// `None` serves plain HTTP (explicit `allow_http` switch).
-    pub tls: Option<Arc<rustls::ServerConfig>>,
+    pub tls: Arc<rustls::ServerConfig>,
     /// Time a client gets for TLS handshake, head and body.
     pub request_deadline: Duration,
 }
 
 struct Context {
     allowed: Allowed,
-    tls: Option<Arc<rustls::ServerConfig>>,
+    tls: Arc<rustls::ServerConfig>,
     shared: Shared,
     on_upgrade: UpgradeFn,
     in_flight: Arc<InFlight>,
@@ -306,7 +276,6 @@ impl Server {
                 ip: listen.ip,
                 port: addr.port(),
                 host_name: listen.host_name,
-                plain: listen.tls.is_none(),
             },
             tls: listen.tls,
             shared,
@@ -379,16 +348,13 @@ fn handle(context: &Context, tcp: TcpStream, slot: Slot) {
         return;
     }
     let deadline = Instant::now() + context.request_deadline;
-    let stream = match &context.tls {
-        Some(config) => match ServerConnection::new(Arc::clone(config)) {
-            Ok(connection) => Transport::Tls(Box::new(StreamOwned::new(
-                connection,
-                DeadlineSock::new(tcp, deadline),
-            ))),
-            Err(_) => return,
-        },
-        None => Transport::Plain(DeadlineSock::new(tcp, deadline)),
+    let Ok(connection) = ServerConnection::new(Arc::clone(&context.tls)) else {
+        return;
     };
+    let stream = Transport(Box::new(StreamOwned::new(
+        connection,
+        DeadlineSock::new(tcp, deadline),
+    )));
     let mut conn = Conn {
         stream,
         tcp: socket,

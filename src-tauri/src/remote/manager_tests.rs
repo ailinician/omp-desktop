@@ -53,7 +53,6 @@ fn enabled(port: u16) -> RemoteSettings {
         enabled: true,
         interface: Some("en0".to_owned()),
         port,
-        allow_http: true,
         ..RemoteSettings::default()
     }
 }
@@ -202,14 +201,17 @@ fn pair_start_uses_the_host_name_and_the_scheme() {
     let port = free_port();
     let settings = RemoteSettings {
         host_name: Some("omp.test".to_owned()),
-        allow_http: false,
         ..enabled(port)
     };
-    let status = manager.apply(settings.clone()).unwrap();
+    let status = manager.apply(settings).unwrap();
     assert!(status.listening, "{:?}", status.error);
     assert_eq!(status.url, Some(format!("https://omp.test:{port}")));
     assert_eq!(status.ip.as_deref(), Some("127.0.0.1"));
-    assert!(status.fingerprint.is_some() && !status.plain_http);
+    assert!(status.fingerprint.is_some());
+    assert!(serde_json::to_value(&status)
+        .unwrap()
+        .get("plainHttp")
+        .is_none());
     let pair = manager.pair_start().unwrap();
     assert!(pair
         .url
@@ -217,16 +219,12 @@ fn pair_start_uses_the_host_name_and_the_scheme() {
     assert!(pair.svg.contains("<svg"));
     assert!(pair.expires_at > unix_seconds());
 
-    let plain = RemoteSettings {
-        allow_http: true,
-        host_name: None,
-        ..settings
-    };
-    manager.apply(plain).unwrap();
+    // Without a host name the phone is sent to the interface address, still over TLS.
+    manager.apply(enabled(port)).unwrap();
     let pair = manager.pair_start().unwrap();
     assert!(pair
         .url
-        .starts_with(&format!("http://127.0.0.1:{port}/#pair=")));
+        .starts_with(&format!("https://127.0.0.1:{port}/#pair=")));
 }
 
 #[test]
@@ -270,14 +268,24 @@ fn disabling_stops_the_server_and_a_missing_interface_is_an_error() {
     );
 }
 
-/// A plain-HTTP WebSocket client that has upgraded but not authenticated.
-fn upgraded(port: u16) -> tungstenite::WebSocket<TcpStream> {
-    use std::io::{Read, Write};
-    let mut tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
+type TlsClient = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+
+/// A TLS client of the server in `dir` (trusting its generated certificate).
+fn tls_client(dir: &Path, port: u16) -> TlsClient {
+    let tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
     tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let config = crate::test_support::tls_client_config(&dir.join("remote").join("cert.pem"));
+    let name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap();
+    rustls::StreamOwned::new(rustls::ClientConnection::new(config, name).unwrap(), tcp)
+}
+
+/// A WebSocket client that has upgraded but not authenticated.
+fn upgraded(dir: &Path, port: u16) -> tungstenite::WebSocket<TlsClient> {
+    use std::io::{Read, Write};
+    let mut tcp = tls_client(dir, port);
     let host = format!("127.0.0.1:{port}");
     let request = format!(
-        "GET /ws HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        "GET /ws HTTP/1.1\r\nHost: {host}\r\nOrigin: https://{host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
     );
     tcp.write_all(request.as_bytes()).unwrap();
     let mut head = Vec::new();
@@ -290,14 +298,14 @@ fn upgraded(port: u16) -> tungstenite::WebSocket<TcpStream> {
     tungstenite::WebSocket::from_raw_socket(tcp, tungstenite::protocol::Role::Client, None)
 }
 
-fn auth(socket: &mut tungstenite::WebSocket<TcpStream>, token: &str) {
+fn auth(socket: &mut tungstenite::WebSocket<TlsClient>, token: &str) {
     let frame = format!(r#"{{"t":"auth","token":"{token}"}}"#);
     socket.send(tungstenite::Message::text(frame)).unwrap();
 }
 
 #[test]
 fn an_upgrade_in_flight_across_disable_is_refused() {
-    let (manager, _emit, _dir) = manager("stale-upgrade", &loopback());
+    let (manager, _emit, dir) = manager("stale-upgrade", &loopback());
     let hub = manager.hub();
     hub.set_ready(true);
     let port = free_port();
@@ -305,12 +313,12 @@ fn an_upgrade_in_flight_across_disable_is_refused() {
     let (_device, token) = manager.core.devices.add("phone").unwrap();
 
     // Control: authenticating on the running server is admitted.
-    let mut control = upgraded(port);
+    let mut control = upgraded(&dir, port);
     auth(&mut control, &token);
     let hello = control.read().unwrap();
     assert!(hello.to_text().unwrap().contains("hello"), "{hello:?}");
 
-    let mut late = upgraded(port);
+    let mut late = upgraded(&dir, port);
     manager
         .apply(RemoteSettings {
             enabled: false,
@@ -327,13 +335,13 @@ fn an_upgrade_in_flight_across_disable_is_refused() {
 
 #[test]
 fn stopping_also_refuses_an_upgrade_in_flight() {
-    let (manager, _emit, _dir) = manager("stale-stop", &loopback());
+    let (manager, _emit, dir) = manager("stale-stop", &loopback());
     let hub = manager.hub();
     hub.set_ready(true);
     let port = free_port();
     assert!(manager.apply(enabled(port)).unwrap().listening);
     let (_device, token) = manager.core.devices.add("phone").unwrap();
-    let mut late = upgraded(port);
+    let mut late = upgraded(&dir, port);
     manager.stop();
     auth(&mut late, &token);
     match late.read() {
@@ -356,7 +364,7 @@ fn status_carries_the_saved_settings() {
     assert_eq!(emitted.settings, status.settings);
     let json = serde_json::to_value(&status).unwrap();
     assert_eq!(json["settings"]["hostName"], "omp.test");
-    assert_eq!(json["settings"]["allowHttp"], true);
+    assert!(json["settings"].get("allowHttp").is_none());
 }
 
 #[test]
@@ -392,7 +400,7 @@ fn a_push_only_change_keeps_the_server_and_its_sockets() {
 #[test]
 fn a_successful_pairing_emits_a_status_with_the_device() {
     use std::io::{Read, Write};
-    let (manager, emit, _dir) = manager("pair-status", &loopback());
+    let (manager, emit, dir) = manager("pair-status", &loopback());
     let port = free_port();
     assert!(manager.apply(enabled(port)).unwrap().listening);
     let url = manager.pair_start().unwrap().url;
@@ -402,11 +410,15 @@ fn a_successful_pairing_emits_a_status_with_the_device() {
         "POST /pair HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    let mut tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut tcp = tls_client(&dir, port);
     tcp.write_all(request.as_bytes()).unwrap();
-    let mut reply = String::new();
-    let _ = tcp.read_to_string(&mut reply);
+    let mut reply = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    // The server may end without close_notify once it has answered.
+    while let Ok(read @ 1..) = tcp.read(&mut chunk) {
+        reply.extend_from_slice(&chunk[..read]);
+    }
+    let reply = String::from_utf8_lossy(&reply);
     assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
     wait_until("the paired device in a status", || {
         emit.statuses
@@ -434,7 +446,7 @@ fn a_phone_gets_the_push_key_after_hello_only_while_push_is_on() {
     assert!(dir.join("remote/vapid.pk8").exists());
     let (_device, token) = manager.core.devices.add("phone").unwrap();
 
-    let mut on = upgraded(port);
+    let mut on = upgraded(&dir, port);
     auth(&mut on, &token);
     assert!(on.read().unwrap().to_text().unwrap().contains("hello"));
     let key: serde_json::Value =
@@ -444,7 +456,7 @@ fn a_phone_gets_the_push_key_after_hello_only_while_push_is_on() {
 
     settings.push.enabled = false;
     manager.apply(settings).unwrap();
-    let mut off = upgraded(port);
+    let mut off = upgraded(&dir, port);
     auth(&mut off, &token);
     assert!(off.read().unwrap().to_text().unwrap().contains("hello"));
     assert!(

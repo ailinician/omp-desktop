@@ -18,9 +18,9 @@ phone page ⇄ TLS/WebSocket ⇄ Rust hub ⇄ Tauri events/commands ⇄ webview 
 
 ## Commands and `Status`
 
-`remote_status`, `remote_interfaces`, `remote_apply_settings` (always the **complete** `RemoteSettings`: enabled, interface name, port, host name, cert `generated | files{cert,key}`, allowHttp, push{enabled, questions, finished, contact}), `remote_pair_start` (→ `{url, svg, expiresAt}`), `remote_pair_cancel`, `remote_device_rename`, `remote_device_revoke`, `remote_regenerate_cert`, `remote_push_test`, `remote_default_contact` (`git config user.email`), `remote_publish`, `remote_action_result`, `remote_ready`.
+`remote_status`, `remote_interfaces`, `remote_apply_settings` (always the **complete** `RemoteSettings`: enabled, interface name, port, host name, cert `generated | files{cert,key}`, push{enabled, questions, finished, contact}), `remote_pair_start` (→ `{url, svg, expiresAt}`), `remote_pair_cancel`, `remote_device_rename`, `remote_device_revoke`, `remote_regenerate_cert`, `remote_push_test`, `remote_default_contact` (`user.email` of the global git config, read through gix), `remote_publish`, `remote_action_result`, `remote_ready`.
 
-`Status` carries `enabled`, `listening`, `url`, `ip`, `error`, `fingerprint`, `plainHttp`, `pushError`, `devices[{id,name,pairedAt,lastSeen,connected,pushSubscribed}]` and the saved `settings`, so the Settings rows prefill from it and refresh on every `remote://status`.
+`Status` carries `enabled`, `listening`, `url`, `ip`, `error`, `fingerprint`, `pushError`, `devices[{id,name,pairedAt,lastSeen,connected,pushSubscribed}]` and the saved `settings`, so the Settings rows prefill from it and refresh on every `remote://status`.
 
 ## Pairing and auth
 
@@ -30,7 +30,7 @@ phone page ⇄ TLS/WebSocket ⇄ Rust hub ⇄ Tauri events/commands ⇄ webview 
 - Failed pairing attempts: 5 per minute per peer IP, then HTTP 429.
 - The device token is 32 random bytes (base64url), returned once; only its SHA-256 hex is stored and it is compared in constant time. The phone keeps it in `localStorage`.
 - WebSocket `/ws`: the first frame must be `{"t":"auth","token":…}` within 5 s, else close 4401. A revoked token closes with 4401 and the page forgets it. Max 4 sockets per device (4429), 8 in total.
-- DNS-rebinding guard: `Host` must equal `<ip>:<port>` or `<host name>:<port>`; a WebSocket `Origin` must equal the matching `https://…` (`http://…` only with the plain-HTTP switch). Anything else is 403 before any handler runs.
+- DNS-rebinding guard: `Host` must equal `<ip>:<port>` or `<host name>:<port>`; a WebSocket `Origin` must equal the matching `https://…` (an `http://` origin is never accepted). Anything else is 403 before any handler runs.
 - The server binds only the IPv4 of the interface chosen **by name**, never `0.0.0.0`/`::`; a changed or vanished interface IP rebinds or stops it. Windows has no interface lookup yet: enabling it reports "remote access is not supported on this platform yet".
 
 ## TLS and certificates
@@ -39,7 +39,7 @@ phone page ⇄ TLS/WebSocket ⇄ Rust hub ⇄ Tauri events/commands ⇄ webview 
 - **Own files**: PEM certificate + private key paths (Settings has text fields; there is no file picker). The certificate must cover the host name (carrying `serverAuth` is recommended; phones may refuse a leaf without it, but it is not checked), else the server refuses to start with that reason.
 - The SHA-256 fingerprint of the served leaf shows under Settings → Certificate.
 - Recipe used by the maintainer: a mkcert wildcard certificate for `*.home.lan` (the mkcert CA is installed and trusted on the phone), a DNS record `omp.home.lan` → the Mac (AdGuard DNS rewrite), host name `omp.home.lan` in Settings, "own files" with the wildcard cert and key. The phone then opens the page without warnings and push works.
-- Plain HTTP (switch, off by default) serves without TLS: the pairing code and token travel unencrypted and there is no push (service workers and Web Push need a secure context). Only for a network you trust.
+- There is no plain-HTTP mode: the server always speaks TLS, so the pairing code and the token never cross the network unencrypted. A `remote.json` written by an older version may still hold `allowHttp`; it is ignored and dropped on the next save.
 
 ## Tracker (`tracker.rs`)
 
@@ -77,7 +77,7 @@ Server → phone: `hello {deviceId,name}`, `tabs`, `view`, `theme {id,tone,accen
 ## Web Push
 
 - Triggers (Settings): a question opened (immediately) and a turn finished (only if it ran ≥ 30 s). At most one push per tab per 30 s; the notification `tag` is the tab id. Title `OMP · <tab title>`, body `Question waiting` / `Finished`; no transcript text. `TTL 3600`, urgency high (question) / normal (finished).
-- Needs the VAPID key (generated in the app config dir) and a **real contact** (`mailto:` or `https:`) in Settings; Apple rejects placeholders with 403 `BadJwtToken`. The Settings row prefills it from `git config user.email`. Without a valid contact nothing is sent and `Status.pushError` says why.
+- Needs the VAPID key (generated in the app config dir) and a **real contact** (`mailto:` or `https:`) in Settings; Apple rejects placeholders with 403 `BadJwtToken`. The Settings row prefills it from the global git config `user.email`. Without a valid contact nothing is sent and `Status.pushError` says why.
 - Subscriptions come from the page (`push-subscribe`, after a user gesture in the home-screen app); the page registers `/sw.js`, which shows the notification and on tap focuses or opens `/?tab=<id>` (`clients.claim()` on activate; `navigate` rejecting falls back to `openWindow`).
 - **Endpoint allowlist**: a subscription is only stored for `https` endpoints on `fcm.googleapis.com`, `updates.push.services.mozilla.com`, `*.push.apple.com` and `*.notify.windows.com`, so a paired phone cannot make the desktop send requests to arbitrary hosts. 404/410 from the push service deletes the subscription.
 - Earlier spike evidence (not feature acceptance): push delivery worked once with a certificate the phone trusts (the mkcert wildcard above, iOS 18.7 home-screen app). Real-phone acceptance of this feature is still pending. `PushManager` exists only in the home-screen app, not in a normal Safari tab.

@@ -623,7 +623,7 @@
 
   function connect() {
     connectionText = "Connecting…"; updateControls();
-    socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`);
+    socket = new WebSocket(`wss://${location.host}/ws`);
     socket.onopen = () => socket.send(JSON.stringify({ t: "auth", token }));
     socket.onmessage = event => {
       try {

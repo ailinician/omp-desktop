@@ -3,7 +3,7 @@ use crate::remote::emit::{Action, RemoteEmit, Status};
 use crate::remote::http::{read_head, CSP, REQUEST_DEADLINE};
 use crate::remote::hub::{Hub, PublishPayload, TabMeta};
 use crate::remote::tls::{load_or_generate, CertSource};
-use rustls::pki_types::{pem::PemObject, CertificateDer, ServerName};
+use rustls::pki_types::ServerName;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -29,7 +29,6 @@ struct TestServer {
     dir: PathBuf,
     pairing: Arc<Pairing>,
     devices: Arc<DeviceStore>,
-    tls: bool,
     hub: Arc<Hub>,
     emit: Arc<FakeEmit>,
 }
@@ -87,18 +86,12 @@ impl RemoteEmit for FakeEmit {
 mod ws_tests;
 
 /// Test-only constructor: binds 127.0.0.1 on a free port, no interface lookup.
-fn test_server_with(tls: bool, name: &str) -> TestServer {
-    test_server_deadline(tls, name, REQUEST_DEADLINE)
-}
-
-fn test_server_deadline(tls: bool, name: &str, request_deadline: Duration) -> TestServer {
+fn test_server_deadline(name: &str, request_deadline: Duration) -> TestServer {
     let dir = crate::test_support::tempdir("remote-server", name);
     let ip = Ipv4Addr::LOCALHOST;
-    let config = tls.then(|| {
-        load_or_generate(&dir, &CertSource::Generated, ip, None)
-            .unwrap()
-            .config
-    });
+    let config = load_or_generate(&dir, &CertSource::Generated, ip, None)
+        .unwrap()
+        .config;
     let pairing = Arc::new(Pairing::default());
     let devices = Arc::new(DeviceStore::load(dir.join("devices.json")));
     let emit = Arc::new(FakeEmit::new());
@@ -129,14 +122,13 @@ fn test_server_deadline(tls: bool, name: &str, request_deadline: Duration) -> Te
         dir,
         pairing,
         devices,
-        tls,
         hub,
         emit,
     }
 }
 
 fn test_server(name: &str) -> TestServer {
-    test_server_with(true, name)
+    test_server_deadline(name, REQUEST_DEADLINE)
 }
 
 impl TestServer {
@@ -145,40 +137,26 @@ impl TestServer {
     }
 
     fn client_config(&self) -> Arc<rustls::ClientConfig> {
-        let pem = std::fs::read(self.dir.join("remote").join("cert.pem")).unwrap();
-        let mut roots = rustls::RootCertStore::empty();
-        roots
-            .add(CertificateDer::from_pem_slice(&pem).unwrap())
-            .unwrap();
-        Arc::new(
-            rustls::ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-        )
+        crate::test_support::tls_client_config(&self.dir.join("remote").join("cert.pem"))
     }
 
-    /// Send `raw` and read the whole reply until the server closes.
-    fn raw(&self, raw: &[u8]) -> Reply {
-        let tcp = TcpStream::connect(self.server.local_addr()).unwrap();
-        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    /// Send `raw` and read the whole reply until the server closes; `None`
+    /// when the connection or the TLS exchange fails.
+    fn try_raw(&self, raw: &[u8]) -> Option<Vec<u8>> {
+        let tcp = TcpStream::connect(self.server.local_addr()).ok()?;
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+        tcp.set_write_timeout(Some(Duration::from_secs(5))).ok()?;
+        let name = ServerName::try_from("127.0.0.1").unwrap();
+        let connection = rustls::ClientConnection::new(self.client_config(), name).unwrap();
+        let mut stream = rustls::StreamOwned::new(connection, tcp);
+        stream.write_all(raw).ok()?;
         let mut bytes = Vec::new();
-        if self.tls {
-            let name = ServerName::try_from("127.0.0.1").unwrap();
-            let connection = rustls::ClientConnection::new(self.client_config(), name).unwrap();
-            let mut stream = rustls::StreamOwned::new(connection, tcp);
-            stream.write_all(raw).unwrap();
-            read_all(&mut stream, &mut bytes);
-        } else {
-            let mut stream = tcp;
-            stream.write_all(raw).unwrap();
-            read_all(&mut stream, &mut bytes);
-        }
-        parse_reply(&bytes)
+        read_all(&mut stream, &mut bytes);
+        Some(bytes)
+    }
+
+    fn raw(&self, raw: &[u8]) -> Reply {
+        parse_reply(&self.try_raw(raw).expect("TLS exchange with the server"))
     }
 
     fn get(&self, path: &str, host: &str) -> Reply {
@@ -262,7 +240,7 @@ fn foreign_host_or_origin_is_refused() {
         s.upgrade(&s.host(), Some(&format!("http://{}", s.host())))
             .status,
         403,
-        "plain-http origin is refused on a TLS server"
+        "an http:// origin is never accepted"
     );
     assert_eq!(s.upgrade(&s.host(), None).status, 403);
     assert_eq!(
@@ -286,7 +264,6 @@ fn host_name_is_accepted_with_port_and_default_ports_may_omit_it() {
         ip: Ipv4Addr::new(192, 168, 1, 5),
         port: 7470,
         host_name: Some("omp.home.lan".to_owned()),
-        plain: false,
     };
     let head = |host: &str| {
         let raw = format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n");
@@ -428,12 +405,15 @@ fn the_wildcard_address_is_refused() {
     let error = bind(Ipv4Addr::UNSPECIFIED, 0).unwrap_err();
     assert!(error.contains("0.0.0.0"), "{error}");
     let dir = crate::test_support::tempdir("remote-server", "wildcard");
+    let tls = load_or_generate(&dir, &CertSource::Generated, Ipv4Addr::LOCALHOST, None)
+        .unwrap()
+        .config;
     let result = Server::start(
         Listen {
             ip: Ipv4Addr::UNSPECIFIED,
             port: 0,
             host_name: None,
-            tls: None,
+            tls,
             request_deadline: REQUEST_DEADLINE,
         },
         Shared {
@@ -482,23 +462,6 @@ fn real_tls_handshake_with_the_generated_certificate() {
     let mut answer = Vec::new();
     read_all(&mut plain, &mut answer);
     assert!(!answer.starts_with(b"HTTP/"));
-}
-
-#[test]
-fn plain_http_is_served_only_when_enabled_and_expects_http_origins() {
-    let s = test_server_with(false, "plain");
-    s.hub.set_ready(false);
-    assert_eq!(s.get("/", &s.host()).status, 200);
-    assert_eq!(
-        s.upgrade(&s.host(), Some(&format!("https://{}", s.host())))
-            .status,
-        403
-    );
-    assert_eq!(
-        s.upgrade(&s.host(), Some(&format!("http://{}", s.host())))
-            .status,
-        101
-    );
 }
 
 struct Stalled;
@@ -557,7 +520,7 @@ fn a_dribbling_client_hits_the_absolute_deadline() {
 
 #[test]
 fn a_dribbled_tls_handshake_is_cut_at_the_deadline_without_an_answer() {
-    let s = test_server_deadline(true, "tls-dribble", Duration::from_secs(1));
+    let s = test_server_deadline("tls-dribble", Duration::from_secs(1));
     let name = ServerName::try_from("127.0.0.1").unwrap();
     let mut client = rustls::ClientConnection::new(s.client_config(), name).unwrap();
     let mut hello = Vec::new();
@@ -622,7 +585,7 @@ fn connections_over_the_in_flight_caps_are_closed_at_once() {
     assert!(in_flight.admit(a).is_some(), "a released slot is reusable");
 
     // End to end: idle sockets pin slots; the next one is closed unanswered.
-    let s = test_server_with(false, "caps");
+    let s = test_server("caps");
     let idle: Vec<TcpStream> = (0..MAX_IN_FLIGHT_PER_IP)
         .map(|_| TcpStream::connect(s.server.local_addr()).unwrap())
         .collect();
@@ -635,12 +598,8 @@ fn connections_over_the_in_flight_caps_are_closed_at_once() {
     assert!(closed, "over-cap socket is closed");
     drop(idle);
     let served = crate::test_support::eventually(Duration::from_secs(5), || {
-        let mut tcp = TcpStream::connect(s.server.local_addr()).ok()?;
-        tcp.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
-        tcp.write_all(format!("GET / HTTP/1.1\r\nHost: {}\r\n\r\n", s.host()).as_bytes())
-            .ok()?;
-        let mut bytes = Vec::new();
-        read_all(&mut tcp, &mut bytes);
+        let request = format!("GET / HTTP/1.1\r\nHost: {}\r\n\r\n", s.host());
+        let bytes = s.try_raw(request.as_bytes())?;
         bytes.starts_with(b"HTTP/1.1 200").then_some(())
     });
     assert!(served.is_some(), "slots free up when clients leave");
@@ -661,7 +620,7 @@ fn a_real_phone_user_agent_prefix_is_accepted_and_cut_to_64_chars() {
 
 #[test]
 fn dropping_the_server_returns_promptly() {
-    let s = test_server_with(false, "drop");
+    let s = test_server("drop");
     let started = Instant::now();
     drop(s.server);
     assert!(

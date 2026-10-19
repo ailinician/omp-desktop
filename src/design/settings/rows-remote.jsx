@@ -3,7 +3,7 @@
    (window.OMP_SETTINGS_ROWS). Rust owns `remote.json`; every row shows
    `remoteStatus()` (read on mount, refreshed on `remote://status`) and
    saves by sending the COMPLETE settings object to `remoteApply`.
-     remoteServer   enable, interface, port, host name, plain HTTP, status
+     remoteServer   enable, interface, port, host name, status
      remoteCert     generated or own files; fingerprint; regenerate
      remotePair     one-time QR code dialog
      remoteDevices  paired phones: rename, revoke (asks first)
@@ -114,15 +114,6 @@ function _SRR_Server({ row, ctx, query }) {
           <_SRR_Field value={s?.hostName ?? ""} label="Host name" placeholder="e.g. omp.home.lan" width={240} disabled={!s}
             onCommit={text => apply({ hostName: text.trim() || null })} />
         </_SRR_Line>
-        <_SRR_Line label="Allow plain HTTP">
-          <Toggle value={!!s?.allowHttp} label="Allow plain HTTP" onChange={v => apply({ allowHttp: v })} />
-        </_SRR_Line>
-        {s?.allowHttp && (
-          <div className="st-rem-warn">
-            Plain HTTP sends the pairing code and token unencrypted and the phone cannot receive push
-            notifications. Use it only on a network you trust.
-          </div>
-        )}
         <div className={`st-rem-status${status?.error ? " err" : ""}`}>{_SRR_statusText(status)}</div>
         {error && <div className="st-row-error">{error}</div>}
       </div>

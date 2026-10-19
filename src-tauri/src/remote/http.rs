@@ -176,22 +176,22 @@ fn parse_head(raw: &[u8]) -> Result<Head, HttpError> {
     })
 }
 
+/// The port a `Host` or `Origin` without one stands for.
+const HTTPS_PORT: u16 = 443;
+
 /// Which `Host` and `Origin` values belong to this server.
 pub struct Allowed {
     pub ip: Ipv4Addr,
     pub port: u16,
     pub host_name: Option<String>,
-    /// Plain HTTP: origins are `http://…`, otherwise `https://…`.
-    pub plain: bool,
 }
 
 impl Allowed {
     fn authority_matches(&self, candidate: &str) -> bool {
-        let default_port = if self.plain { 80 } else { 443 };
         let (host, port) =
             candidate
                 .rsplit_once(':')
-                .map_or((candidate, Some(default_port)), |(host, port)| {
+                .map_or((candidate, Some(HTTPS_PORT)), |(host, port)| {
                     let digits = port.bytes().all(|byte| byte.is_ascii_digit());
                     (host, digits.then(|| port.parse::<u16>().ok()).flatten())
                 });
@@ -212,7 +212,7 @@ impl Allowed {
     /// `Origin` must be the same origin as this server. A missing header is
     /// refused: every browser sends one on a WebSocket upgrade.
     pub fn origin_ok(&self, head: &Head) -> bool {
-        let scheme = if self.plain { "http://" } else { "https://" };
+        let scheme = "https://";
         head.header("origin").is_some_and(|origin| {
             origin
                 .get(..scheme.len())
