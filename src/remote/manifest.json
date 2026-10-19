@@ -1,0 +1,10 @@
+{
+  "name": "OMP Remote",
+  "short_name": "OMP",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#17191e",
+  "theme_color": "#17191e",
+  "description": "Read and control your OMP Desktop sessions from your phone."
+}

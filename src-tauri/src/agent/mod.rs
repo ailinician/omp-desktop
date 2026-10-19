@@ -363,7 +363,11 @@ impl AgentBridge {
                 .unwrap_or_else(|| format!("session '{session_id}' not found")));
         };
         let stdin_arc = stdin_arc.ok_or_else(|| "agent not running".to_string())?;
-        write_command(&stdin_arc, trimmed, answered.zip(open.as_deref()))
+        write_command(&stdin_arc, trimmed, answered.zip(open.as_deref()))?;
+        if let Some(id) = answered {
+            crate::remote::tracker::tracker().on_answered(session_id, id);
+        }
+        Ok(())
     }
 
     /// Look up the last cached spawn / startup error for a `session_id`.
@@ -511,6 +515,7 @@ fn reap_and_clear_grants(
     rule_book: &crate::approval::RuleBook,
 ) {
     prev.alive.store(false, Ordering::Release);
+    crate::remote::tracker::tracker().on_exit(session_id);
     rule_book.clear_session(session_id);
     prev.stdin = None;
     let prev_supervisor = prev.supervisor.take();
@@ -873,5 +878,104 @@ mod tests {
             "superseding/reaping a session must clear its liveness flag so its \
              (possibly still-running) reader thread stops emitting for this id"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn send_updates_tracker_only_after_a_successful_pipe_write() {
+        use crate::remote::tracker::tracker;
+        use std::process::{Command, Stdio};
+        use std::time::Instant;
+
+        let bridge = AgentBridge::new();
+        let sid = "tracker-send-success";
+        tracker().on_frame(
+            sid,
+            Some("extension_ui_request"),
+            Some(&approval_prompt("q", "bash")),
+            Instant::now(),
+            &AtomicBool::new(true),
+        );
+        let mut command = Command::new("cat");
+        command.stdin(Stdio::piped()).stdout(Stdio::null());
+        let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+        let stdin = child.stdin.take().unwrap();
+        bridge.sessions.lock().unwrap().insert(
+            sid.into(),
+            BridgeInner {
+                stdin: Some(Arc::new(Mutex::new(stdin))),
+                child: Some(child),
+                ..idle_inner(Arc::new(AtomicBool::new(true)))
+            },
+        );
+        bridge
+            .send(
+                sid,
+                r#"{"type":"extension_ui_response","id":"q","value":"Deny"}"#,
+            )
+            .unwrap();
+        assert_eq!(tracker().snapshot()[sid], (false, 0));
+        tracker().on_exit(sid);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn send_keeps_tracker_question_when_pipe_write_fails() {
+        use crate::remote::tracker::tracker;
+        use std::process::{Command, Stdio};
+        use std::time::Instant;
+
+        let bridge = AgentBridge::new();
+        let sid = "tracker-send-failure";
+        tracker().on_frame(
+            sid,
+            Some("extension_ui_request"),
+            Some(&approval_prompt("q", "bash")),
+            Instant::now(),
+            &AtomicBool::new(true),
+        );
+        let mut command = Command::new("true");
+        command.stdin(Stdio::piped());
+        let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+        let stdin = child.stdin.take().unwrap();
+        child.wait().unwrap();
+        bridge.sessions.lock().unwrap().insert(
+            sid.into(),
+            BridgeInner {
+                stdin: Some(Arc::new(Mutex::new(stdin))),
+                ..idle_inner(Arc::new(AtomicBool::new(true)))
+            },
+        );
+        assert!(bridge
+            .send(
+                sid,
+                r#"{"type":"extension_ui_response","id":"q","value":"Deny"}"#
+            )
+            .is_err());
+        assert_eq!(tracker().snapshot()[sid], (false, 1));
+        tracker().on_exit(sid);
+    }
+
+    #[test]
+    fn stopping_a_session_forgets_tracker_without_waiting_for_muted_reader() {
+        let bridge = AgentBridge::new();
+        let sid = "tracker-stop-session";
+        let tracker = crate::remote::tracker::tracker();
+        tracker.on_frame(
+            sid,
+            Some("agent_start"),
+            None,
+            std::time::Instant::now(),
+            &AtomicBool::new(true),
+        );
+        bridge
+            .sessions
+            .lock()
+            .unwrap()
+            .insert(sid.into(), idle_inner(Arc::new(AtomicBool::new(true))));
+        let dir = crate::test_support::TempDir::new("tracker", "stop-session");
+        let rules = crate::approval::RuleBook::new(dir.path().to_path_buf());
+        bridge.stop_session(sid, &rules);
+        assert!(!tracker.snapshot().contains_key(sid));
     }
 }

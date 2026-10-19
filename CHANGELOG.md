@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Remote access: read your tabs from a phone on your network or VPN, answer the agent's questions, send, steer and stop, and get a push notification when a question waits or a long turn finishes. Off by default; Settings → Remote access picks the network interface, port and host name, uses a generated or your own TLS certificate, pairs a phone with a one-time QR code, and lists and revokes paired phones. macOS and Linux; push needs a certificate the phone trusts. The installed iOS app pairs by scanning the same QR code with the rear camera, because its storage is separate from Safari. The phone page follows the desktop's theme and accent colour.
+- Remote access, phone transcript: opening a session jumps to its newest message and stays there while new text arrives; scrolling up keeps your place and shows a "↓ Newest" button that jumps back.
+
 ## [0.11.0] - 2026-10-17
 
 ### Added

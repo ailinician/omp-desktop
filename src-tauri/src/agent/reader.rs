@@ -218,6 +218,26 @@ fn should_emit(alive: &AtomicBool) -> bool {
     alive.load(Ordering::Acquire)
 }
 
+/// Mirror frames from live processes only; auto-approved requests never open
+/// a human dialog. No webview listener is needed for a background tab.
+fn record_tracker_frame(
+    sid: &str,
+    frame_type: Option<&str>,
+    frame: Option<&serde_json::Value>,
+    auto_approved: bool,
+    alive: &AtomicBool,
+) {
+    if !auto_approved {
+        crate::remote::tracker::tracker().on_frame(
+            sid,
+            frame_type,
+            frame,
+            std::time::Instant::now(),
+            alive,
+        );
+    }
+}
+
 pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
     let StdoutReaderConfig {
         sessions,
@@ -284,28 +304,27 @@ pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
                     // stdin and replaced with a synthetic notice — the human
                     // never sees the original ask, but does see that it was
                     // auto-approved.
-                    let text = parsed
-                        .as_ref()
-                        .and_then(|frame| {
-                            auto_approve_or_track(
-                                frame,
-                                frame_type,
-                                &rule_book,
-                                &sid,
-                                project_root.as_deref(),
-                                &stdin,
-                                &approvals,
-                            )
-                        })
-                        .unwrap_or(sanitized);
+                    let notice = parsed.as_ref().and_then(|frame| {
+                        auto_approve_or_track(
+                            frame,
+                            frame_type,
+                            &rule_book,
+                            &sid,
+                            project_root.as_deref(),
+                            &stdin,
+                            &approvals,
+                        )
+                    });
+                    let auto_approved = notice.is_some();
                     // One allocation for the line, shared with the journal
                     // by refcount rather than copied into it.
-                    let shared: std::sync::Arc<str> = std::sync::Arc::from(text);
+                    let shared: Arc<str> = Arc::from(notice.unwrap_or(sanitized));
                     let seq = journal.lock().map_or(0, |mut j| j.push(shared.clone()));
                     // After the push, stamped with its seq: a snapshot taken
                     // in between names an older seq, so the frontend still
                     // applies this frame from the replay.
                     ext_ui::record(&ext_ui, seq, frame_type, parsed.as_ref());
+                    record_tracker_frame(&sid, frame_type, parsed.as_ref(), auto_approved, &alive);
                     if should_emit(&alive) {
                         let _ = app.emit(&line_event, LineEvent { seq, text: &shared });
                         // Rail widgets with a `turn_end` trigger rerun after
@@ -366,6 +385,7 @@ pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
         // Empty payload = clean exit; non-empty = error reason. See the
         // AgentBridge doc-comment for the full event contract.
         if announce {
+            crate::remote::tracker::tracker().on_exit(&sid);
             if !exit_reason.is_empty() {
                 // Recorded before the emit so a `session_status` query that
                 // races the event still finds it. Only for the incarnation
@@ -947,5 +967,36 @@ mod tests {
         let reason = tail.to_reason().expect("the oversized line must survive");
         assert!(!reason.contains("superseded"));
         assert!(reason.starts_with('z'));
+    }
+
+    #[test]
+    fn tracker_hook_records_background_frames_but_not_auto_approvals_or_retired_readers() {
+        let sid = "tracker-reader-background";
+        let tracker = crate::remote::tracker::tracker();
+        let alive = AtomicBool::new(true);
+        record_tracker_frame(sid, Some("agent_start"), None, false, &alive);
+        record_tracker_frame(
+            sid,
+            Some("extension_ui_request"),
+            Some(&approval_prompt("q1", "bash")),
+            false,
+            &alive,
+        );
+        record_tracker_frame(
+            sid,
+            Some("extension_ui_request"),
+            Some(&approval_prompt("automatic", "edit")),
+            true,
+            &alive,
+        );
+        assert_eq!(tracker.snapshot()[sid], (true, 1));
+        alive.store(false, Ordering::Release);
+        record_tracker_frame(sid, Some("agent_end"), None, false, &alive);
+        assert_eq!(
+            tracker.snapshot()[sid],
+            (true, 1),
+            "retired reader must not finish a replacement turn"
+        );
+        tracker.on_exit(sid);
     }
 }
