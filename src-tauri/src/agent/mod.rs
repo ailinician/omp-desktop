@@ -936,9 +936,18 @@ mod tests {
         );
         let mut command = Command::new("true");
         command.stdin(Stdio::piped());
-        let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
-        let stdin = child.stdin.take().unwrap();
-        child.wait().unwrap();
+        // The exclusive gate keeps every other thread from forking while the
+        // pipe's read end exists: a child forked in that window would inherit
+        // it (CLOEXEC acts only at exec) and keep the pipe open, so the write
+        // below would land in the buffer instead of failing with EPIPE.
+        // `spawn_gate::spawn` would take the gate shared and wait on itself.
+        let (stdin, status) = {
+            let _gate = crate::spawn_gate::exclusive();
+            let mut child = command.spawn().unwrap();
+            let stdin = child.stdin.take().unwrap();
+            (stdin, child.wait().unwrap())
+        };
+        assert!(status.success());
         bridge.sessions.lock().unwrap().insert(
             sid.into(),
             BridgeInner {
