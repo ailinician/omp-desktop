@@ -1,4 +1,4 @@
-//! TLS (or, by explicit switch, plain) HTTP server: static phone page,
+//! HTTPS server: static phone page,
 //! `POST /pair`, and the WebSocket upgrade hook.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -46,15 +46,14 @@ pub struct Listen {
     pub ip: Ipv4Addr,
     pub port: u16,
     pub host_name: Option<String>,
-    /// `None` serves plain HTTP (explicit `allow_http` switch).
-    pub tls: Option<Arc<rustls::ServerConfig>>,
+    pub tls: Arc<rustls::ServerConfig>,
     /// Time a client gets for TLS handshake, head and body.
     pub request_deadline: Duration,
 }
 
 struct Context {
     allowed: Allowed,
-    tls: Option<Arc<rustls::ServerConfig>>,
+    tls: Arc<rustls::ServerConfig>,
     shared: Shared,
     on_upgrade: UpgradeFn,
     in_flight: Arc<InFlight>,
@@ -92,7 +91,6 @@ impl Server {
                 ip: listen.ip,
                 port: addr.port(),
                 host_name: listen.host_name,
-                plain: listen.tls.is_none(),
             },
             tls: listen.tls,
             shared,
@@ -165,16 +163,13 @@ fn handle(context: &Context, tcp: TcpStream, slot: Slot) {
         return;
     }
     let deadline = Instant::now() + context.request_deadline;
-    let stream = match &context.tls {
-        Some(config) => match ServerConnection::new(Arc::clone(config)) {
-            Ok(connection) => Transport::Tls(Box::new(StreamOwned::new(
-                connection,
-                DeadlineSock::new(tcp, deadline),
-            ))),
-            Err(_) => return,
-        },
-        None => Transport::Plain(DeadlineSock::new(tcp, deadline)),
+    let Ok(connection) = ServerConnection::new(Arc::clone(&context.tls)) else {
+        return;
     };
+    let stream = Transport::new(StreamOwned::new(
+        connection,
+        DeadlineSock::new(tcp, deadline),
+    ));
     let mut conn = Conn {
         stream,
         tcp: socket,

@@ -9,6 +9,7 @@ pub mod manager;
 pub mod net;
 pub mod pairing;
 pub mod push;
+pub mod push_contact;
 pub mod push_crypto;
 pub mod push_send;
 pub mod push_subs;

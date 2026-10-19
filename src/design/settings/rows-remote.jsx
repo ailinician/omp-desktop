@@ -3,7 +3,7 @@
    (window.OMP_SETTINGS_ROWS). Rust owns `remote.json`; every row shows
    `remoteStatus()` (read on mount, refreshed on `remote://status`) and
    saves by sending the COMPLETE settings object to `remoteApply`.
-     remoteServer   enable, interface, port, host name, plain HTTP, status
+     remoteServer   enable, interface, port, host name, status
      remoteCert     generated or own files; fingerprint; regenerate
      remotePair     one-time QR code dialog
      remoteDevices  paired phones: rename, revoke (asks first)
@@ -113,16 +113,24 @@ function _SRR_useAsync(load, fallback, deps) {
   return value;
 }
 
-/** Text field committed on blur or Enter; re-syncs when the saved value changes. */
+/** The port a text field holds, or `null` for anything but an integer in 1–65535. */
+function _SRR_parsePort(text) {
+  const n = Number(text);
+  return text.trim() !== "" && Number.isInteger(n) && n > 0 && n < 65536 ? n : null;
+}
+
+/** Text field committed on blur or Enter; re-syncs when the saved value changes.
+ *  `onCommit` returning `false` rejects the text: the field shows the saved value again. */
 function _SRR_Field({ value, onCommit, label, placeholder, width, disabled, mono = true }) {
   const [text, setText] = React.useState(value);
   React.useEffect(() => setText(value), [value]);
-  const commit = () => { if (text !== value) onCommit(text); };
+  const commit = () => { if (text !== value && onCommit(text) === false) setText(value); };
   return (
     <input className="st-rem-input" type="text" value={text} aria-label={label} placeholder={placeholder}
       disabled={disabled} spellCheck={false} style={{ width, fontFamily: mono ? undefined : "inherit" }}
       onChange={e => setText(e.target.value)} onBlur={commit}
       onKeyDown={e => {
+        // Enter confirms an IME candidate; only a plain Enter commits.
         if (e.key !== "Enter" || e.nativeEvent?.isComposing || e.keyCode === 229) return;
         e.currentTarget.blur();
       }} />
@@ -162,21 +170,16 @@ function _SRR_Server({ row, ctx, query }) {
         </_SRR_Line>
         <_SRR_Line label="Port">
           <_SRR_Field value={String(s?.port ?? "")} label="Port" width={90} disabled={!s}
-            onCommit={text => { const n = Number(text); if (Number.isInteger(n) && n > 0 && n < 65536) apply({ port: n }); }} />
+            onCommit={text => {
+              const port = _SRR_parsePort(text);
+              if (port === null) return false;
+              apply({ port });
+            }} />
         </_SRR_Line>
         <_SRR_Line label="Host name">
           <_SRR_Field value={s?.hostName ?? ""} label="Host name" placeholder="e.g. omp.home.lan" width={240} disabled={!s}
             onCommit={text => apply({ hostName: text.trim() || null })} />
         </_SRR_Line>
-        <_SRR_Line label="Allow plain HTTP">
-          <Toggle value={!!s?.allowHttp} label="Allow plain HTTP" onChange={v => apply({ allowHttp: v })} />
-        </_SRR_Line>
-        {s?.allowHttp && (
-          <div className="st-rem-warn">
-            Plain HTTP sends the pairing code and token unencrypted and the phone cannot receive push
-            notifications. Use it only on a network you trust.
-          </div>
-        )}
         <div className={`st-rem-status${status?.error ? " err" : ""}`}>{_SRR_statusText(status)}</div>
         {error && <div className="st-row-error">{error}</div>}
       </div>

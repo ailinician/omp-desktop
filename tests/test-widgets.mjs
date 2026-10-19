@@ -512,4 +512,137 @@ check("cardRun: idle without a result (stdout missing) is an error, not a crash"
   assert.equal(c.state, "error");
 });
 
+// ── attention ─────────────────────────────────────────────────────────────
+check("attention is parsed onto the widget", () => {
+  assert.equal(out({ version: 1, blocks: [], attention: "k1" }).widget.attention, "k1");
+});
+check("attention is cut to 200 chars", () => {
+  assert.equal(out({ version: 1, blocks: [], attention: "x".repeat(300) }).widget.attention.length, 200);
+});
+check("missing, empty and non-string attention is no attention", () => {
+  for (const attention of [undefined, "", 5, true, null, ["a"], { a: 1 }]) {
+    assert.equal("attention" in out({ version: 1, blocks: [], attention }).widget, false, JSON.stringify(attention));
+  }
+});
+const step = (o) => W.attentionStep({ hasWidget: true, ...o });
+check("attentionStep: a new unacknowledged key is active and bounces", () => {
+  assert.deepEqual(step({ key: "a", ack: null, seen: undefined }), { active: true, seen: "a", writeAck: false, bounce: true });
+  assert.deepEqual(step({ key: "b", ack: "a", seen: "a" }), { active: true, seen: "b", writeAck: false, bounce: true });
+});
+check("attentionStep: a rerun with the same key is active but bounces only on entry", () => {
+  assert.deepEqual(step({ key: "a", ack: null, seen: "a" }), { active: true, seen: "a", writeAck: false, bounce: false });
+});
+check("attentionStep: the acknowledged key is not active and does not bounce", () => {
+  assert.deepEqual(step({ key: "a", ack: "a", seen: "a" }), { active: false, seen: "a", writeAck: false, bounce: false });
+  assert.deepEqual(step({ key: "a", ack: "a", seen: undefined }), { active: false, seen: "a", writeAck: false, bounce: false });
+});
+check("attentionStep: no key ends attention and clears the ack, so the same key alerts again", () => {
+  for (const key of [undefined, ""]) {
+    assert.deepEqual(step({ key, ack: "a", seen: "a" }), { active: false, seen: "", writeAck: true, bounce: false });
+  }
+  assert.deepEqual(step({ key: undefined, ack: null, seen: "a" }), { active: false, seen: "", writeAck: false, bounce: false });
+  assert.deepEqual(step({ key: "a", ack: null, seen: "" }), { active: true, seen: "a", writeAck: false, bounce: true });
+});
+check("attentionStep: no widget (error, idle) keeps ack and seen and signals nothing", () => {
+  for (const key of [undefined, "", "b"]) {
+    assert.deepEqual(W.attentionStep({ key, ack: "a", seen: "a", hasWidget: false }), { active: false, seen: "a", writeAck: false, bounce: false });
+  }
+  assert.deepEqual(W.attentionStep({ key: undefined, ack: "a", seen: undefined, hasWidget: false }), { active: false, seen: "", writeAck: false, bounce: false });
+});
+check("attentionStep: a running rerun with the old widget does not enter again", () => {
+  // The old widget (key "a") stays on the card while the plugin runs.
+  const first = step({ key: "a", ack: null, seen: undefined });
+  assert.equal(first.bounce, true);
+  assert.deepEqual(step({ key: "a", ack: null, seen: first.seen }), { active: true, seen: "a", writeAck: false, bounce: false });
+});
+check("ackKey stays out of the Settings `widget:` toggle namespace", () => {
+  assert.equal(W.ackKey("ci").startsWith("widget:"), false);
+  assert.equal(W.ackKey("ci", "/p/a").startsWith("widget:"), false);
+});
+check("ackKey: global plugin per id; tab plugin per id and project, bounded and stable", () => {
+  assert.equal(W.ackKey("ci"), "widgetAck:ci");
+  assert.equal(W.ackKey("ci", "/p/a"), W.ackKey("ci", "/p/a"));
+  assert.notEqual(W.ackKey("ci", "/p/a"), W.ackKey("ci", "/p/b"));
+  assert.notEqual(W.ackKey("ci", "/p/a"), W.ackKey("lint", "/p/a"));
+  assert.notEqual(W.ackKey("ci", "/p/a"), W.ackKey("ci"));
+  assert.equal(W.ackKey("ci", "x".repeat(100000)).length, "widgetAck:ci:".length + 16);
+});
+check("a tab without a key does not clear another tab's ack", () => {
+  const store = {};
+  const run = (project, key) => {
+    const k = W.ackKey("ci", project);
+    const s = step({ key, ack: store[k] ?? null, seen: undefined });
+    if (s.writeAck) store[k] = null;
+    return s;
+  };
+  store[W.ackKey("ci", "/p/a")] = "a";
+  run("/p/b", undefined);
+  assert.equal(store[W.ackKey("ci", "/p/a")], "a");
+  assert.equal(run("/p/a", "a").active, false);
+});
+
+// ── insert target (widgets.json `insert`, ⌥-click) ────────────────────────
+const NEW_TAB = { target: "new-tab", project: "/Users/me/GIT/work/inbox" };
+check("insertAction: no config or draft target inserts into the draft", () => {
+  for (const cfg of [undefined, null, {}, { target: "draft" }]) {
+    assert.deepEqual(W.insertAction(cfg, false), { target: "draft" });
+  }
+});
+check("insertAction: new-tab opens the configured project", () => {
+  assert.deepEqual(W.insertAction(NEW_TAB, false), { target: "new-tab", project: NEW_TAB.project });
+});
+check("insertAction: ⌥/Alt-click falls back to the draft for new-tab", () => {
+  assert.deepEqual(W.insertAction(NEW_TAB, true), { target: "draft" });
+  assert.deepEqual(W.insertAction({ target: "draft" }, true), { target: "draft" });
+});
+check("insertAction: an incomplete or unknown target never opens a tab", () => {
+  for (const cfg of [{ target: "new-tab" }, { target: "new-tab", project: "" }, { target: "new-tab", project: 5 }, { target: "tab", project: "/x" }]) {
+    assert.deepEqual(W.insertAction(cfg, false), { target: "draft" });
+  }
+});
+check("insertAction: plugin output cannot carry a target (parseOutput drops it)", () => {
+  const r = out({ version: 1, insert: NEW_TAB, blocks: [
+    { type: "text", text: "t", insert: "x", target: "new-tab", project: "/evil" },
+    { type: "list", items: [{ label: "a", insertTarget: NEW_TAB, project: "/evil" }] },
+  ] });
+  assert.equal(JSON.stringify(r).includes("/evil"), false);
+  assert.equal("insert" in r.widget, false);
+});
+check("insertAction: derives the target only from its cfg argument", () => {
+  // Callers pass the config's `insert`; an item or output object carrying target/project
+  // fields next to it must change nothing.
+  const item = { label: "a", insert: "x", target: "new-tab", project: "/evil", insertTarget: NEW_TAB };
+  assert.equal(W.insertAction.length, 2, "only (cfg, altKey)");
+  assert.deepEqual(W.insertAction(undefined, false, item), { target: "draft" });
+  assert.deepEqual(W.insertAction({ target: "draft" }, false, item), { target: "draft" });
+  assert.deepEqual(W.insertAction(NEW_TAB, false, item), { target: "new-tab", project: NEW_TAB.project });
+});
+check("insertTitle: plain tooltip for draft, folder name and ⌥ hint for new-tab", () => {
+  assert.equal(W.insertTitle(undefined), "insert into prompt");
+  assert.equal(W.insertTitle({ target: "draft" }), "insert into prompt");
+  assert.equal(W.insertTitle(NEW_TAB), "Click: new tab in inbox · ⌥-click: insert here");
+  assert.equal(W.insertTitle({ target: "new-tab", project: "/a/b/" }), "Click: new tab in b · ⌥-click: insert here");
+  assert.equal(W.insertTitle({ target: "new-tab", project: "C:\\a\\proj" }), "Click: new tab in proj · ⌥-click: insert here");
+  assert.equal(W.insertTitle({ target: "new-tab", project: "/" }), "Click: new tab in / · ⌥-click: insert here");
+});
+check("consumePromptInsert: waits for target sessionId to join sessionIds before consuming nonce", () => {
+  const targeted = { text: "fix #1", append: true, sessionId: "session-2", nonce: 100 };
+  // Before sessionIds includes session-2, the insert stays pending (kind: "none").
+  assert.deepEqual(W.consumePromptInsert(targeted, null, ["session-1"]), { kind: "none" });
+  assert.deepEqual(W.consumePromptInsert(targeted, null, []), { kind: "none" });
+  // Once session-2 is in sessionIds, it consumes the nonce.
+  assert.deepEqual(W.consumePromptInsert(targeted, null, ["session-1", "session-2"]), {
+    kind: "targeted",
+    nonce: 100,
+    sessionId: "session-2",
+  });
+  // Re-running with seenNonce === 100 does not apply it a second time.
+  assert.deepEqual(W.consumePromptInsert(targeted, 100, ["session-1", "session-2"]), { kind: "none" });
+  // Active-tab insert (no sessionId) applies immediately and is skipped once seen.
+  const active = { text: "here", append: true, nonce: 101 };
+  assert.deepEqual(W.consumePromptInsert(active, 100, []), { kind: "active", nonce: 101 });
+  assert.deepEqual(W.consumePromptInsert(active, 101, []), { kind: "none" });
+  assert.deepEqual(W.consumePromptInsert(null, 101, ["session-1"]), { kind: "none" });
+});
+
 console.log(`test-widgets: ${passed} checks passed`);

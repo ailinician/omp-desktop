@@ -1,5 +1,7 @@
-//! Phone requests in flight: forwarded to the webview, answered by request
-//! id, expired after [`ACTION_TIMEOUT`].
+//! Phone requests in flight: forwarded to the webview under a hub-unique
+//! correlation id, answered by that id, expired after [`ACTION_TIMEOUT`].
+//! The phone's own `reqId` only comes back in its ack: two phones may pick
+//! the same one.
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -10,6 +12,7 @@ use crate::remote::emit::Action;
 
 pub(super) struct Pending {
     pub conn: u64,
+    /// The `reqId` the phone chose, echoed in its ack.
     req_id: String,
     deadline: Instant,
 }
@@ -21,7 +24,8 @@ fn ack(req_id: &str, ok: bool, error: Option<&str>) -> Out {
 impl Hub {
     /// Forward a phone request to the webview and start its 15 s clock.
     /// Requests of a connection the hub no longer knows (revoked, closed)
-    /// are dropped. `action.req_id` is non-empty (the socket layer checks).
+    /// are dropped. `action.req_id` is the phone's and non-empty (the socket
+    /// layer checks); the webview gets the action under a fresh hub id.
     pub fn action(&self, conn: u64, action: &Action) {
         let forwarded = self.with_state(|state| {
             if !state.conns.contains_key(&conn) {
@@ -66,10 +70,11 @@ impl Hub {
         }
     }
 
-    /// The webview's answer; unknown or already expired ids are ignored.
-    pub fn action_result(&self, req_id: &str, ok: bool, error: Option<&str>) {
+    /// The webview's answer by hub id; unknown or already expired ids are
+    /// ignored.
+    pub fn action_result(&self, id: &str, ok: bool, error: Option<&str>) {
         self.with_state(|state| {
-            if let Some(pending) = state.pending.remove(req_id) {
+            if let Some(pending) = state.pending.remove(id) {
                 state.send(pending.conn, ack(&pending.req_id, ok, error));
             }
         });

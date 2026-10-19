@@ -75,7 +75,8 @@ Settings → Rail has one toggle per enabled plugin, under the toggles for the b
       "timeoutMs": 10000,
       "intervalMs": 60000,
       "enabled": true,
-      "scope": "tab"
+      "scope": "tab",
+      "insert": { "target": "new-tab", "project": "~/GIT/work/inbox" }
     }
   ]
 }
@@ -93,6 +94,7 @@ Settings → Rail has one toggle per enabled plugin, under the toggles for the b
 | `intervalMs` | no | Periodic refresh. Absent or `0` means none. Clamped to 15000..3600000 (15 s to 1 h). |
 | `enabled` | no | Default `true`. A disabled plugin is never offered for approval and never runs, and it has no Settings toggle. |
 | `scope` | no | `"tab"` (default) or `"global"`; anything else rejects the entry. A `tab` plugin keeps one result per tab. A `global` plugin keeps one result for the whole app, computed with the active tab's context. |
+| `insert` | no | Where a click on an item's `+` button puts its text: `{ "target": "draft" \| "new-tab", "project": "<path>" }`. `draft` (default, the same as leaving `insert` out) appends to the active tab's draft. `new-tab` opens a **new** tab in `project` and puts the text into that tab's draft. `project` is required for `new-tab`: an absolute path, or `~/…` (expanded like `command`), naming an existing directory when the config is loaded (canonicalised). There is no `send` option: a click never submits a prompt. See [Insert target](#insert-target). |
 
 How the file is read:
 
@@ -100,8 +102,20 @@ How the file is read:
 - At most 32 entries are read. Any beyond that are ignored, with one error card.
 - A malformed entry (bad `id`, duplicate `id`, empty or relative `command`, unknown `scope`) is skipped with an error card naming it. The other plugins still run.
 - An unknown key (a typo such as `"intervallMs"`), an unknown trigger name, or `"interval"` in `triggers` adds an error card naming the key or value. The entry itself stays valid.
+- A bad `insert` (not an object, unknown `target`, `new-tab` without `project`, a relative or missing `project`, a path that is not a directory, a `~/` project without a home directory) adds an error card naming the problem. So does `project` combined with `target: "draft"` or no `target`, because `project` is only used with `new-tab`. The plugin still runs and inserts into the draft. An unknown key inside `insert` (`insert.send`) is reported like any other unknown key.
 - A missing `widgets.json` means no plugins and no error.
 - If the desktop cannot determine its config directory, the plugins row says so and nothing runs.
+
+### Insert target
+
+```json
+{ "id": "mrs", "command": ["bash", "~/.omp-desktop/widgets/mrs.sh"],
+  "insert": { "target": "new-tab", "project": "~/GIT/work/inbox" } }
+```
+
+With `new-tab`, clicking `+` on a list item or `text` block opens a new tab in `project` (always a new tab, even when one for that folder is already open), moves focus to it and puts the insert text into its prompt box. The text is not sent. Holding ⌥ (Alt) while clicking uses the default instead: the text is appended to the active tab's draft. The `+` button's tooltip says so (`Click: new tab in inbox · ⌥-click: insert here`). The `url` button of an item still opens the URL; only the insert action follows the target. If the new tab cannot start (for example `omp` is missing), the usual open-failure note appears and nothing is inserted.
+
+The target comes **only** from `widgets.json`. Plugin output is untrusted and cannot choose or change it: an `insert` key in the output is ignored like any other unknown field, so a plugin cannot open tabs in folders you did not configure.
 
 ## Approval
 
@@ -220,6 +234,7 @@ Top level:
 | `version` | yes | Must be the number `1`. Another number gives the error card "plugin reports version N, this desktop supports 1"; a non-number gives "plugin reports an invalid version, …". |
 | `status` | no | `ok` \| `warn` \| `error` \| `info` \| `neutral` (default `neutral`). Tints the dot in the card head. |
 | `blocks` | yes | An array of at most 32 blocks. |
+| `attention` | no | A string of at most 200 chars that asks for notice: see [Attention](#attention). Missing, empty or not a string means no attention. |
 
 Blocks:
 
@@ -248,13 +263,29 @@ Field rules:
   - The tooltip shows the ISO timestamp.
 - **A `list`** scrolls inside a 220 px area, so a long list never makes the card taller than the rail.
 - **Strings** are rendered as text, never as HTML or markdown.
-- **Lengths.** `label`, `value`, `detail`, `k`, `v` and `title` are cut to 200 chars; `text` to 2000. A list keeps at most 50 items and a `kv` block at most 50 rows. These caps are enforced by the frontend parser (`src/app/widgets.js`).
+- **Lengths.** `label`, `value`, `detail`, `k`, `v`, `title` and `attention` are cut to 200 chars; `text` to 2000. A list keeps at most 50 items and a `kv` block at most 50 rows. These caps are enforced by the frontend parser (`src/app/widgets.js`).
 
 ### Conventions
 
 - **List items are the clickable rows.** Use them for MRs, CI jobs, branches, or any other row the user can act on.
 - **Empty state.** Use a `text` block ("No open MRs.", "Pipeline never run.") rather than an empty `list` or `kv`.
 - **One card per plugin.** Each config entry produces one card, with up to 32 blocks.
+
+### Attention
+
+A plugin that needs the user to look at its card sets `"attention": "<key>"`. The key says *what* needs notice, so it must change when the situation does and stay the same while it does not. A good key is a hash of the sorted set of problems (for example the sorted failing job names), not a timestamp or a counter.
+
+- **State.** A card is in attention while its current key is non-empty and differs from the key you last acknowledged. A rerun that prints the same key changes nothing.
+- **Look.** The card border and the dot before the title pulse (about 1.5 s) in the card's status colour: red for `error`, amber for `warn`, otherwise the accent. With reduced motion (`prefers-reduced-motion: reduce`) the border is static and thicker and the dot is static. While the plugin reruns, the pulse keeps the status colour of the widget still shown.
+- **Acknowledge.** A click anywhere on the card acknowledges the key; a click on a list item still inserts or opens as usual. For keyboard and screen reader users the card head has a small "Acknowledge" button while the card is in attention (the card is also announced as "needs attention"); it does nothing else. The acknowledged key is stored in the tweak store and survives restarts: for a global plugin per plugin id (`widgetAck:<id>`), for a tab plugin per plugin id and project path (`widgetAck:<id>:<hash of the path>`, not per tab, because tab ids change every launch). Two tabs of the same project share the ack; a tab of another project never touches it, so a project with no key does not reset the ack of a project that has one.
+- **Clear.** When a successful run has no key (or an empty one), the attention ends and the stored key is dropped, so the same key alerts again if it comes back. A failed or running run changes nothing.
+- **Dock.** When a card *enters* attention (a new, unacknowledged key) while the window is visible but not focused, the desktop requests the user's attention once with the informational type (a single dock bounce on macOS). A rerun with the same key does not bounce again. The widget scheduler pauses while the window is hidden or minimized, so no new key arrives then and nothing bounces: the bounce only fires for a visible window without focus. Where the OS or the window API does not support it, nothing happens.
+
+```json
+{ "version": 1, "status": "warn", "attention": "9f2c41aa", "blocks": [ … ] }
+```
+
+Here `9f2c41aa` is a short hash of `["build", "lint"]`, the sorted names of the failing jobs.
 
 ## Errors
 
@@ -303,7 +334,7 @@ Neither runs until you approve the new fingerprint in the rail. This matters bec
 
 **What approval does not protect against:**
 
-- **The rest of the entry.** The fingerprint pins only `command` and the files it names. Edits to `match`, `triggers`, `intervalMs`, `timeoutMs`, `scope`, `title` and `enabled` take effect on the next reload without a new approval. So whoever can edit `widgets.json` can, for example, widen an approved plugin's `match.path` to `/` so that it runs in every project, untrusted clones included, or turn an approved plugin you disabled back on. Approve only commands you are willing to run in any project.
+- **The rest of the entry.** The fingerprint pins only `command` and the files it names. Edits to `match`, `triggers`, `intervalMs`, `timeoutMs`, `scope`, `insert`, `title` and `enabled` take effect on the next reload without a new approval. So whoever can edit `widgets.json` can, for example, widen an approved plugin's `match.path` to `/` so that it runs in every project, untrusted clones included, or turn an approved plugin you disabled back on. Approve only commands you are willing to run in any project.
 - **Files the fingerprint does not cover.**
   - A program resolved via `PATH` (`bash`, `python3`, `node`) is hashed by name only.
   - So is anything the script loads by itself: modules, sourced files, config files, or packages fetched by `uv`/`npx`.

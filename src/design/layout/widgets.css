@@ -13,6 +13,26 @@
 .tone-warn  > .rail-card-head .wdg-dot, .wdg-item.tone-warn .wdg-dot, .wdg-status.tone-warn .wdg-dot  { background: var(--amber); }
 .tone-error > .rail-card-head .wdg-dot, .wdg-item.tone-error .wdg-dot, .wdg-status.tone-error .wdg-dot { background: var(--rose); }
 .tone-info  > .rail-card-head .wdg-dot, .wdg-item.tone-info .wdg-dot, .wdg-status.tone-info .wdg-dot  { background: var(--cyan); }
+/* Attention (docs/widgets.md#attention): border and title dot pulse in the
+   status tone's colour until a click acknowledges the key. */
+.wdg-attn { --wdg-attn: var(--accent); }
+.wdg-attn.tone-warn { --wdg-attn: var(--amber); }
+.wdg-attn.tone-error { --wdg-attn: var(--rose); }
+.rail-card.wdg-attn { animation: wdg-attn-border 1.5s ease-in-out infinite; }
+.wdg-attn > .rail-card-head .wdg-dot { background: var(--wdg-attn); animation: wdg-attn-dot 1.5s ease-in-out infinite; }
+.wdg-attn > .rail-card-head .wdg-dot.pulse-dot { animation: pulseDot 1.4s ease-in-out infinite, wdg-attn-dot 1.5s ease-in-out infinite; }
+@keyframes wdg-attn-border {
+  0%, 100% { border-color: color-mix(in oklab, var(--wdg-attn) 25%, var(--line)); }
+  50%      { border-color: var(--wdg-attn); }
+}
+@keyframes wdg-attn-dot {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--wdg-attn) 55%, transparent); }
+  50%      { box-shadow: 0 0 0 4px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rail-card.wdg-attn { animation: none; border-color: var(--wdg-attn); box-shadow: inset 0 0 0 1px var(--wdg-attn); }
+  .wdg-attn > .rail-card-head .wdg-dot { animation: none; box-shadow: 0 0 0 2px color-mix(in oklab, var(--wdg-attn) 45%, transparent); }
+}
 .wdg-label { color: var(--fg-4); font-size: var(--d-text-xs); }
 .wdg-value { color: var(--fg-2); font-size: var(--d-text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wdg-status, .wdg-item { display: flex; align-items: center; gap: 6px; min-width: 0; }

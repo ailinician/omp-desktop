@@ -8,8 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Rail widgets: a plugin can ask for notice with a top-level `"attention": "<key>"`. Until you click the card, its border and title dot pulse in the status colour (static with reduced motion), and when it turns up while the window is visible but not focused the dock icon bounces once (widgets pause while the window is hidden or minimized, so nothing bounces then). The card head gets an "Acknowledge" button for keyboard and screen reader users. The acknowledged key is remembered across restarts, per project for a tab plugin; see `docs/widgets.md`.
+- Rail widgets: a plugin entry in `widgets.json` can set `"insert": { "target": "new-tab", "project": "~/GIT/work/inbox" }`. Clicking `+` on one of its items then opens a new tab in that folder and puts the text into the new tab's prompt box (never sent); ⌥-click appends to the current tab's draft as before. The default stays `"draft"`. A missing, relative or non-existent `project` shows an error card and falls back to the draft. Only `widgets.json` sets the target; plugin output cannot. See `docs/widgets.md`.
 - Remote access: read your tabs from a phone on your network or VPN, answer the agent's questions, send, steer and stop, and get a push notification when a question waits or a long turn finishes. Off by default; Settings → Remote access picks the network interface, port and host name, uses a generated or your own TLS certificate, pairs a phone with a one-time QR code, and lists and revokes paired phones. Windows, macOS and Linux; push needs a certificate the phone trusts. The installed iOS app pairs by scanning the same QR code with the rear camera, because its storage is separate from Safari. The phone page follows the desktop's theme and accent colour.
 - Remote access, phone transcript: opening a session jumps to its newest message and stays there while new text arrives; scrolling up keeps your place and shows a "↓ Newest" button that jumps back.
+
+### Changed
+
+- Remote access always uses HTTPS. The plain-HTTP switch has been removed, and an old `allowHttp` setting is ignored rather than exposing pairing codes and device tokens without encryption.
+
+### Fixed
+
+- macOS: tools the agent starts (`kubectl`, MCP servers, widget plugins) could not reach hosts on the local network, even with OMP Desktop switched on under System Settings → Privacy & Security → Local Network. The kernel dropped their connections (`reason: NECP`) without asking. The app now declares `NSLocalNetworkUsageDescription`, so macOS shows its Local Network prompt on first use.
+- The native window can now shrink to 480 × 320 instead of stopping at 960 × 640. Tiling window managers such as AeroSpace can fit it into narrower columns and shorter rows without overlapping adjacent windows. The normal 1440 × 900 startup size and saved side-column settings are unchanged.
+- Remote access: an expired or already-used pairing link no longer prevents a paired phone from reconnecting with its saved token. Invalid port edits return to the saved value instead of remaining in the Settings field.
 
 ## [0.11.0] - 2026-10-17
 

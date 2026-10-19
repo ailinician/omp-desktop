@@ -341,13 +341,13 @@ impl Hub {
                     tcp,
                 },
             );
+            // Serialise everything from `state` first: `send` needs it mutably.
             let hello = json!({ "t": "hello", "deviceId": device.id, "name": device.name });
-            state.send(conn, Out::Text(hello.to_string()));
-            if let Some(key) = state.push_key.as_deref() {
-                state.send(conn, Out::Text(push_key_message(Some(key))));
-            }
+            let key = state
+                .push_key
+                .as_deref()
+                .map(|key| push_key_message(Some(key)));
             let tabs = json!({ "t": "tabs", "tabs": state.merged_tabs() });
-            state.send(conn, Out::Text(tabs.to_string()));
             let view = state
                 .view
                 .as_ref()
@@ -356,7 +356,13 @@ impl Hub {
                 .theme
                 .as_ref()
                 .map(|theme| json!({ "t": "theme", "theme": theme }).to_string());
-            for text in [view, theme].into_iter().flatten() {
+            state.send(conn, Out::Text(hello.to_string()));
+            for text in key
+                .into_iter()
+                .chain([tabs.to_string()])
+                .chain(view)
+                .chain(theme)
+            {
                 state.send(conn, Out::Text(text));
             }
             Ok(conn)

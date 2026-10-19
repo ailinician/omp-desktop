@@ -13,14 +13,14 @@ phone page ⇄ TLS/WebSocket ⇄ Rust hub ⇄ Tauri events/commands ⇄ webview 
 ```
 
 - The desktop webview stays the single source of truth. It publishes the **active** tab's view (`remote_publish`) and executes phone actions through the existing bridge (`send`/`steer`/`abort`/`answerAsk`/`answerConfirm`/`answerAskDialog`/`cancelAsk`). A phone tab **is** the desktop tab: selecting a tab on the phone activates it on the desktop, and the desktop user sees the switch.
-- Rust owns transport, auth, certificates, settings (`remote.json`) and devices (`remote-devices.json`, 0600). The webview never sees a token or a key.
+- Rust owns transport, auth, certificates, settings (`remote.json`) and devices (`remote-devices.json`, mode 0600 on Unix). The webview never sees a token or a key.
 - Events Rust → webview: `remote://watch` (tab ids phones need, empty while no phone is connected), `remote://action`, `remote://status` (`Status`). The webview calls `remote_ready(true)` only after its listeners exist; Rust resets readiness on page load and closes phone sockets with 4503 while the webview is not ready.
 
 ## Commands and `Status`
 
-`remote_status`, `remote_interfaces`, `remote_apply_settings` (always the **complete** `RemoteSettings`: enabled, interface name, port, host name, cert `generated | files{cert,key}`, allowHttp, push{enabled, questions, finished, contact}), `remote_pair_start` (→ `{url, svg, expiresAt}`), `remote_pair_cancel`, `remote_device_rename`, `remote_device_revoke`, `remote_regenerate_cert`, `remote_push_test`, `remote_default_contact` (`git config user.email`), `remote_publish`, `remote_action_result`, `remote_ready`.
+`remote_status`, `remote_interfaces`, `remote_apply_settings` (always the **complete** `RemoteSettings`: enabled, interface name, port, host name, cert `generated | files{cert,key}`, push{enabled, questions, finished, contact}), `remote_pair_start` (→ `{url, svg, expiresAt}`), `remote_pair_cancel`, `remote_device_rename`, `remote_device_revoke`, `remote_regenerate_cert`, `remote_push_test`, `remote_default_contact` (global git `user.email`), `remote_publish`, `remote_action_result`, `remote_ready`.
 
-`Status` carries `enabled`, `listening`, `url`, `ip`, `error`, `fingerprint`, `plainHttp`, `pushError`, `devices[{id,name,pairedAt,lastSeen,connected,pushSubscribed}]` and the saved `settings`, so the Settings rows prefill from it and refresh on every `remote://status`.
+`Status` carries `enabled`, `listening`, `url`, `ip`, `error`, `fingerprint`, `pushError`, `devices[{id,name,pairedAt,lastSeen,connected,pushSubscribed}]` and the saved `settings`, so the Settings rows prefill from it and refresh on every `remote://status`.
 
 ## Pairing and auth
 
@@ -30,7 +30,7 @@ phone page ⇄ TLS/WebSocket ⇄ Rust hub ⇄ Tauri events/commands ⇄ webview 
 - Failed pairing attempts: 5 per minute per peer IP, then HTTP 429.
 - The device token is 32 random bytes (base64url), returned once; only its SHA-256 hex is stored and it is compared in constant time. The phone keeps it in `localStorage`.
 - WebSocket `/ws`: the first frame must be `{"t":"auth","token":…}` within 5 s, else close 4401. A revoked token closes with 4401 and the page forgets it. Max 4 sockets per device (4429), 8 in total.
-- DNS-rebinding guard: `Host` must equal `<ip>:<port>` or `<host name>:<port>`; a WebSocket `Origin` must equal the matching `https://…` (`http://…` only with the plain-HTTP switch). Anything else is 403 before any handler runs.
+- DNS-rebinding guard: `Host` must equal `<ip>:<port>` or `<host name>:<port>`; a WebSocket `Origin` must equal the matching `https://…`. An `http://` origin is always refused. Anything else is 403 before any handler runs.
 - The server binds only the IPv4 of the interface chosen **by name**, never `0.0.0.0`/`::`; a changed or vanished interface IP rebinds or stops it. Unix uses `getifaddrs`; Windows uses `GetAdaptersAddresses(AF_INET)` and its UTF-16 friendly names (for example, `Ethernet` or `Wi-Fi`). Both list only up, non-loopback interfaces with non-loopback, non-wildcard IPv4 addresses; Windows also excludes tentative, duplicate and invalid addresses. VPN/tunnel adapters remain eligible. Renaming the selected adapter requires selecting its new name in Settings.
 
 ## TLS and certificates
@@ -39,11 +39,11 @@ phone page ⇄ TLS/WebSocket ⇄ Rust hub ⇄ Tauri events/commands ⇄ webview 
 - **Own files**: PEM certificate + private key paths (Settings has text fields; there is no file picker). The certificate must cover the host name (carrying `serverAuth` is recommended; phones may refuse a leaf without it, but it is not checked), else the server refuses to start with that reason.
 - The SHA-256 fingerprint of the served leaf shows under Settings → Certificate.
 - Recipe used by the maintainer: a mkcert wildcard certificate for `*.home.lan` (the mkcert CA is installed and trusted on the phone), a DNS record `omp.home.lan` → the Mac (AdGuard DNS rewrite), host name `omp.home.lan` in Settings, "own files" with the wildcard cert and key. The phone then opens the page without warnings and push works.
-- Plain HTTP (switch, off by default) serves without TLS: the pairing code and token travel unencrypted and there is no push (service workers and Web Push need a secure context). Only for a network you trust.
+- There is no plain-HTTP mode: the server always speaks TLS, so pairing codes and tokens never cross the network unencrypted. A legacy `allowHttp` setting is ignored when loading `remote.json` and omitted on the next save; it cannot enable plaintext.
 
 ## Tracker (`tracker.rs`)
 
-Per omp session, independent of the active webview tab: `busy`, `turn_started`, and the set of open question ids. The stdout reader hands its already parsed frame to `tracker().on_frame` right after `ext_ui::record`.
+Per omp session, independent of the active webview tab: `busy`, `turn_started`, and the set of open question ids. The stdout reader hands its already parsed frame to `tracker().on_frame` before publishing it in the journal or recording extension UI, so replay cannot expose a question before the tracker knows it.
 
 - `agent_start` sets busy and starts the turn clock (a continuation keeps the first start).
 - `agent_end` counts only when it yields control: `yielded`, else `isTerminal`, else yes. An `agent_end` that continues into another run changes nothing. A yielding end clears busy and every open question and reports the turn's duration.
@@ -77,18 +77,18 @@ Server → phone: `hello {deviceId,name}`, `tabs`, `view`, `theme {id,tone,accen
 ## Web Push
 
 - Triggers (Settings): a question opened (immediately) and a turn finished (only if it ran ≥ 30 s). At most one push per tab per 30 s; the notification `tag` is the tab id. Title `OMP · <tab title>`, body `Question waiting` / `Finished`; no transcript text. `TTL 3600`, urgency high (question) / normal (finished).
-- Needs the VAPID key (generated in the app config dir) and a **real contact** (`mailto:` or `https:`) in Settings; Apple rejects placeholders with 403 `BadJwtToken`. The Settings row prefills it from `git config user.email`. Without a valid contact nothing is sent and `Status.pushError` says why.
+- Needs the VAPID key (generated in the app config dir) and a **real contact** (`mailto:` or `https:`) in Settings; Apple rejects placeholders with 403 `BadJwtToken`. A bare email becomes `mailto:`; the validator checks the complete local part and domain. The Settings row prefills it from global git `user.email`. Without a valid contact nothing is sent and `Status.pushError` says why.
 - Subscriptions come from the page (`push-subscribe`, after a user gesture in the home-screen app); the page registers `/sw.js`, which shows the notification and on tap focuses or opens `/?tab=<id>` (`clients.claim()` on activate; `navigate` rejecting falls back to `openWindow`).
 - **Endpoint allowlist**: a subscription is only stored for `https` endpoints on `fcm.googleapis.com`, `updates.push.services.mozilla.com`, `*.push.apple.com` and `*.notify.windows.com`, so a paired phone cannot make the desktop send requests to arbitrary hosts. 404/410 from the push service deletes the subscription.
 - Earlier spike evidence (not feature acceptance): push delivery worked once with a certificate the phone trusts (the mkcert wildcard above, iOS 18.7 home-screen app). Real-phone acceptance of this feature is still pending. `PushManager` exists only in the home-screen app, not in a normal Safari tab.
 
 ## Security model
 
-- A paired phone is trusted with the capabilities above and nothing more; it never gets a Tauri bridge. Anyone on the network without a token receives only 4401/403/429.
+- A paired phone is trusted with the capabilities above and nothing more; it never gets a Tauri bridge. Without a token, network clients can fetch the static phone page and attempt pairing, which requires the one-use code and is rate-limited per peer. Unauthenticated WebSockets close with 4401; Host/Origin checks and connection, frame, body and deadline limits apply before privileged actions.
 - Tokens: hashed at rest, constant-time compare, revocable per device (Settings → Paired phones; revoking drops its sockets and push subscriptions).
 - Attack surface limits: one interface, bounded connections, bounded frames, rate-limited pairing, DNS-rebinding checks, CSP, no inline script.
 - Secrets (`remote.json`, `remote-devices.json`, `cert.pem`, `key.pem`, VAPID key) are written with mode 0600 on Unix; on Windows they inherit the per-user app config directory's ACLs.
-- Phone actions run serially in the desktop webview. Each carries its device id and enqueue time; before running, and again after every wait (tab switch, the 5 s ask wait), the executor requires the server to listen, the device to be paired and connected, and the action to be at most 15 s old (the Rust ack timeout). Otherwise it acks `ok:false` (`remote access disabled`, `device revoked`, `expired`). At most 16 actions wait; more are acked `busy`. The ack reports the IPC hand-off: `send`, `steer`, `abort` and the answer methods resolve to a boolean, and `false` or a rejection acks `desktop could not deliver`.
+- Phone actions run serially in the desktop webview. Each carries its device id and Rust dispatch timestamp; age uses the earlier of that timestamp and the frontend enqueue time. Before running, and again after every wait (tab switch, the 5 s ask wait), the executor requires the server to listen, the device to be paired and connected, and the action to be at most 15 s old (the Rust ack timeout). Otherwise it acks `ok:false` (`remote access disabled`, `device revoked`, `expired`). At most 16 actions wait; more are acked `busy`. The ack reports the IPC hand-off: `send`, `steer`, `abort` and the answer methods resolve to a boolean, and `false` or a rejection acks `desktop could not deliver`.
 
 ## Limits
 

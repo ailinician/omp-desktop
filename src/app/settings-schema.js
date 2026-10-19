@@ -161,7 +161,7 @@
     ] },
     { id: "remote", icon: "live", title: "Remote access", blurb: "Read your sessions, answer questions and steer the agent from a phone on your network. Off by default; nothing listens until you enable it.", groups: [
       { name: "Server", src: "remote.json", rows: [
-        custom("remoteServer", "Server", "The interface, port and name the phone connects to. The server only listens on the chosen interface.", "remote phone mobile server interface port host name http lan vpn"),
+        custom("remoteServer", "Server", "The interface, port and name the phone connects to. The server only listens on the chosen interface.", "remote phone mobile server interface port host name https lan vpn"),
         custom("remoteCert", "Certificate", "A generated certificate is self-signed; your own files (for example for `omp.home.lan`) let the phone trust the page.", "tls https certificate fingerprint pem key"),
       ] },
       { name: "Phones", rows: [

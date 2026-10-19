@@ -853,6 +853,7 @@ mod tests {
             interval_ms,
             enabled: true,
             scope,
+            insert: crate::widgets::config::InsertTarget::Draft,
         }
     }
 

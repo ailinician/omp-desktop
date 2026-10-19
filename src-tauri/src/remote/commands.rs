@@ -117,8 +117,10 @@ pub async fn remote_push_test(app: AppHandle) -> Result<(), String> {
     with_manager(app, RemoteManager::push_test).await
 }
 
-/// `git config user.email`, to prefill the push contact; empty when git or
-/// the setting is missing.
+/// The `user.email` of the user's global and system git configuration, to
+/// prefill the push contact; empty when it is not set. Read through gix: no
+/// `git` process, and never the config of whatever repository the app was
+/// started in.
 #[tauri::command]
 pub async fn remote_default_contact() -> String {
     tauri::async_runtime::spawn_blocking(git_user_email)
@@ -128,12 +130,15 @@ pub async fn remote_default_contact() -> String {
 
 fn git_user_email() -> String {
     let _gate = crate::spawn_gate::shared();
-    gix::config::File::from_globals()
-        .ok()
-        .and_then(|config| {
-            config
-                .string("user.email")
-                .map(|email| email.to_str_lossy().trim().to_owned())
-        })
-        .unwrap_or_default()
+    gix::config::File::from_globals().map_or_else(|_| String::new(), |config| user_email(&config))
 }
+
+fn user_email(config: &gix::config::File) -> String {
+    config
+        .string("user.email")
+        .map_or_else(String::new, |email| email.to_str_lossy().trim().to_owned())
+}
+
+#[cfg(test)]
+#[path = "commands_tests.rs"]
+mod tests;

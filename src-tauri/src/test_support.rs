@@ -1,6 +1,7 @@
 //! Helpers the test suites of several modules share.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Poll `check` every 10 ms until it returns `Some`, for at most `timeout`.
@@ -76,4 +77,24 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// A TLS client that trusts only the certificate in `cert_pem`, the one the
+/// remote server generated for the test.
+pub fn tls_client_config(cert_pem: &Path) -> Arc<rustls::ClientConfig> {
+    use rustls::pki_types::{pem::PemObject, CertificateDer};
+    let pem = std::fs::read(cert_pem).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_slice(&pem).unwrap())
+        .unwrap();
+    Arc::new(
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth(),
+    )
 }

@@ -50,7 +50,6 @@ fn same_server(old: &RemoteSettings, new: &RemoteSettings) -> bool {
         && old.port == new.port
         && old.host_name == new.host_name
         && old.cert == new.cert
-        && old.allow_http == new.allow_http
 }
 
 impl RemoteManager {
@@ -175,8 +174,7 @@ impl RemoteManager {
             settings.save(&core.dir.join(SETTINGS_FILE))?;
             let (keep, old) = {
                 let mut state = core.state();
-                let cert_fresh = settings.allow_http
-                    || !matches!(settings.cert, super::settings::CertSetting::Generated)
+                let cert_fresh = !matches!(settings.cert, super::settings::CertSetting::Generated)
                     || state.run.as_ref().is_some_and(|run| {
                         tls::generated_cert_valid(&core.dir, run.ip, settings.host_name.as_deref())
                     });

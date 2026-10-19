@@ -1,15 +1,14 @@
 use super::*;
 use crate::remote::ws::is_idle;
 use base64::Engine;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tungstenite::protocol::Role;
 use tungstenite::Message;
 
-pub(super) trait Rw: Read + Write {}
-impl<T: Read + Write> Rw for T {}
-
 struct Client {
-    ws: tungstenite::WebSocket<Box<dyn Rw>>,
+    ws: tungstenite::WebSocket<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>,
 }
 
 fn tab(id: &str) -> TabMeta {
@@ -35,10 +34,12 @@ impl TestServer {
 
     /// Completed upgrade with a same-origin request, not yet authenticated.
     fn ws_connect(&self) -> Client {
-        let mut stream = self.connect(Duration::from_millis(100));
-        let scheme = if self.tls { "https" } else { "http" };
+        let tcp = self.tcp();
+        let name = ServerName::try_from("127.0.0.1").unwrap();
+        let connection = rustls::ClientConnection::new(self.client_config(), name).unwrap();
+        let mut stream = rustls::StreamOwned::new(connection, tcp);
         let request = format!(
-            "GET /ws HTTP/1.1\r\nHost: {host}\r\nOrigin: {scheme}://{host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+            "GET /ws HTTP/1.1\r\nHost: {host}\r\nOrigin: https://{host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
             host = self.host()
         );
         stream.write_all(request.as_bytes()).unwrap();
@@ -144,6 +145,48 @@ impl Client {
     fn read_close_code(&mut self) -> Option<u16> {
         self.read_close_code_within(Duration::from_secs(5))
     }
+
+    /// Watch the connection on a cloned TCP handle: a reader thread records
+    /// when it reaches EOF or an error, i.e. when the server closed it. It
+    /// drains the socket, so use it only where the client reads nothing
+    /// more. Peeking would not do: unread data hides the EOF behind it.
+    fn watch_close(&self) -> CloseWatch {
+        let mut tcp = self.ws.get_ref().sock.try_clone().unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (flag, quit) = (Arc::clone(&closed), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            let mut buf = [0_u8; 256];
+            while !quit.load(Ordering::Relaxed) {
+                match tcp.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) if is_idle(&error) => {}
+                    Err(_) => break,
+                }
+            }
+            flag.store(!quit.load(Ordering::Relaxed), Ordering::Relaxed);
+        });
+        CloseWatch { closed, stop }
+    }
+}
+
+/// See [`Client::watch_close`]; stops its reader thread on drop.
+struct CloseWatch {
+    closed: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+}
+
+impl CloseWatch {
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for CloseWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 #[test]
@@ -233,15 +276,12 @@ fn same_req_id_from_two_connections_is_forwarded_independently_and_duplicate_on_
         ),
         (Some("same"), Some(false), Some("duplicate reqId"))
     );
-    s.hub.action_result(&a1.req_id, true, None);
+    // Answer in reverse order: each result goes to the connection it belongs to.
     s.hub
         .action_result(&a2.req_id, false, Some("tab not available"));
-    let ack1 = first.read_json_where(|m| m["t"] == "ack");
+    s.hub.action_result(&a1.req_id, true, None);
     let ack2 = second.read_json_where(|m| m["t"] == "ack");
-    assert_eq!(
-        (ack1["reqId"].as_str(), ack1["ok"].as_bool()),
-        (Some("same"), Some(true))
-    );
+    let ack1 = first.read_json_where(|m| m["t"] == "ack");
     assert_eq!(
         (
             ack2["reqId"].as_str(),
@@ -249,6 +289,10 @@ fn same_req_id_from_two_connections_is_forwarded_independently_and_duplicate_on_
             ack2["error"].as_str()
         ),
         (Some("same"), Some(false), Some("tab not available"))
+    );
+    assert_eq!(
+        (ack1["reqId"].as_str(), ack1["ok"].as_bool()),
+        (Some("same"), Some(true))
     );
 }
 
@@ -281,11 +325,15 @@ fn bad_actions_are_refused_without_reaching_the_webview() {
     ws.send_text(r#"{"t":"action","tabId":"t1","kind":"abort"}"#);
     ws.send_text(r#"{"t":"action","reqId":"","tabId":"t1","kind":"abort"}"#);
     ws.send_text(r#"{"t":"action","reqId":"b3","tabId":"t1","kind":"abort"}"#);
+    let forwarded = s.emit.next_action();
+    assert_eq!(forwarded.tab_id, "t1");
+    s.hub.action_result(&forwarded.req_id, true, None);
     assert_eq!(
-        s.emit.next_action().tab_id,
-        "t1",
+        ws.read_json_where(|m| m["t"] == "ack")["reqId"],
+        "b3",
         "nothing else was forwarded"
     );
+    assert!(s.emit.try_action(Duration::from_millis(200)).is_none());
 }
 
 #[test]
@@ -409,40 +457,36 @@ fn push_subscriptions_are_stored_capped_and_acked() {
 
 /// Bytes trickled to a socket that never authenticates: the server must cut
 /// it at the auth deadline (plus the close grace), not keep reading while
-/// bytes keep coming. The write failing is how the client sees that.
-fn trickle_frame_is_cut(client: &mut Client, delay: Duration) -> bool {
+/// bytes keep coming. The close is observed on the read side: on Windows
+/// writes to a peer-closed socket keep succeeding until the RST arrives.
+fn trickle_is_cut(s: &TestServer) -> bool {
+    let mut client = s.ws_connect();
+    client.ws.send(Message::Pong(Vec::new().into())).unwrap();
+    let watch = client.watch_close();
     let start = Instant::now();
-    // A masked 4000-byte text frame: the socket is never idle long enough for
-    // a read timeout to end a poll.
+    // A masked 4000-byte text frame, one byte per 10 ms: the socket is never
+    // idle long enough for a read timeout to end a poll.
     let mut bytes = vec![0x81, 0xFE, 0x0F, 0xA0];
     bytes.extend(std::iter::repeat_n(0_u8, 4004));
     for byte in bytes {
         if start.elapsed() > Duration::from_millis(7500) {
             return false;
         }
+        if watch.is_closed() {
+            return true;
+        }
         let raw = client.ws.get_mut();
         if raw.write_all(&[byte]).and_then(|()| raw.flush()).is_err() {
             return true;
         }
-        std::thread::sleep(delay);
+        std::thread::sleep(Duration::from_millis(10));
     }
-    false
-}
-
-fn trickle_is_cut(s: &TestServer) -> bool {
-    let mut client = s.ws_connect();
-    client.ws.send(Message::Pong(Vec::new().into())).unwrap();
-    trickle_frame_is_cut(&mut client, Duration::from_millis(10))
+    watch.is_closed()
 }
 
 #[test]
-fn trickling_bytes_do_not_keep_an_unauthenticated_tls_socket_open() {
-    assert!(trickle_is_cut(&test_server("ws-trickle-tls")));
-}
-
-#[test]
-fn trickling_bytes_do_not_keep_an_unauthenticated_plain_socket_open() {
-    assert!(trickle_is_cut(&test_server_with(false, "ws-trickle-plain")));
+fn trickling_bytes_do_not_keep_an_unauthenticated_socket_open() {
+    assert!(trickle_is_cut(&test_server("ws-trickle")));
 }
 
 #[test]
@@ -451,11 +495,12 @@ fn connecting_and_disconnecting_phones_are_announced() {
     let token = s.pair_device();
     let device = s.devices.list().remove(0).id;
     let wait_for = |expected: Vec<String>| {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while s.emit.connection_log().last() != Some(&expected) {
-            assert!(Instant::now() < deadline, "no announcement of {expected:?}");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        assert!(
+            crate::test_support::wait_until(Duration::from_secs(5), || {
+                s.emit.connection_log().last() == Some(&expected)
+            }),
+            "no announcement of {expected:?}"
+        );
     };
     let ws = s.authed_with(&token);
     wait_for(vec![device]);
@@ -517,7 +562,7 @@ fn upgraded_sockets_hold_their_connection_slot() {
 
 #[test]
 fn stalled_peers_trickling_a_frame_lose_their_sockets_not_just_their_registration() {
-    let s = test_server_with(false, "ws-stalled");
+    let s = test_server("ws-stalled");
     let tokens = [s.pair_named("A"), s.pair_named("B")];
     let mut clients: Vec<Client> = [0, 0, 0, 1, 1]
         .iter()
@@ -565,8 +610,9 @@ fn stalled_peers_trickling_a_frame_lose_their_sockets_not_just_their_registratio
 
 #[test]
 fn revoking_an_authenticated_socket_cuts_tcp_immediately() {
-    let s = test_server_with(false, "ws-revoke-physical");
+    let s = test_server("ws-revoke-physical");
     let mut client = s.authed_socket();
+    let watch = client.watch_close();
     // Keep the reader inside an unfinished frame rather than its outbox loop.
     client
         .ws
@@ -576,41 +622,120 @@ fn revoking_an_authenticated_socket_cuts_tcp_immediately() {
     let device = s.devices.list().remove(0);
     assert!(s.hub.revoke(&device.id));
     assert!(
-        crate::test_support::wait_until(Duration::from_secs(1), || {
-            client.ws.get_mut().write_all(&[0]).is_err()
-        }),
+        crate::test_support::wait_until(Duration::from_secs(1), || watch.is_closed()),
         "revocation removed the registration but left TCP open"
     );
 }
 
-fn authenticated_trickle_is_cut(tls: bool, delay: Duration, name: &str) {
-    let s = test_server_with(tls, name);
+fn authenticated_trickle_is_cut(delay: Duration, name: &str) {
+    let s = test_server(name);
     let mut client = s.authed_socket();
-    assert!(
-        trickle_frame_is_cut(&mut client, delay),
-        "trickled frame was not cut"
-    );
-    assert_eq!(s.hub.connected_devices(), Vec::<String>::new());
+    let watch = client.watch_close();
+    let started = Instant::now();
+    let mut frame = vec![0x81, 0xfe, 0x0f, 0xa0];
+    frame.extend(std::iter::repeat_n(0, 4004));
+    for byte in frame {
+        assert!(
+            started.elapsed() < Duration::from_secs(7),
+            "authenticated trickled frame kept TCP open"
+        );
+        let raw = client.ws.get_mut();
+        if watch.is_closed() || raw.write_all(&[byte]).and_then(|()| raw.flush()).is_err() {
+            assert!(
+                crate::test_support::wait_until(Duration::from_secs(1), || {
+                    s.hub.connected_devices().is_empty()
+                }),
+                "socket cut but device still registered"
+            );
+            return;
+        }
+        std::thread::sleep(delay);
+    }
+    panic!("trickled frame was not cut");
 }
 
 #[test]
 fn authenticated_continuous_trickle_has_an_absolute_deadline() {
-    authenticated_trickle_is_cut(false, Duration::from_millis(10), "ws-authed-trickle");
-}
-
-#[test]
-fn authenticated_tls_trickle_has_an_absolute_deadline() {
-    authenticated_trickle_is_cut(true, Duration::from_millis(10), "ws-authed-trickle-tls");
+    authenticated_trickle_is_cut(Duration::from_millis(10), "ws-authed-trickle");
 }
 
 #[test]
 fn authenticated_partial_reads_do_not_reset_the_frame_deadline() {
-    authenticated_trickle_is_cut(false, Duration::from_millis(100), "ws-authed-partials");
+    authenticated_trickle_is_cut(Duration::from_millis(100), "ws-authed-partials");
+}
+
+/// A masked client text frame (zero mask key) carrying a valid
+/// `push-unsubscribe` message padded to `len` bytes of payload.
+fn padded_frame(len: usize) -> Vec<u8> {
+    let head = r#"{"t":"push-unsubscribe","pad":""#;
+    let mut payload = head.as_bytes().to_vec();
+    payload.resize(len - 2, b'x');
+    payload.extend_from_slice(br#""}"#);
+    let len = u16::try_from(payload.len()).unwrap();
+    let mut frame = vec![0x81, 0x80 | 0x7e];
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(&[0; 4]); // a zero mask key leaves the payload as is
+    frame.extend_from_slice(&payload);
+    frame
+}
+
+/// Send `frame` evenly over `total`, a byte at a time. Returns when the
+/// frame is out, or once the server closed the connection (seen on the
+/// read side), and the time it took.
+fn trickle(
+    client: &mut Client,
+    frame: &[u8],
+    total: Duration,
+    watch_close: bool,
+) -> (bool, Duration) {
+    let watch = watch_close.then(|| client.watch_close());
+    let started = Instant::now();
+    let step = total / u32::try_from(frame.len()).unwrap();
+    for (n, byte) in frame.iter().enumerate() {
+        let raw = client.ws.get_mut();
+        let closed = watch.as_ref().is_some_and(CloseWatch::is_closed);
+        if closed || raw.write_all(&[*byte]).and_then(|()| raw.flush()).is_err() {
+            return (false, started.elapsed());
+        }
+        let due = started + step * u32::try_from(n + 1).unwrap();
+        std::thread::sleep(due.saturating_duration_since(Instant::now()));
+    }
+    (true, started.elapsed())
+}
+
+#[test]
+fn a_slow_but_steady_frame_outlives_the_read_cap_and_completes() {
+    let s = test_server("ws-slow-frame");
+    let mut client = s.authed_socket();
+    // 4 s with a byte every 10 ms: longer than FRAME_READ (3 s), shorter
+    // than FRAME_LIFETIME (5 s). The socket may be yielded, not closed.
+    let frame = padded_frame(400);
+    // Not watched: the watcher would swallow the ack read below.
+    let (sent, took) = trickle(&mut client, &frame, Duration::from_secs(4), false);
+    assert!(sent, "socket was closed after {took:?}");
+    let ack = client.read_json_where(|m| m["t"] == "ack");
+    assert_eq!(ack["kind"], "push");
+    assert_eq!(s.hub.connected_devices().len(), 1);
+}
+
+#[test]
+fn a_frame_trickled_past_the_lifetime_is_cut_at_five_seconds_not_three() {
+    let s = test_server("ws-late-frame");
+    let mut client = s.authed_socket();
+    let frame = padded_frame(800);
+    let (sent, took) = trickle(&mut client, &frame, Duration::from_secs(10), true);
+    assert!(!sent, "an 8 s frame must not complete");
+    assert!(
+        took >= Duration::from_millis(4500),
+        "cut too early: {took:?}"
+    );
+    assert!(took < Duration::from_secs(7), "cut too late: {took:?}");
+    assert_eq!(s.hub.connected_devices(), Vec::<String>::new());
 }
 
 #[test]
 fn authenticated_ping_and_long_ask_id_work_without_spurious_timeout_or_truncation() {
-    let s = test_server_with(false, "ws-ping-and-ask-id");
+    let s = test_server("ws-ping-and-ask-id");
     let mut client = s.authed_socket();
     client
         .ws

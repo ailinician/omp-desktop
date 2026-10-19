@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use super::devices::DeviceStore;
+use super::push_contact::contact_uri;
 use super::push_crypto::Vapid;
-use super::push_send::{contact_uri, send};
+use super::push_send::send;
 use super::push_subs::endpoint_ok;
 use super::settings::PushSettings;
 use super::tracker::{TrackerSink, Transition};

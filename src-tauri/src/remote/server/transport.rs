@@ -1,4 +1,4 @@
-//! Transport wrapper (TLS or plain TCP with absolute and per-call deadlines)
+//! Transport wrapper (TLS over TCP with absolute and per-call deadlines)
 //! and per-IP / total in-flight connection slots.
 
 use std::collections::HashMap;
@@ -20,81 +20,56 @@ pub struct Conn {
     pub slot: Option<Slot>,
 }
 
-pub enum Transport {
-    Tls(Box<StreamOwned<ServerConnection, DeadlineSock>>),
-    Plain(DeadlineSock),
-}
+/// The TLS stream of one connection; the server never speaks plain HTTP.
+pub struct Transport(Box<StreamOwned<ServerConnection, DeadlineSock>>);
 
 impl Transport {
+    pub(super) fn new(stream: StreamOwned<ServerConnection, DeadlineSock>) -> Self {
+        Self(Box::new(stream))
+    }
+
     /// Best-effort orderly shutdown (TLS `close_notify`, then TCP FIN).
     pub fn close(&mut self) {
-        match self {
-            Self::Tls(stream) => {
-                stream.conn.send_close_notify();
-                let _ = stream.flush();
-                let _ = stream.sock.tcp.shutdown(Shutdown::Write);
-            }
-            Self::Plain(sock) => {
-                let _ = sock.tcp.shutdown(Shutdown::Write);
-            }
-        }
+        self.0.conn.send_close_notify();
+        let _ = self.0.flush();
+        let _ = self.0.sock.tcp.shutdown(Shutdown::Write);
     }
 
     /// Bytes received on the socket so far.
     pub const fn bytes_read(&self) -> u64 {
-        match self {
-            Self::Tls(stream) => stream.sock.bytes_read,
-            Self::Plain(sock) => sock.bytes_read,
-        }
-    }
-
-    fn sock(&mut self) -> &mut DeadlineSock {
-        match self {
-            Self::Tls(stream) => &mut stream.sock,
-            Self::Plain(sock) => sock,
-        }
+        self.0.sock.bytes_read
     }
 
     /// Bound all further socket I/O (TLS handshake included) by `deadline`;
     /// `None` leaves only the per-call caps.
     pub fn set_deadline(&mut self, deadline: Option<Instant>) {
-        self.sock().deadline = deadline;
+        self.0.sock.deadline = deadline;
     }
 
     /// Longest a single read / write may block, within any deadline.
     pub fn set_caps(&mut self, read: Option<Duration>, write: Option<Duration>) {
-        let sock = self.sock();
-        sock.read_cap = read;
-        sock.write_cap = write;
+        self.0.sock.read_cap = read;
+        self.0.sock.write_cap = write;
     }
 
     pub(super) fn is_handshaking(&self) -> bool {
-        matches!(self, Self::Tls(stream) if stream.conn.is_handshaking())
+        self.0.conn.is_handshaking()
     }
 }
 
 impl Read for Transport {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Self::Tls(stream) => stream.read(buf),
-            Self::Plain(sock) => sock.read(buf),
-        }
+        self.0.read(buf)
     }
 }
 
 impl Write for Transport {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self {
-            Self::Tls(stream) => stream.write(buf),
-            Self::Plain(sock) => sock.write(buf),
-        }
+        self.0.write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Self::Tls(stream) => stream.flush(),
-            Self::Plain(sock) => sock.flush(),
-        }
+        self.0.flush()
     }
 }
 

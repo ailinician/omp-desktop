@@ -42,7 +42,6 @@ pub struct Status {
     pub error: Option<String>,
     pub fingerprint: Option<String>,
     pub devices: Vec<DeviceStatus>,
-    pub plain_http: bool,
     /// Why the last push failed (or could not be set up), if it did.
     pub push_error: Option<String>,
     /// The saved settings, so the Settings page prefills from them.

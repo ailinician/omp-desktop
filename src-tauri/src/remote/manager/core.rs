@@ -25,15 +25,13 @@ pub(super) struct Running {
     pub ip: Ipv4Addr,
     port: u16,
     host: Option<String>,
-    plain: bool,
-    pub fingerprint: Option<String>,
+    pub fingerprint: String,
 }
 
 impl Running {
     pub fn base_url(&self) -> String {
-        let scheme = if self.plain { "http" } else { "https" };
         let host = self.host.clone().unwrap_or_else(|| self.ip.to_string()); // owned for format
-        format!("{scheme}://{host}:{}", self.port)
+        format!("https://{host}:{}", self.port)
     }
 }
 
@@ -152,9 +150,8 @@ impl Core {
             url: run.map(Running::base_url),
             ip: run.map(|run| run.ip.to_string()),
             error: state.error.clone(), // owned snapshot
-            fingerprint: run.and_then(|run| run.fingerprint.clone()), // owned snapshot
+            fingerprint: run.map(|run| run.fingerprint.clone()), // owned snapshot
             devices,
-            plain_http: state.settings.allow_http,
             push_error: self.pusher.last_error(),
             settings: state.settings.clone(), // owned snapshot
         }
@@ -173,18 +170,13 @@ impl Core {
         let ip = net::ipv4_of(name, &(self.source)()?)
             .ok_or_else(|| format!("interface {name} has no IPv4 address"))?;
         let host = settings.host_name.as_deref();
-        let (tls, fingerprint) = if settings.allow_http {
-            (None, None)
-        } else {
-            let material = tls::load_or_generate(&self.dir, &settings.cert.source(), ip, host)?;
-            (Some(material.config), Some(material.fingerprint))
-        };
+        let material = tls::load_or_generate(&self.dir, &settings.cert.source(), ip, host)?;
         let server = Server::start(
             Listen {
                 ip,
                 port: settings.port,
                 host_name: host.map(str::to_owned),
-                tls,
+                tls: material.config,
                 request_deadline: REQUEST_DEADLINE,
             },
             Shared {
@@ -203,8 +195,7 @@ impl Core {
             _server: server,
             ip,
             host: host.map(str::to_owned),
-            plain: settings.allow_http,
-            fingerprint,
+            fingerprint: material.fingerprint,
         }))
     }
 
@@ -229,7 +220,7 @@ impl Core {
         let state = self.state();
         (
             state.run.as_ref().map(|run| run.ip),
-            state.run.as_ref().and_then(|run| run.fingerprint.clone()),
+            state.run.as_ref().map(|run| run.fingerprint.clone()),
             state.error.clone(), // owned snapshot
         )
     }
@@ -256,8 +247,7 @@ impl Core {
             .as_deref()
             .zip(listed.ok())
             .and_then(|(name, list)| net::ipv4_of(name, &list));
-        let cert_fresh = settings.allow_http
-            || !matches!(settings.cert, CertSetting::Generated)
+        let cert_fresh = !matches!(settings.cert, CertSetting::Generated)
             || wanted.is_some_and(|ip| {
                 tls::generated_cert_valid(&self.dir, ip, settings.host_name.as_deref())
             });

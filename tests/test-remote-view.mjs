@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 
@@ -599,8 +600,10 @@ test("live bridge senders resolve to false when nothing can be handed off", asyn
 });
 
 // ---- settings: delayed push toggles merge against the newest settings -------
-test("two delayed push toggles both survive: nested push merges inside the queue", async () => {
-  const Babel = createRequire(import.meta.url)("../src/babel.min.js");
+// The settings rows compiled with a hook-slot React stand-in; `render` resets
+// the slots, the rows' own top-level functions land on `scope`.
+function remoteRows() {
+  const Babel = createRequire(import.meta.url)(fileURLToPath(new URL("../src/babel.min.js", import.meta.url)));
   const slots = []; let i = 0;
   const changed = (a, b) => !a || !b || a.length !== b.length || a.some((v, k) => !Object.is(v, b[k]));
   const React = {
@@ -615,16 +618,22 @@ test("two delayed push toggles both survive: nested push merges inside the queue
     useEffect(fn, deps) { const k = i++; if (!slots[k] || changed(slots[k].deps, deps)) { slots[k] = { deps }; fn(); } },
     useCallback: fn => fn,
   };
+  const window = { Icon: {} };
+  const { code } = Babel.transform(source("src/design/settings/rows-remote.jsx"), { presets: ["react"] });
+  const scope = { window, React };
+  runInNewContext(code, scope);
+  return { window, scope, reset: () => { i = 0; } };
+}
+
+test("two delayed push toggles both survive: nested push merges inside the queue", async () => {
+  const { window, reset } = remoteRows();
   const applies = [];
   const settings = { enabled: true, cert: {}, push: { enabled: true, questions: false, finished: false, contact: "me@example.test" } };
   const bridge = {
     onRemoteEvent: () => () => {}, remoteStatus: async () => ({ settings, devices: [] }),
     remoteDefaultContact: async () => "", remoteApply: s => new Promise(resolve => applies.push({ s, resolve })),
   };
-  const window = { Icon: {} };
-  const { code } = Babel.transform(source("src/design/settings/rows-remote.jsx"), { presets: ["react"] });
-  runInNewContext(code, { window, React });
-  const render = () => { i = 0; return window.OMP_SETTINGS_ROWS.remotePush({ row: {}, ctx: { bridge }, query: "" }); };
+  const render = () => { reset(); return window.OMP_SETTINGS_ROWS.remotePush({ row: {}, ctx: { bridge }, query: "" }); };
   const find = (node, label) => {
     if (!node || typeof node !== "object") return null;
     if (node.props?.label === label) return node;
@@ -649,4 +658,79 @@ test("two delayed push toggles both survive: nested push merges inside the queue
     await flush();
   }
   assert.deepEqual(own(applies[3].s.push), { enabled: true, questions: true, finished: true, contact: "fresh@omp-desktop.app" });
+});
+
+// ---- settings: Enter confirms an IME candidate, it does not commit the field --
+test("Enter during IME composition does not blur a settings field", () => {
+  const { scope, reset } = remoteRows();
+  const field = () => { reset(); return scope._SRR_Field({ value: "", onCommit() {}, label: "Device name" }); };
+  const press = (event) => {
+    let blurred = 0;
+    field().props.onKeyDown({ key: "Enter", keyCode: 13, nativeEvent: {}, ...event, currentTarget: { blur: () => { blurred++; } } });
+    return blurred;
+  };
+  assert.equal(press({}), 1, "a plain Enter commits");
+  assert.equal(press({ nativeEvent: { isComposing: true } }), 0, "composition Enter is ignored");
+  assert.equal(press({ keyCode: 229 }), 0, "keyCode 229 is a composition Enter too");
+  assert.equal(press({ key: "a" }), 0, "other keys do not blur");
+});
+
+// ---- settings: a rejected value does not stay in the field -------------------
+test("parsePort accepts only integers in 1-65535", () => {
+  const { scope } = remoteRows();
+  for (const [text, want] of [["7470", 7470], [" 80 ", 80], ["65535", 65535], ["1", 1],
+    ["", null], ["  ", null], ["abc", null], ["0", null], ["65536", null], ["70000", null], ["-1", null], ["1.5", null]]) {
+    assert.equal(scope._SRR_parsePort(text), want, JSON.stringify(text));
+  }
+});
+
+test("a field whose onCommit rejects shows the saved value again; an accepted one keeps the text", () => {
+  const { scope, reset } = remoteRows();
+  const field = (value, onCommit) => { reset(); return scope._SRR_Field({ value, onCommit, label: "Port" }); };
+  const typeAndBlur = (value, onCommit, typed) => {
+    field(value, onCommit).props.onChange({ target: { value: typed } });
+    field(value, onCommit).props.onBlur(); // re-render with the typed text, then leave the field
+    return field(value, onCommit).props.value;
+  };
+  assert.equal(typeAndBlur("7470", () => false, "abc"), "7470", "rejected text is dropped");
+  assert.equal(typeAndBlur("7470", () => {}, "8080"), "8080", "accepted text stays until Rust reports the new value");
+});
+
+test("the Port row rejects non-numeric, zero and out-of-range text and applies a valid port", async () => {
+  const { window, reset } = remoteRows();
+  const applies = [];
+  const settings = { enabled: true, interface: "en0", port: 7470, hostName: null, cert: {}, push: {} };
+  const bridge = {
+    onRemoteEvent: () => () => {}, remoteStatus: async () => ({ settings, devices: [] }),
+    remoteInterfaces: async () => [], remoteApply: async s => { applies.push(s); return { ok: true, value: { settings: s, devices: [] } }; },
+  };
+  const render = () => { reset(); return window.OMP_SETTINGS_ROWS.remoteServer({ row: {}, ctx: { bridge }, query: "" }); };
+  const find = (node, label) => {
+    if (!node || typeof node !== "object") return null;
+    if (node.props?.label === label && node.props.onCommit) return node;
+    for (const child of node.children.flat()) { const hit = find(child, label); if (hit) return hit; }
+    return null;
+  };
+  render(); await flush();
+  const port = find(render(), "Port");
+  for (const text of ["abc", "0", "70000", ""]) assert.equal(port.props.onCommit(text), false, text);
+  assert.equal(applies.length, 0, "a rejected port is never applied");
+  assert.notEqual(port.props.onCommit("8080"), false);
+  await flush();
+  assert.equal(applies[0].port, 8080);
+});
+
+// ---- settings: the server row has no plain-HTTP switch any more -------------
+test("the server row offers no plain HTTP, even for settings that still carry allowHttp", async () => {
+  const { window, reset } = remoteRows();
+  const settings = { enabled: true, interface: "en0", port: 7470, hostName: null, allowHttp: true, cert: {}, push: {} };
+  const bridge = {
+    onRemoteEvent: () => () => {}, remoteStatus: async () => ({ settings, devices: [], listening: true, url: "https://10.0.0.2:7470" }),
+    remoteInterfaces: async () => [], remoteApply: async () => ({ ok: true, value: {} }),
+  };
+  const render = () => { reset(); return window.OMP_SETTINGS_ROWS.remoteServer({ row: {}, ctx: { bridge }, query: "" }); };
+  render(); await flush();
+  const text = JSON.stringify(render());
+  assert.match(text, /Enable remote access/, "control: the row rendered");
+  assert.doesNotMatch(text, /plain http|allowHttp|unencrypted/i);
 });

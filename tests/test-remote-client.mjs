@@ -159,7 +159,7 @@ class Element {
 }
 function descendants(node) { return [node, ...node.children.flatMap(descendants)]; }
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
-function browser({ pair = false, token = "saved-token", standalone = true } = {}) {
+function browser({ pair = false, token = "saved-token", standalone = true, pairStatus = 200 } = {}) {
   const app = new Element("main");
   const windowHandlers = {}, docHandlers = {};
   const frames = [], sockets = [], timers = [], requests = [], registrations = [];
@@ -195,7 +195,7 @@ function browser({ pair = false, token = "saved-token", standalone = true } = {}
     addEventListener(name, fn) { (windowHandlers[name] ??= []).push(fn); },
     history: { replaceState(_state, _title, url) { const next = new URL(url, "https://phone.test:7470/"); location.search = next.search; location.hash = next.hash; requests.push(["history", url]); } },
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
-    fetch: async (url, options) => { requests.push([url, JSON.parse(options.body)]); return { ok: true, json: async () => ({ token: "paired-token", deviceId: "d" }) }; },
+    fetch: async (url, options) => { requests.push([url, JSON.parse(options.body)]); return { ok: pairStatus === 200, status: pairStatus, json: async () => ({ token: "paired-token", deviceId: "d" }) }; },
     setTimeout: (fn, delay) => { timers.push({ fn, delay }); return timers.length; }, clearTimeout() {},
     setInterval: () => 1, clearInterval() {},
   });
@@ -223,6 +223,20 @@ const view = (busy = false) => ({ t: "view", view: { tabId: "t", busy, messages:
   { id: "x", role: "tool", tool: { name: "read", summary: "<tool>", output: "<output>" } },
   { id: "h", role: "thinking", text: "secret thinking" },
 ], asks: [{ id: "q", kind: "confirm", title: "<Question>", message: "Allow?" }] } });
+await check("a failed #pair= code falls back to the stored token and keeps it", async () => {
+  const b = browser({ pair: true, token: "saved-token", pairStatus: 410 });
+  await b.connect();
+  assert.ok(b.requests.some(r => r[0] === "/pair"), "the code was tried");
+  assert.equal(b.storage.get("omp-remote-token"), "saved-token");
+  assert.equal(b.ctx.location.hash, "", "the spent code leaves the URL");
+  assert.deepEqual(b.frames[0], { t: "auth", token: "saved-token" });
+});
+await check("a failed #pair= code without a stored token stays unpaired", async () => {
+  const b = browser({ pair: true, token: null, pairStatus: 410 });
+  await b.connect().catch(() => {});
+  assert.equal(b.sockets.length, 0, "no socket without a token");
+  assert.equal(b.storage.get("omp-remote-token"), undefined);
+});
 await check("pairing exchanges fragment, stores token, removes fragment, then authenticates first", async () => {
   const b = browser({ pair: true, token: null });
   await b.connect();
@@ -480,51 +494,6 @@ await check("clicking the active tab keeps its view; another tab clears it until
   assert.equal(draft.value, "");
   await b.message({ t: "ack", reqId: promptReq, ok: false, error: "desktop could not deliver" });
   assert.equal(draft.value, "recover me", "rejected prompt restores the cleared draft");
-});
-// Contract: the Rust server literals. The test reads the Rust files, takes
-// every occurrence of each anchor, cuts the literal from the anchor to its
-// closing `})` and asserts every key still appears there as a key, so a rename
-// on either side fails here.
-const rust = path => readFileSync(root + "src-tauri/src/remote/" + path, "utf8");
-const CONTRACT = [
-  ["hub.rs", '"t": "hello"', ["t", "deviceId", "name"]],
-  ["hub.rs", '"t": "tabs"', ["t", "tabs"]],
-  ["hub.rs", '"t": "view"', ["t", "view"]],
-  ["hub.rs", '"t": "theme"', ["t", "theme"]],
-  ["hub.rs", '"t": "push-key"', ["t", "key"]],
-  ["hub.rs", '"id": tab.id', ["id", "title", "project", "busy", "hasAsk"]],
-  ["hub/actions.rs", '"t": "ack", "reqId": req_id', ["t", "reqId", "ok", "error"]],
-  ["hub/actions.rs", '"t": "ack", "reqId": null', ["t", "reqId", "kind", "ok", "error"]],
-];
-const literals = (src, anchor) => {
-  const found = [];
-  for (let at = src.indexOf(anchor); at >= 0; at = src.indexOf(anchor, at + anchor.length)) {
-    const end = src.indexOf("})", at);
-    assert.ok(end >= 0, `literal ${anchor} has no closing })`);
-    found.push(src.slice(at, end + 2));
-  }
-  return found;
-};
-const missingKeys = (src, anchor, keys) => {
-  const found = literals(src, anchor);
-  if (!found.length) return [`${anchor}: not found`];
-  return found.flatMap(literal => keys.filter(key => !new RegExp(`"${key}"\\s*:`).test(literal)).map(key => `${anchor}: ${key}`));
-};
-await check("phone reads the exact keys the Rust server sends", () => {
-  for (const [file, anchor, keys] of CONTRACT) {
-    assert.deepEqual(missingKeys(rust(file), anchor, keys), [], file);
-  }
-  assert.ok(literals(rust("hub.rs"), '"t": "view"').length >= 2, "both view literals are checked");
-  assert.ok(literals(rust("hub.rs"), '"t": "tabs"').length >= 2, "both tabs literals are checked");
-});
-// Counter-probe: renaming a key inside the literal text must turn the check red.
-await check("contract check goes red when a key is renamed in a copy of the Rust literal", () => {
-  for (const [file, anchor, keys] of CONTRACT) {
-    for (const key of keys.filter(k => k !== "t")) {
-      const mutated = rust(file).replaceAll(`"${key}":`, `"${key}_renamed":`);
-      assert.notDeepEqual(missingKeys(mutated, anchor, keys), [], `${file} ${anchor} ${key}`);
-    }
-  }
 });
 await check("reduce turns the Rust-shaped frames into the state the phone renders", () => {
   const hello = C.reduce(initial(), { t: "hello", deviceId: "d", name: "Phone" });

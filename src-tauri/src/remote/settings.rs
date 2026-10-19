@@ -54,6 +54,8 @@ impl Default for PushSettings {
     }
 }
 
+/// Unknown fields are ignored on load, so a `remote.json` written while the
+/// plain-HTTP switch (`allowHttp`) existed still reads and drops it on save.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RemoteSettings {
@@ -62,7 +64,6 @@ pub struct RemoteSettings {
     pub port: u16,
     pub host_name: Option<String>,
     pub cert: CertSetting,
-    pub allow_http: bool,
     pub push: PushSettings,
 }
 
@@ -74,7 +75,6 @@ impl Default for RemoteSettings {
             port: DEFAULT_PORT,
             host_name: None,
             cert: CertSetting::default(),
-            allow_http: false,
             push: PushSettings::default(),
         }
     }
@@ -103,3 +103,7 @@ impl RemoteSettings {
         write_private(path, &bytes)
     }
 }
+
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod tests;
