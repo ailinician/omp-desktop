@@ -995,6 +995,43 @@ mod tests {
     }
 
     #[test]
+    fn insert_unknown_key_keeps_a_valid_new_tab() {
+        let (real, _) = insert_dirs("keys-new-tab");
+        let expected = external_open::canonical_folder(&real).expect("canonical");
+        let raw = real.to_string_lossy().into_owned();
+        let body = insert_body(&format!(
+            r#"{{"target":"new-tab","project":{raw:?},"send":true}}"#
+        ));
+        let c = load_body("insert-keys-new-tab", body.as_bytes()).expect("ok");
+        let _ = std::fs::remove_dir_all(&real);
+        // An unknown inner key warns like any other unknown key; only a bad
+        // value (not a typo beside one) falls back to Draft.
+        assert_eq!(ids(&c), vec!["a"]);
+        assert_eq!(
+            c.errors,
+            vec!["plugin \"a\": unknown key \"insert.send\"".to_string()]
+        );
+        assert_eq!(
+            c.plugins[0].insert,
+            InsertTarget::NewTab { project: expected }
+        );
+    }
+
+    #[test]
+    fn insert_null_fields_count_as_absent() {
+        for insert in [
+            r#"{"target":null}"#,
+            r#"{"target":null,"project":null}"#,
+            r#"{"target":"draft","project":null}"#,
+        ] {
+            let c = load_body("insert-null", insert_body(insert).as_bytes()).expect("ok");
+            assert_eq!(ids(&c), vec!["a"], "{insert}");
+            assert_eq!(c.plugins[0].insert, InsertTarget::Draft, "{insert}");
+            assert_eq!(c.errors, Vec::<String>::new(), "{insert}: {:?}", c.errors);
+        }
+    }
+
+    #[test]
     fn insert_project_without_new_tab_warns_and_stays_draft() {
         for insert in [
             r#"{"target":"draft","project":"/p"}"#,

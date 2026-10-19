@@ -155,8 +155,10 @@ function WidgetBlock({ block, onInsert, insertCfg }) {
 // Memoised: the App re-renders on every streaming delta, while `blocks` is
 // the cached parse of the last output (OMP_WIDGETS.parsedLast) and
 // `onInsert` and `insertCfg` (the plugin's `insert` from widgets.json,
-// undefined for extension widgets) are stable, so the blocks re-render only
-// on a new result. `onInsert(text, action)`: `action` from insertAction.
+// undefined for extension widgets) keep their identity across App
+// re-renders, so the blocks re-render only on a new result or a fresh
+// plugins snapshot (a `widgets_state` refetch gives `insertCfg` a new
+// identity). `onInsert(text, action)`: `action` from insertAction.
 const WidgetBlocks = React.memo(function WidgetBlocks({ blocks, onInsert, insertCfg }) {
   return <>{blocks.map((b, i) => <WidgetBlock key={i} block={b} onInsert={onInsert} insertCfg={insertCfg} />)}</>;
 });

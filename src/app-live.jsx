@@ -499,7 +499,9 @@ function App() {
   const insertOpeningRef = React.useRef(false);
   const handleWidgetInsert = React.useCallback(async (text, action) => {
     if (action?.target === "new-tab" && bridge) {
-      // A double-click or key repeat must open one tab, not one per event.
+      // No overlapping opens: a double-click or key repeat is dropped
+      // while one open is in flight; a click after it settles opens
+      // another tab.
       if (insertOpeningRef.current) return;
       insertOpeningRef.current = true;
       try {
