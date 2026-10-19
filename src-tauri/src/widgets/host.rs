@@ -144,13 +144,14 @@ pub struct PluginView {
 impl Serialize for PluginView {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let e = &*self.entry;
-        let mut s = serializer.serialize_struct("PluginView", 7)?;
+        let mut s = serializer.serialize_struct("PluginView", 8)?;
         s.serialize_field("id", &e.id)?;
         s.serialize_field("title", &e.title)?;
         s.serialize_field("scope", &e.scope)?;
         s.serialize_field("enabled", &e.enabled)?;
         s.serialize_field("approval", &self.approval)?;
         s.serialize_field("command", &e.command)?;
+        s.serialize_field("insert", &e.insert)?;
         s.serialize_field("fingerprint", &self.fingerprint)?;
         s.end()
     }

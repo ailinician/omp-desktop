@@ -126,7 +126,7 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, railVisible, t
       // A tab plugin's ack follows the project, not the tab (tab ids change
       // every launch); a tab without a path falls back to its own id.
       const ackKey = _UW.ackKey(id, p.scope === "global" ? null : (activeProjectPath || `tab:${sessionId}`));
-      out.push({ id, ackKey, title: p.title, resetKey: `${k}:${run?.seq ?? 0}`, run: _UW.cardRun(run, parsed) });
+      out.push({ id, ackKey, title: p.title, insert: p.insert, resetKey: `${k}:${run?.seq ?? 0}`, run: _UW.cardRun(run, parsed) });
     }
     return out;
   }, [config.plugins, activeIds, hiddenIds, sessionId, activeProjectPath, runsVersion]); // eslint-disable-line react-hooks/exhaustive-deps

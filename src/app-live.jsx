@@ -493,7 +493,29 @@ function App() {
   // `/command` draft.
   const [promptInsert, setPromptInsert] = React.useState(null);
   const handlePickHistoryPrompt = (text) => setPromptInsert({ text, nonce: Date.now() });
-  const handleWidgetInsert = React.useCallback(text => setPromptInsert({ text, append: true, nonce: Date.now() }), []);
+  // `action` (OMP_WIDGETS.insertAction, from widgets.json only): "new-tab"
+  // always opens a fresh tab on the project and fills that tab's draft (never
+  // sent); a failed open is reported by openSession and inserts nothing.
+  const insertOpeningRef = React.useRef(false);
+  const handleWidgetInsert = React.useCallback(async (text, action) => {
+    if (action?.target === "new-tab" && bridge) {
+      // No overlapping opens: a double-click or key repeat is dropped
+      // while one open is in flight; a click after it settles opens
+      // another tab.
+      if (insertOpeningRef.current) return;
+      insertOpeningRef.current = true;
+      try {
+        const id = await bridge.openSession(action.project);
+        setPromptInsert({ text, append: true, sessionId: id, nonce: Date.now() });
+      } catch (err) {
+        console.error("[widgets] failed to open insert target tab:", err);
+      } finally {
+        insertOpeningRef.current = false;
+      }
+      return;
+    }
+    setPromptInsert({ text, append: true, nonce: Date.now() });
+  }, [bridge]);
 
   // Goal mode in the composer and the goal strip above it (omp's `goal`).
   const goalUi = useGoalMode({
@@ -975,7 +997,7 @@ function App() {
                   {widgets.cards.map(c => (
                     <WidgetBoundary key={c.id} title={c.title} resetKey={c.resetKey}>
                       <WidgetCard title={c.title} run={c.run} attention={c.attention} onAck={() => widgets.acknowledge(c.id)}
-                        onRefresh={() => widgets.refresh(c.id)} onInsert={handleWidgetInsert} />
+                        onRefresh={() => widgets.refresh(c.id)} onInsert={handleWidgetInsert} insertCfg={c.insert} />
                     </WidgetBoundary>
                   ))}
                   {extCards.filter(c => t[c.tweak] !== false).map(c => (

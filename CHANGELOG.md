@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Rail widgets: a plugin can ask for notice with a top-level `"attention": "<key>"`. Until you click the card, its border and title dot pulse in the status colour (static with reduced motion), and when it turns up while the window is visible but not focused the dock icon bounces once (widgets pause while the window is hidden or minimized, so nothing bounces then). The card head gets an "Acknowledge" button for keyboard and screen reader users. The acknowledged key is remembered across restarts, per project for a tab plugin; see `docs/widgets.md`.
+- Rail widgets: a plugin entry in `widgets.json` can set `"insert": { "target": "new-tab", "project": "~/GIT/work/inbox" }`. Clicking `+` on one of its items then opens a new tab in that folder and puts the text into the new tab's prompt box (never sent); ⌥-click appends to the current tab's draft as before. The default stays `"draft"`. A missing, relative or non-existent `project` shows an error card and falls back to the draft. Only `widgets.json` sets the target; plugin output cannot. See `docs/widgets.md`.
 
 ### Fixed
 

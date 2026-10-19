@@ -31,7 +31,7 @@ function WidgetErrorCard({ title, error }) {
  *  timing, with the accent border. `attention`: the plugin's unacknowledged
  *  attention key (docs/widgets.md#attention); a click anywhere on the card
  *  calls `onAck`. */
-function WidgetCard({ title, run, onRefresh, onInsert, source, attention, onAck }) {
+function WidgetCard({ title, run, onRefresh, onInsert, insertCfg, source, attention, onAck }) {
   const state = run?.state ?? "idle";
   const widget = run?.widget ?? null;
   const stale = state === "running" && widget != null;
@@ -65,7 +65,7 @@ function WidgetCard({ title, run, onRefresh, onInsert, source, attention, onAck 
       )}
       {(state === "ok" || stale) && widget && (
         <>
-          <_WC_Blocks blocks={widget.blocks} onInsert={onInsert} />
+          <_WC_Blocks blocks={widget.blocks} onInsert={onInsert} insertCfg={insertCfg} />
           {widget.skipped > 0 && <div className="wdg-note mono">{widget.skipped} unsupported block{widget.skipped > 1 ? "s" : ""}</div>}
         </>
       )}

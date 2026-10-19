@@ -4,6 +4,8 @@
 //                              what a click may do
 //   attentionStep({key, ack, seen, hasWidget})
 //                              the attention signal: active / seen / writeAck / bounce
+//   insertAction(cfg, altKey) / insertTitle(cfg) / consumePromptInsert(...)
+//                              where an insert click goes (widgets.json `insert`)
 //   runKey / mergeRun / cardRun / parsedLast
 //                              the hook's run bookkeeping (events → card props)
 //   hiddenPluginIds(tweaks, ids) / argvDisplay(arg)
@@ -168,6 +170,43 @@
     return (/\s$/.test(base) ? base : base + " ") + text + " ";
   }
 
+  // insertAction: where one insert click puts its text. `cfg` is the plugin's
+  // `insert` from widgets.json (Rust-validated: a `new-tab` always carries an
+  // existing project) — never from plugin output. Anything but a complete
+  // `new-tab`, or ⌥/Alt held, is the active tab's draft.
+  function insertAction(cfg, altKey) {
+    if (!altKey && cfg?.target === "new-tab" && typeof cfg.project === "string" && cfg.project) {
+      return { target: "new-tab", project: cfg.project };
+    }
+    return { target: "draft" };
+  }
+
+  // insertTitle: the insert button's tooltip. A new-tab plugin names the
+  // folder and the ⌥-click override.
+  function insertTitle(cfg) {
+    const a = insertAction(cfg, false);
+    if (a.target !== "new-tab") return "insert into prompt";
+    const folder = a.project.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || a.project;
+    return `Click: new tab in ${folder} · ⌥-click: insert here`;
+  }
+
+  // consumePromptInsert: whether `Composer` should apply `promptInsert` now,
+  // or wait (when a `new-tab` insert's `sessionId` is not in `sessionIds`
+  // yet because the await continuation set `promptInsert` before the bridge
+  // snapshot's render committed). Returns `{ kind: "none" }` (already seen,
+  // absent, or waiting on `sessionIds`), `{ kind: "targeted", nonce,
+  // sessionId }` or `{ kind: "active", nonce }`.
+  function consumePromptInsert(promptInsert, seenNonce, sessionIds) {
+    if (!promptInsert || promptInsert.nonce === seenNonce) return { kind: "none" };
+    if (promptInsert.sessionId) {
+      if (!Array.isArray(sessionIds) || !sessionIds.includes(promptInsert.sessionId)) {
+        return { kind: "none" };
+      }
+      return { kind: "targeted", nonce: promptInsert.nonce, sessionId: promptInsert.sessionId };
+    }
+    return { kind: "active", nonce: promptInsert.nonce };
+  }
+
   // Namespaced per source so #52's extension widgets can use `widget:ext:<key>`.
   const TWEAK_PREFIX = "widget:plugin:";
   const tweakKey = (id) => `${TWEAK_PREFIX}${id}`;
@@ -249,7 +288,7 @@
   }
 
   window.OMP_WIDGETS = {
-    parseOutput, insertText, safeUrl, appendToDraft, tweakKey, hiddenPluginIds, argvDisplay, relativeTime,
+    parseOutput, insertText, safeUrl, appendToDraft, insertAction, insertTitle, consumePromptInsert, tweakKey, hiddenPluginIds, argvDisplay, relativeTime,
     attentionStep, ackKey, runKey, mergeRun, parsedLast, cardRun,
   };
 })();

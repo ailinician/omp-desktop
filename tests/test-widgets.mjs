@@ -581,4 +581,68 @@ check("a tab without a key does not clear another tab's ack", () => {
   assert.equal(run("/p/a", "a").active, false);
 });
 
+// ── insert target (widgets.json `insert`, ⌥-click) ────────────────────────
+const NEW_TAB = { target: "new-tab", project: "/Users/me/GIT/work/inbox" };
+check("insertAction: no config or draft target inserts into the draft", () => {
+  for (const cfg of [undefined, null, {}, { target: "draft" }]) {
+    assert.deepEqual(W.insertAction(cfg, false), { target: "draft" });
+  }
+});
+check("insertAction: new-tab opens the configured project", () => {
+  assert.deepEqual(W.insertAction(NEW_TAB, false), { target: "new-tab", project: NEW_TAB.project });
+});
+check("insertAction: ⌥/Alt-click falls back to the draft for new-tab", () => {
+  assert.deepEqual(W.insertAction(NEW_TAB, true), { target: "draft" });
+  assert.deepEqual(W.insertAction({ target: "draft" }, true), { target: "draft" });
+});
+check("insertAction: an incomplete or unknown target never opens a tab", () => {
+  for (const cfg of [{ target: "new-tab" }, { target: "new-tab", project: "" }, { target: "new-tab", project: 5 }, { target: "tab", project: "/x" }]) {
+    assert.deepEqual(W.insertAction(cfg, false), { target: "draft" });
+  }
+});
+check("insertAction: plugin output cannot carry a target (parseOutput drops it)", () => {
+  const r = out({ version: 1, insert: NEW_TAB, blocks: [
+    { type: "text", text: "t", insert: "x", target: "new-tab", project: "/evil" },
+    { type: "list", items: [{ label: "a", insertTarget: NEW_TAB, project: "/evil" }] },
+  ] });
+  assert.equal(JSON.stringify(r).includes("/evil"), false);
+  assert.equal("insert" in r.widget, false);
+});
+check("insertAction: derives the target only from its cfg argument", () => {
+  // Callers pass the config's `insert`; an item or output object carrying target/project
+  // fields next to it must change nothing.
+  const item = { label: "a", insert: "x", target: "new-tab", project: "/evil", insertTarget: NEW_TAB };
+  assert.equal(W.insertAction.length, 2, "only (cfg, altKey)");
+  assert.deepEqual(W.insertAction(undefined, false, item), { target: "draft" });
+  assert.deepEqual(W.insertAction({ target: "draft" }, false, item), { target: "draft" });
+  assert.deepEqual(W.insertAction(NEW_TAB, false, item), { target: "new-tab", project: NEW_TAB.project });
+});
+check("insertTitle: plain tooltip for draft, folder name and ⌥ hint for new-tab", () => {
+  assert.equal(W.insertTitle(undefined), "insert into prompt");
+  assert.equal(W.insertTitle({ target: "draft" }), "insert into prompt");
+  assert.equal(W.insertTitle(NEW_TAB), "Click: new tab in inbox · ⌥-click: insert here");
+  assert.equal(W.insertTitle({ target: "new-tab", project: "/a/b/" }), "Click: new tab in b · ⌥-click: insert here");
+  assert.equal(W.insertTitle({ target: "new-tab", project: "C:\\a\\proj" }), "Click: new tab in proj · ⌥-click: insert here");
+  assert.equal(W.insertTitle({ target: "new-tab", project: "/" }), "Click: new tab in / · ⌥-click: insert here");
+});
+check("consumePromptInsert: waits for target sessionId to join sessionIds before consuming nonce", () => {
+  const targeted = { text: "fix #1", append: true, sessionId: "session-2", nonce: 100 };
+  // Before sessionIds includes session-2, the insert stays pending (kind: "none").
+  assert.deepEqual(W.consumePromptInsert(targeted, null, ["session-1"]), { kind: "none" });
+  assert.deepEqual(W.consumePromptInsert(targeted, null, []), { kind: "none" });
+  // Once session-2 is in sessionIds, it consumes the nonce.
+  assert.deepEqual(W.consumePromptInsert(targeted, null, ["session-1", "session-2"]), {
+    kind: "targeted",
+    nonce: 100,
+    sessionId: "session-2",
+  });
+  // Re-running with seenNonce === 100 does not apply it a second time.
+  assert.deepEqual(W.consumePromptInsert(targeted, 100, ["session-1", "session-2"]), { kind: "none" });
+  // Active-tab insert (no sessionId) applies immediately and is skipped once seen.
+  const active = { text: "here", append: true, nonce: 101 };
+  assert.deepEqual(W.consumePromptInsert(active, 100, []), { kind: "active", nonce: 101 });
+  assert.deepEqual(W.consumePromptInsert(active, 101, []), { kind: "none" });
+  assert.deepEqual(W.consumePromptInsert(null, 101, ["session-1"]), { kind: "none" });
+});
+
 console.log(`test-widgets: ${passed} checks passed`);
