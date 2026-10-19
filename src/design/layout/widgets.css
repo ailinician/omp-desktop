@@ -19,7 +19,8 @@
 .wdg-attn.tone-warn { --wdg-attn: var(--amber); }
 .wdg-attn.tone-error { --wdg-attn: var(--rose); }
 .rail-card.wdg-attn { animation: wdg-attn-border 1.5s ease-in-out infinite; }
-.wdg-attn > .rail-card-head .wdg-dot:not(.pulse-dot) { background: var(--wdg-attn); animation: wdg-attn-dot 1.5s ease-in-out infinite; }
+.wdg-attn > .rail-card-head .wdg-dot { background: var(--wdg-attn); animation: wdg-attn-dot 1.5s ease-in-out infinite; }
+.wdg-attn > .rail-card-head .wdg-dot.pulse-dot { animation: pulseDot 1.4s ease-in-out infinite, wdg-attn-dot 1.5s ease-in-out infinite; }
 @keyframes wdg-attn-border {
   0%, 100% { border-color: color-mix(in oklab, var(--wdg-attn) 25%, var(--line)); }
   50%      { border-color: var(--wdg-attn); }
@@ -30,7 +31,7 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .rail-card.wdg-attn { animation: none; border-color: var(--wdg-attn); box-shadow: inset 0 0 0 1px var(--wdg-attn); }
-  .wdg-attn > .rail-card-head .wdg-dot:not(.pulse-dot) { animation: none; box-shadow: 0 0 0 2px color-mix(in oklab, var(--wdg-attn) 45%, transparent); }
+  .wdg-attn > .rail-card-head .wdg-dot { animation: none; box-shadow: 0 0 0 2px color-mix(in oklab, var(--wdg-attn) 45%, transparent); }
 }
 .wdg-label { color: var(--fg-4); font-size: var(--d-text-xs); }
 .wdg-value { color: var(--fg-2); font-size: var(--d-text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

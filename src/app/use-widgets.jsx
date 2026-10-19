@@ -145,7 +145,7 @@ function useWidgets({ bridge, activeSessionId, activeProjectPath, railVisible, t
     for (const c of shown) {
       seenRef.current.set(c.ackKey, c.step.seen);
       if (c.step.writeAck) setTweak?.(c.ackKey, null);
-      if (c.step.bounce && !document.hasFocus()) _uwRequestAttention();
+      if (c.step.bounce && _uwVisible() && !document.hasFocus()) _uwRequestAttention();
     }
   }, [shown]); // eslint-disable-line react-hooks/exhaustive-deps
 
