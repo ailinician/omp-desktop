@@ -77,7 +77,9 @@ struct State {
     push_key: Option<String>,
     watched: Vec<String>,
     connected: Vec<String>,
+    /// Hub-unique ids of the actions in flight, see `actions.rs`.
     pending: HashMap<String, Pending>,
+    next_action: u64,
 }
 
 /// What changed for the webview while the state was locked.

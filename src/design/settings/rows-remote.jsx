@@ -62,7 +62,11 @@ function _SRR_Field({ value, onCommit, label, placeholder, width, disabled, mono
     <input className="st-rem-input" type="text" value={text} aria-label={label} placeholder={placeholder}
       disabled={disabled} spellCheck={false} style={{ width, fontFamily: mono ? undefined : "inherit" }}
       onChange={e => setText(e.target.value)} onBlur={commit}
-      onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }} />
+      onKeyDown={e => {
+        // Enter confirms an IME candidate; only a plain Enter commits.
+        if (e.key !== "Enter" || e.nativeEvent?.isComposing || e.keyCode === 229) return;
+        e.currentTarget.blur();
+      }} />
   );
 }
 

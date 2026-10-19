@@ -11,7 +11,15 @@ use super::rand::{ct_eq, random_b64};
 use super::tls::write_private;
 use crate::json_store;
 
+const MAX_DEVICE_NAME_CHARS: usize = 64;
 const LAST_SEEN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// A device name as stored: trimmed and cut to [`MAX_DEVICE_NAME_CHARS`].
+/// `None` when nothing is left. Pairing and renaming both go through this.
+pub fn normalize_name(name: &str) -> Option<String> {
+    let name: String = name.trim().chars().take(MAX_DEVICE_NAME_CHARS).collect();
+    (!name.is_empty()).then_some(name)
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -113,12 +121,13 @@ impl DeviceStore {
     }
 
     pub fn rename(&self, id: &str, name: &str) -> Result<(), String> {
+        let name = normalize_name(name).ok_or_else(|| "device name is empty".to_owned())?;
         self.update(&mut self.devices(), Instant::now(), |devices| {
             let device = devices
                 .iter_mut()
                 .find(|device| device.id == id)
                 .ok_or_else(|| "remote device not found".to_string())?;
-            name.clone_into(&mut device.name);
+            device.name = name;
             Ok(())
         })
     }

@@ -1,9 +1,7 @@
 //! Tauri commands of the remote access feature. Each one runs its blocking
 //! work (files, sockets, locks) off the IPC thread.
 
-use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
 
@@ -117,51 +115,25 @@ pub async fn remote_push_test(app: AppHandle) -> Result<(), String> {
     with_manager(app, RemoteManager::push_test).await
 }
 
-/// `git config user.email`, to prefill the push contact; empty when git or
-/// the setting is missing.
+/// The `user.email` of the user's global git configuration, to prefill the
+/// push contact; empty when it is not set. Read through gix: no `git`
+/// process, and never the config of whatever repository the app was started in.
 #[tauri::command]
 pub async fn remote_default_contact() -> String {
-    tauri::async_runtime::spawn_blocking(git_user_email)
-        .await
-        .unwrap_or_default()
+    tauri::async_runtime::spawn_blocking(|| {
+        gix::config::File::from_globals()
+            .map_or_else(|_| String::new(), |config| user_email(&config))
+    })
+    .await
+    .unwrap_or_default()
 }
 
-const GIT_TIMEOUT: Duration = Duration::from_secs(2);
-
-fn git_user_email() -> String {
-    let mut command = Command::new("git");
-    command
-        .args(["config", "user.email"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    crate::child_path::apply_child_path(&mut command);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(crate::agent::spawn::CREATE_NO_WINDOW);
-    }
-    let Ok(mut child) = crate::spawn_gate::spawn(&mut command) else {
-        return String::new();
-    };
-    let deadline = Instant::now() + GIT_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Ok(Some(_)) | Err(_) => return String::new(),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return String::new();
-            }
-        }
-    }
-    let mut email = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        let _ = std::io::Read::read_to_string(&mut out, &mut email);
-    }
-    email.trim().to_owned()
+fn user_email(config: &gix::config::File) -> String {
+    config
+        .string("user.email")
+        .map_or_else(String::new, |email| email.to_string().trim().to_owned())
 }
+
+#[cfg(test)]
+#[path = "commands_tests.rs"]
+mod tests;

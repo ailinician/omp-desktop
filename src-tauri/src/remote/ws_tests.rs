@@ -199,21 +199,61 @@ fn action_round_trip_and_timeout() {
     ws.send_text(r#"{"t":"action","reqId":"r1","tabId":"t1","kind":"prompt","text":"hi"}"#);
     let a = s.emit.next_action();
     assert_eq!((a.kind.as_str(), a.text.as_deref()), ("prompt", Some("hi")));
-    assert_eq!((a.req_id.as_str(), a.tab_id.as_str()), ("r1", "t1"));
-    s.hub.action_result("r1", true, None);
-    assert_eq!(ws.read_json_where(|m| m["t"] == "ack")["ok"], true);
-    ws.send_text(r#"{"t":"select","reqId":"r3","tabId":"t2"}"#);
-    assert_eq!(s.emit.next_action().kind, "select");
-    s.hub.action_result("r3", false, Some("no such tab"));
+    assert_eq!(a.tab_id, "t1");
+    s.hub.action_result(&a.req_id, true, None);
+    let ack = ws.read_json_where(|m| m["t"] == "ack");
     assert_eq!(
-        ws.read_json_where(|m| m["t"] == "ack")["error"],
-        "no such tab"
+        (ack["ok"].as_bool(), ack["reqId"].as_str()),
+        (Some(true), Some("r1"))
     );
+    ws.send_text(r#"{"t":"select","reqId":"r3","tabId":"t2"}"#);
+    let select = s.emit.next_action();
+    assert_eq!(select.kind, "select");
+    s.hub
+        .action_result(&select.req_id, false, Some("no such tab"));
+    let ack = ws.read_json_where(|m| m["t"] == "ack");
+    assert_eq!(ack["error"], "no such tab");
+    assert_eq!(ack["reqId"], "r3");
     ws.send_text(r#"{"t":"action","reqId":"r2","tabId":"t1","kind":"abort"}"#);
+    let late = s.emit.next_action();
     let ack = ws.read_json_where_within(|m| m["t"] == "ack", Duration::from_secs(17));
     assert_eq!(ack["ok"], false);
+    assert_eq!(ack["reqId"], "r2");
     assert_eq!(ack["error"], "desktop did not answer");
-    s.hub.action_result("r2", true, None); // late answer is ignored
+    s.hub.action_result(&late.req_id, true, None); // late answer is ignored
+}
+
+#[test]
+fn equal_req_ids_of_two_connections_get_their_own_acks() {
+    let s = test_server("ws-same-req-id");
+    let mut first = s.authed_socket();
+    let mut second = s.authed_socket();
+    let request = r#"{"t":"action","reqId":"same","tabId":"t1","kind":"abort"}"#;
+    first.send_text(request);
+    let a = s.emit.next_action();
+    second.send_text(request);
+    let b = s.emit.next_action();
+    assert_ne!(a.req_id, b.req_id, "the webview sees hub-unique ids");
+    // Answer in reverse order: each result goes to the connection it belongs to.
+    s.hub.action_result(&b.req_id, false, Some("second"));
+    s.hub.action_result(&a.req_id, true, None);
+    let ack = second.read_json_where(|m| m["t"] == "ack");
+    assert_eq!(
+        (ack["reqId"].as_str(), ack["error"].as_str()),
+        (Some("same"), Some("second"))
+    );
+    let ack = first.read_json_where(|m| m["t"] == "ack");
+    assert_eq!(
+        (ack["reqId"].as_str(), ack["ok"].as_bool()),
+        (Some("same"), Some(true))
+    );
+    // A repeated reqId on one connection is still refused while it is pending.
+    first.send_text(request);
+    let pending = s.emit.next_action();
+    first.send_text(request);
+    let refusal = first.read_json_where(|m| m["t"] == "ack");
+    assert_eq!(refusal["error"], "duplicate reqId");
+    s.hub.action_result(&pending.req_id, true, None);
 }
 
 #[test]
@@ -245,11 +285,14 @@ fn bad_actions_are_refused_without_reaching_the_webview() {
     ws.send_text(r#"{"t":"action","tabId":"t1","kind":"abort"}"#);
     ws.send_text(r#"{"t":"action","reqId":"","tabId":"t1","kind":"abort"}"#);
     ws.send_text(r#"{"t":"action","reqId":"b3","tabId":"t1","kind":"abort"}"#);
+    let forwarded = s.emit.next_action();
+    s.hub.action_result(&forwarded.req_id, true, None);
     assert_eq!(
-        s.emit.next_action().req_id,
+        ws.read_json_where(|m| m["t"] == "ack")["reqId"],
         "b3",
         "nothing else was forwarded"
     );
+    assert!(s.emit.try_action(Duration::from_millis(200)).is_none());
 }
 
 #[test]
@@ -575,4 +618,65 @@ fn authenticated_tls_trickle_has_an_absolute_deadline() {
 #[test]
 fn authenticated_partial_reads_do_not_reset_the_frame_deadline() {
     authenticated_trickle_is_cut(false, Duration::from_millis(100), "ws-authed-partials");
+}
+
+/// A masked client text frame (zero mask key) of a valid `push-unsubscribe`
+/// message padded to `len` bytes of payload, plus the time it takes to send
+/// it one byte per `total / bytes`.
+fn padded_frame(len: usize) -> Vec<u8> {
+    let head = r#"{"t":"push-unsubscribe","pad":""#;
+    let mut payload = head.as_bytes().to_vec();
+    payload.resize(len - 2, b'x');
+    payload.extend_from_slice(br#""}"#);
+    let len = u16::try_from(payload.len()).unwrap();
+    let mut frame = vec![0x81, 0x80 | 0x7e];
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(&[0; 4]); // a zero mask key leaves the payload as is
+    frame.extend_from_slice(&payload);
+    frame
+}
+
+/// Send `frame` evenly over `total`, a byte at a time. Returns when the
+/// frame is out, or at the first failed write and the time it took.
+fn trickle(client: &mut Client, frame: &[u8], total: Duration) -> (bool, Duration) {
+    let started = Instant::now();
+    let step = total / u32::try_from(frame.len()).unwrap();
+    for (n, byte) in frame.iter().enumerate() {
+        let raw = client.ws.get_mut();
+        if raw.write_all(&[*byte]).and_then(|()| raw.flush()).is_err() {
+            return (false, started.elapsed());
+        }
+        let due = started + step * u32::try_from(n + 1).unwrap();
+        std::thread::sleep(due.saturating_duration_since(Instant::now()));
+    }
+    (true, started.elapsed())
+}
+
+#[test]
+fn a_slow_but_steady_frame_outlives_the_read_cap_and_completes() {
+    let s = test_server("ws-slow-frame");
+    let mut client = s.authed_socket();
+    // 4 s with a byte every 10 ms: longer than FRAME_READ (3 s), shorter
+    // than FRAME_LIFETIME (5 s). The socket may be yielded, not closed.
+    let frame = padded_frame(400);
+    let (sent, took) = trickle(&mut client, &frame, Duration::from_secs(4));
+    assert!(sent, "socket was closed after {took:?}");
+    let ack = client.read_json_where(|m| m["t"] == "ack");
+    assert_eq!(ack["kind"], "push");
+    assert_eq!(s.hub.connected_devices().len(), 1);
+}
+
+#[test]
+fn a_frame_trickled_past_the_lifetime_is_cut_at_five_seconds_not_three() {
+    let s = test_server("ws-late-frame");
+    let mut client = s.authed_socket();
+    let frame = padded_frame(800);
+    let (sent, took) = trickle(&mut client, &frame, Duration::from_secs(10));
+    assert!(!sent, "an 8 s frame must not complete");
+    assert!(
+        took >= Duration::from_millis(4500),
+        "cut too early: {took:?}"
+    );
+    assert!(took < Duration::from_secs(7), "cut too late: {took:?}");
+    assert_eq!(s.hub.connected_devices(), Vec::<String>::new());
 }

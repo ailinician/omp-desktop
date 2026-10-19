@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 
@@ -595,8 +596,10 @@ test("live bridge senders resolve to false when nothing can be handed off", asyn
 });
 
 // ---- settings: delayed push toggles merge against the newest settings -------
-test("two delayed push toggles both survive: nested push merges inside the queue", async () => {
-  const Babel = createRequire(import.meta.url)(new URL("../src/babel.min.js", import.meta.url).pathname);
+// The settings rows compiled with a hook-slot React stand-in; `render` resets
+// the slots, the rows' own top-level functions land on `scope`.
+function remoteRows() {
+  const Babel = createRequire(import.meta.url)(fileURLToPath(new URL("../src/babel.min.js", import.meta.url)));
   const slots = []; let i = 0;
   const changed = (a, b) => !a || !b || a.length !== b.length || a.some((v, k) => !Object.is(v, b[k]));
   const React = {
@@ -611,16 +614,22 @@ test("two delayed push toggles both survive: nested push merges inside the queue
     useEffect(fn, deps) { const k = i++; if (!slots[k] || changed(slots[k].deps, deps)) { slots[k] = { deps }; fn(); } },
     useCallback: fn => fn,
   };
+  const window = { Icon: {} };
+  const { code } = Babel.transform(source("src/design/settings/rows-remote.jsx"), { presets: ["react"] });
+  const scope = { window, React };
+  runInNewContext(code, scope);
+  return { window, scope, reset: () => { i = 0; } };
+}
+
+test("two delayed push toggles both survive: nested push merges inside the queue", async () => {
+  const { window, reset } = remoteRows();
   const applies = [];
   const settings = { enabled: true, cert: {}, push: { enabled: true, questions: false, finished: false, contact: "me@example.test" } };
   const bridge = {
     onRemoteEvent: () => () => {}, remoteStatus: async () => ({ settings, devices: [] }),
     remoteDefaultContact: async () => "", remoteApply: s => new Promise(resolve => applies.push({ s, resolve })),
   };
-  const window = { Icon: {} };
-  const { code } = Babel.transform(source("src/design/settings/rows-remote.jsx"), { presets: ["react"] });
-  runInNewContext(code, { window, React });
-  const render = () => { i = 0; return window.OMP_SETTINGS_ROWS.remotePush({ row: {}, ctx: { bridge }, query: "" }); };
+  const render = () => { reset(); return window.OMP_SETTINGS_ROWS.remotePush({ row: {}, ctx: { bridge }, query: "" }); };
   const find = (node, label) => {
     if (!node || typeof node !== "object") return null;
     if (node.props?.label === label) return node;
@@ -638,4 +647,19 @@ test("two delayed push toggles both survive: nested push merges inside the queue
   await flush();
   assert.equal(applies.length, 2);
   assert.deepEqual(own(applies[1].s.push), { enabled: true, questions: true, finished: true, contact: "me@example.test" });
+});
+
+// ---- settings: Enter confirms an IME candidate, it does not commit the field --
+test("Enter during IME composition does not blur a settings field", () => {
+  const { scope, reset } = remoteRows();
+  const field = () => { reset(); return scope._SRR_Field({ value: "", onCommit() {}, label: "Device name" }); };
+  const press = (event) => {
+    let blurred = 0;
+    field().props.onKeyDown({ key: "Enter", keyCode: 13, nativeEvent: {}, ...event, currentTarget: { blur: () => { blurred++; } } });
+    return blurred;
+  };
+  assert.equal(press({}), 1, "a plain Enter commits");
+  assert.equal(press({ nativeEvent: { isComposing: true } }), 0, "composition Enter is ignored");
+  assert.equal(press({ keyCode: 229 }), 0, "keyCode 229 is a composition Enter too");
+  assert.equal(press({ key: "a" }), 0, "other keys do not blur");
 });

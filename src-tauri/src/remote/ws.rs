@@ -255,7 +255,8 @@ fn flush_outbox(ws: &mut Socket, session: &Authed) -> Step {
 
 /// Authenticated read. A frame that has started must finish within
 /// `FRAME_LIFETIME` however it is trickled; each call is also bounded by
-/// `FRAME_READ`, so a steady stream cannot keep the thread from its outbox.
+/// `FRAME_READ`, which only yields: the thread serves its outbox and the
+/// partial frame stays buffered. Only the frame lifetime closes the socket.
 fn read_step(
     hub: &Hub,
     ws: &mut Socket,
@@ -270,9 +271,6 @@ fn read_step(
     ws.get_mut().set_deadline(Some(deadline));
     let read = read_text(ws);
     ws.get_mut().set_deadline(None);
-    if Instant::now() >= deadline {
-        return Step::Close(CLOSE_OVERLOAD);
-    }
     match read {
         Ok(Frame::Text(text)) => {
             *frame_since = None;

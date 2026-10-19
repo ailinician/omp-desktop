@@ -48,6 +48,25 @@ fn revoke_removes_the_device_and_its_push_subscriptions() {
 }
 
 #[test]
+fn rename_applies_the_pairing_name_rules() {
+    let dir = tempdir("rename-rules");
+    let store = DeviceStore::load(dir.join("remote-devices.json"));
+    let (dev, _) = store.add("iPhone").unwrap();
+    store.rename(&dev.id, "  Kitchen iPad \n").unwrap();
+    assert_eq!(store.list()[0].name, "Kitchen iPad");
+    store.rename(&dev.id, &"é".repeat(200)).unwrap();
+    assert_eq!(store.list()[0].name.chars().count(), 64);
+    for blank in ["", "   ", "\t\n"] {
+        assert!(store.rename(&dev.id, blank).is_err(), "{blank:?}");
+    }
+    assert_eq!(
+        store.list()[0].name.chars().count(),
+        64,
+        "rejected rename changes nothing"
+    );
+}
+
+#[test]
 fn rename_and_push_survive_reload_and_unknown_ids_fail() {
     let dir = tempdir("rename-push");
     let path = dir.join("remote-devices.json");
