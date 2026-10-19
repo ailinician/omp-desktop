@@ -13,6 +13,12 @@
 
   Not expressible through `bundle.fileAssociations`, which is keyed by file
   extension (`ext` is required) and a folder has none.
+
+  NSLocalNetworkUsageDescription: macOS Local Network Privacy attributes the
+  connections of every process the app starts (omp, kubectl, MCP servers,
+  widget plugins) to OMP Desktop. Without a usage description macOS never asks
+  and drops their LAN connections silently (kernel log: `tcp drop outgoing …
+  reason: NECP`), even with the app switched on under Local Network.
 -->
 <plist version="1.0">
 <dict>
@@ -31,5 +37,7 @@
       </array>
     </dict>
   </array>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>OMP Desktop and the agents, tools and widgets it starts connect to services on your local network, such as Kubernetes clusters.</string>
 </dict>
 </plist>

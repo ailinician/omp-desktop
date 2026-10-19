@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- macOS: tools the agent starts (`kubectl`, MCP servers, widget plugins) could not reach hosts on the local network, even with OMP Desktop switched on under System Settings → Privacy & Security → Local Network. The kernel dropped their connections (`reason: NECP`) without asking. The app now declares `NSLocalNetworkUsageDescription`, so macOS shows its Local Network prompt on first use.
+
 ## [0.11.0] - 2026-10-17
 
 ### Added
