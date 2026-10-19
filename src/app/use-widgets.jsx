@@ -9,14 +9,24 @@ const _UW_GLOBAL_KEY = "__global__";
 const _UW_NO_IDS = [];
 const _UW_EMPTY_CONFIG = { plugins: [], errors: [], fatal: null, configPath: null };
 
+// One dock bounce (macOS; the OS decides elsewhere): Informational, no-op
+// without the Tauri window API or the capability.
+function _uwRequestAttention() {
+  try {
+    const w = window.__TAURI__?.window;
+    w?.getCurrentWindow().requestUserAttention(w.UserAttentionType?.Informational ?? 2)?.catch?.(() => {});
+  } catch { /* unsupported: no bounce */ }
+}
+
 function _uwVisible() {
   return document.visibilityState === "visible";
 }
 
 /** `activeSessionId` must be the tab the app renders (`activeProject.id`,
  *  "" when none) — never a closed tab's id. `railVisible`: the rail is on
- *  screen (layout not focus, conversation tree closed); hidden = nothing runs. */
-function useWidgets({ bridge, activeSessionId, railVisible, tweaks }) {
+ *  screen (layout not focus, conversation tree closed); hidden = nothing runs.
+ *  `setTweak` stores the acknowledged attention key per plugin id. */
+function useWidgets({ bridge, activeSessionId, railVisible, tweaks, setTweak }) {
   const [config, setConfig] = React.useState(_UW_EMPTY_CONFIG);
   // sessionId ("" for none) → plugin ids applicable to it, latest per
   // session, so a late payload for another tab never blanks this one.
@@ -117,6 +127,33 @@ function useWidgets({ bridge, activeSessionId, railVisible, tweaks }) {
     return out;
   }, [config.plugins, activeIds, hiddenIds, sessionId, runsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Attention (docs/widgets.md#attention): the acknowledged key is stored per
+  // plugin id, not per tab — tabs get new ids every launch, so a per-tab key
+  // could never survive a restart. `attentionStep` decides; the effect only
+  // stores the cleared ack and asks the OS once per new key.
+  const seenRef = React.useRef(new Map());
+  const shown = React.useMemo(() => cards.map(c => {
+    const step = _UW.attentionStep({ key: c.run.widget?.attention, ack: tweaks?.[_UW.ackKey(c.id)], seen: seenRef.current.get(c.id) });
+    return { ...c, attention: step.active, step };
+  }), [cards, tweaks]); // eslint-disable-line react-hooks/exhaustive-deps
+  React.useEffect(() => {
+    for (const c of shown) {
+      // No widget (idle, error): nothing was said about attention either way.
+      if (!c.run.widget) continue;
+      seenRef.current.set(c.id, c.run.widget.attention ?? "");
+      if (c.step.ack !== (tweaks?.[_UW.ackKey(c.id)] ?? null)) setTweak?.(_UW.ackKey(c.id), c.step.ack);
+      if (c.step.enter && !document.hasFocus()) _uwRequestAttention();
+    }
+  }, [shown]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Click on a card: remember the key it shows as seen.
+  const shownRef = React.useRef(shown);
+  shownRef.current = shown;
+  const acknowledge = React.useCallback((pluginId) => {
+    const key = shownRef.current.find(c => c.id === pluginId)?.run.widget?.attention;
+    if (key) setTweak?.(_UW.ackKey(pluginId), key);
+  }, [setTweak]);
+
   // Approval is per plugin, not per tab: shown whatever the active project.
   const approvals = React.useMemo(() => config.plugins
     .filter(p => p.enabled && p.approval !== "approved" && !hiddenIds.includes(p.id))
@@ -145,8 +182,8 @@ function useWidgets({ bridge, activeSessionId, railVisible, tweaks }) {
   }, [bridge, applySnapshot]);
 
   return {
-    cards, approvals, configErrors: config.errors, fatal: config.fatal, configPath: config.configPath,
-    togglePlugins, refresh, reload, approve,
+    cards: shown, approvals, configErrors: config.errors, fatal: config.fatal, configPath: config.configPath,
+    togglePlugins, refresh, reload, approve, acknowledge,
   };
 }
 

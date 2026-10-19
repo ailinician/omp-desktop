@@ -512,4 +512,38 @@ check("cardRun: idle without a result (stdout missing) is an error, not a crash"
   assert.equal(c.state, "error");
 });
 
+// ── attention ─────────────────────────────────────────────────────────────
+check("attention is parsed onto the widget", () => {
+  assert.equal(out({ version: 1, blocks: [], attention: "k1" }).widget.attention, "k1");
+});
+check("attention is cut to 200 chars", () => {
+  assert.equal(out({ version: 1, blocks: [], attention: "x".repeat(300) }).widget.attention.length, 200);
+});
+check("missing, empty and non-string attention is no attention", () => {
+  for (const attention of [undefined, "", 5, true, null, ["a"], { a: 1 }]) {
+    assert.equal("attention" in out({ version: 1, blocks: [], attention }).widget, false, JSON.stringify(attention));
+  }
+});
+check("attentionStep: a new unacknowledged key is active and enters", () => {
+  assert.deepEqual(W.attentionStep({ key: "a", ack: null, seen: undefined }), { active: true, enter: true, ack: null });
+  assert.deepEqual(W.attentionStep({ key: "b", ack: "a", seen: "a" }), { active: true, enter: true, ack: "a" });
+});
+check("attentionStep: a rerun with the same key is active but does not enter again", () => {
+  assert.deepEqual(W.attentionStep({ key: "a", ack: null, seen: "a" }), { active: true, enter: false, ack: null });
+});
+check("attentionStep: the acknowledged key is not active and keeps its ack", () => {
+  assert.deepEqual(W.attentionStep({ key: "a", ack: "a", seen: "a" }), { active: false, enter: false, ack: "a" });
+  assert.deepEqual(W.attentionStep({ key: "a", ack: "a", seen: undefined }), { active: false, enter: false, ack: "a" });
+});
+check("attentionStep: no key ends attention and clears the ack, so the same key alerts again", () => {
+  for (const key of [undefined, ""]) {
+    assert.deepEqual(W.attentionStep({ key, ack: "a", seen: "a" }), { active: false, enter: false, ack: null });
+  }
+  assert.deepEqual(W.attentionStep({ key: "a", ack: null, seen: "" }), { active: true, enter: true, ack: null });
+});
+check("ackKey stays out of the Settings `widget:` toggle namespace", () => {
+  assert.equal(W.ackKey("ci"), "widgetAck:ci");
+  assert.equal(W.ackKey("ci").startsWith("widget:"), false);
+});
+
 console.log(`test-widgets: ${passed} checks passed`);

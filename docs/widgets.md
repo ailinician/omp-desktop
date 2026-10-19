@@ -220,6 +220,7 @@ Top level:
 | `version` | yes | Must be the number `1`. Another number gives the error card "plugin reports version N, this desktop supports 1"; a non-number gives "plugin reports an invalid version, …". |
 | `status` | no | `ok` \| `warn` \| `error` \| `info` \| `neutral` (default `neutral`). Tints the dot in the card head. |
 | `blocks` | yes | An array of at most 32 blocks. |
+| `attention` | no | A string of at most 200 chars that asks for notice: see [Attention](#attention). Missing, empty or not a string means no attention. |
 
 Blocks:
 
@@ -248,13 +249,29 @@ Field rules:
   - The tooltip shows the ISO timestamp.
 - **A `list`** scrolls inside a 220 px area, so a long list never makes the card taller than the rail.
 - **Strings** are rendered as text, never as HTML or markdown.
-- **Lengths.** `label`, `value`, `detail`, `k`, `v` and `title` are cut to 200 chars; `text` to 2000. A list keeps at most 50 items and a `kv` block at most 50 rows. These caps are enforced by the frontend parser (`src/app/widgets.js`).
+- **Lengths.** `label`, `value`, `detail`, `k`, `v`, `title` and `attention` are cut to 200 chars; `text` to 2000. A list keeps at most 50 items and a `kv` block at most 50 rows. These caps are enforced by the frontend parser (`src/app/widgets.js`).
 
 ### Conventions
 
 - **List items are the clickable rows.** Use them for MRs, CI jobs, branches, or any other row the user can act on.
 - **Empty state.** Use a `text` block ("No open MRs.", "Pipeline never run.") rather than an empty `list` or `kv`.
 - **One card per plugin.** Each config entry produces one card, with up to 32 blocks.
+
+### Attention
+
+A plugin that needs the user to look at its card sets `"attention": "<key>"`. The key says *what* needs notice, so it must change when the situation does and stay the same while it does not. A good key is a hash of the sorted set of problems (for example the sorted failing job names), not a timestamp or a counter.
+
+- **State.** A card is in attention while its current key is non-empty and differs from the key you last acknowledged. A rerun that prints the same key changes nothing.
+- **Look.** The card border and the dot before the title pulse (about 1.5 s) in the card's status colour: red for `error`, amber for `warn`, otherwise the accent. With reduced motion (`prefers-reduced-motion: reduce`) the border is static and thicker and the dot is static.
+- **Acknowledge.** A click anywhere on the card acknowledges the key; a click on a list item still inserts or opens as usual. The acknowledged key is stored per plugin id in the tweak store (`widgetAck:<id>`, not a tab-specific key, because tab ids change every launch) and survives restarts. If a tab plugin shows different keys in different tabs, switching between them alerts again.
+- **Clear.** When a successful run has no key (or an empty one), the attention ends and the stored key is dropped, so the same key alerts again if it comes back. A failed or running run changes nothing.
+- **Dock.** When a card *enters* attention (a new, unacknowledged key) while the window is not focused, the desktop requests the user's attention once with the informational type (a single dock bounce on macOS). A rerun with the same key does not bounce again. Where the OS or the window API does not support it, nothing happens.
+
+```json
+{ "version": 1, "status": "warn", "attention": "9f2c41aa", "blocks": [ … ] }
+```
+
+Here `9f2c41aa` is a short hash of `["build", "lint"]`, the sorted names of the failing jobs.
 
 ## Errors
 

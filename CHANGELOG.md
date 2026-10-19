@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Rail widgets: a plugin can ask for notice with a top-level `"attention": "<key>"`. Until you click the card, its border and title dot pulse in the status colour (static with reduced motion), and when it turns up while the window is in the background the dock icon bounces once. The acknowledged key is remembered across restarts; see `docs/widgets.md`.
+
 ## [0.11.0] - 2026-10-17
 
 ### Added

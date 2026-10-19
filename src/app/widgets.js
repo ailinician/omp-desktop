@@ -2,6 +2,8 @@
 //   parseOutput(stdout)        plugin stdout → validated, capped widget v1 or error
 //   insertText(item) / safeUrl(url) / appendToDraft(draft, insert)
 //                              what a click may do
+//   attentionStep({key, ack, seen})
+//                              the attention signal: active / entered / ack to keep
 //   runKey / mergeRun / cardRun / parsedLast
 //                              the hook's run bookkeeping (events → card props)
 //   hiddenPluginIds(tweaks, ids) / argvDisplay(arg)
@@ -112,7 +114,10 @@
       const norm = raw && typeof raw === "object" && typeof raw.type === "string" && Object.hasOwn(BLOCKS, raw.type) ? BLOCKS[raw.type](raw) : null;
       if (norm) blocks.push(norm); else skipped++;
     }
-    return { ok: true, widget: { status: tone(doc.status), blocks, skipped } };
+    const attention = clip(doc.attention, LIMITS.short);
+    const widget = { status: tone(doc.status), blocks, skipped };
+    if (attention) widget.attention = attention;
+    return { ok: true, widget };
   }
 
   function insertText(it) {
@@ -120,6 +125,23 @@
     if (explicit) return explicit;
     return [clip(it?.label, LIMITS.short), safeUrl(it?.url)].filter(Boolean).join(" ").slice(0, LIMITS.long);
   }
+
+  // attentionStep: one card's attention for the output it shows. `key` is the
+  // plugin's `attention` string ("" = none), `ack` the key the user last
+  // acknowledged, `seen` the key this card showed on the previous step.
+  // active: a key the user has not acknowledged. enter: active and new since
+  // `seen` (a rerun with the same key is not an entry, so no second dock
+  // bounce). ack: what to keep stored; null once the key is gone, so the same
+  // key alerts again when it returns.
+  function attentionStep({ key, ack, seen }) {
+    const k = key || "";
+    const active = k !== "" && k !== (ack ?? null);
+    return { active, enter: active && k !== (seen || ""), ack: k === "" ? null : (ack ?? null) };
+  }
+
+  // The acknowledged key lives in the tweak store under its own prefix, not
+  // `widget:`: Settings → Rail treats every `widget:` key as a toggle.
+  const ackKey = (id) => `widgetAck:${id}`;
 
   // appendToDraft: a widget insert goes after the draft (never in front of
   // it, never replacing it — a `/command` draft included), separated by one
@@ -215,6 +237,6 @@
 
   window.OMP_WIDGETS = {
     parseOutput, insertText, safeUrl, appendToDraft, tweakKey, hiddenPluginIds, argvDisplay, relativeTime,
-    runKey, mergeRun, parsedLast, cardRun,
+    attentionStep, ackKey, runKey, mergeRun, parsedLast, cardRun,
   };
 })();

@@ -28,15 +28,18 @@ function WidgetErrorCard({ title, error }) {
 
 /** `source`: set for content another program pushes (omp extensions, #52)
  *  rather than a plugin run — shown as the card's chip in place of the run
- *  timing, with the accent border. */
-function WidgetCard({ title, run, onRefresh, onInsert, source }) {
+ *  timing, with the accent border. `attention`: the plugin's unacknowledged
+ *  attention key (docs/widgets.md#attention); a click anywhere on the card
+ *  calls `onAck`. */
+function WidgetCard({ title, run, onRefresh, onInsert, source, attention, onAck }) {
   const state = run?.state ?? "idle";
   const widget = run?.widget ?? null;
   const toneClass = state === "error" ? "tone-error" : state === "ok" && widget ? `tone-${widget.status}` : "tone-neutral";
   const stale = state === "running" && widget != null;
   const meta = source ?? (state === "running" ? "running…" : run?.durationMs != null ? `${run.durationMs} ms · ${_wcTime(run.at)}` : "");
   return (
-    <div className={`rail-card glass wdg-card ${toneClass}${stale ? " wdg-stale" : ""}${source ? " wdg-pushed" : ""}`}>
+    <div className={`rail-card glass wdg-card ${toneClass}${stale ? " wdg-stale" : ""}${source ? " wdg-pushed" : ""}${attention ? " wdg-attn" : ""}`}
+      onClick={attention ? onAck : undefined}>
       <div className="rail-card-head">
         <span className={`wdg-dot${state === "running" ? " pulse-dot" : ""}`} />
         <span className="mono wdg-title">{title}</span>
