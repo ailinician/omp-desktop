@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The native window can now shrink to 480 × 320 instead of stopping at 960 × 640. Tiling window managers such as AeroSpace can fit it into narrower columns and shorter rows without overlapping adjacent windows. The normal 1440 × 900 startup size and saved side-column settings are unchanged.
+
 ## [0.11.0] - 2026-10-17
 
 ### Added
