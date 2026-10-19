@@ -287,7 +287,10 @@ pub fn bind(ip: Ipv4Addr, port: u16) -> Result<TcpListener, String> {
     if ip.is_unspecified() {
         return Err("refusing to listen on all interfaces (0.0.0.0)".to_owned());
     }
-    TcpListener::bind((ip, port)).map_err(|error| format!("listen on {ip}:{port}: {error}"))
+    TcpListener::bind((ip, port)).map_err(|error| match error.kind() {
+        std::io::ErrorKind::AddrInUse => format!("port {port} is in use"),
+        _ => format!("listen on {ip}:{port}: {error}"),
+    })
 }
 
 impl Server {
