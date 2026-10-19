@@ -275,6 +275,11 @@ fn contacts_are_checked_and_bare_emails_become_mailto() {
         "@omp-desktop.app",
         "http://omp-desktop.app",
         "tel:123",
+        "alice@@company.com",
+        "mailto:al ice@company.com",
+        "mailto:alice@company..com",
+        "mailto:alice@-company.com",
+        "mailto:alice@company.com,bob@company.com",
     ] {
         assert_eq!(contact_uri(bad).unwrap_err(), CONTACT_ERROR, "{bad}");
     }

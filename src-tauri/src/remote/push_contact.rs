@@ -18,7 +18,7 @@ pub fn contact_uri(raw: &str) -> Result<String, String> {
     let host = if let Some(address) = uri.strip_prefix("mailto:") {
         let address = address.split('?').next().unwrap_or_default();
         let (local, domain) = address.rsplit_once('@').ok_or_else(bad)?;
-        if local.is_empty() {
+        if !local_part_ok(local) || !domain_ok(domain) {
             return Err(bad());
         }
         domain.to_owned()
@@ -41,4 +41,29 @@ pub fn contact_uri(raw: &str) -> Result<String, String> {
         return Err(bad());
     }
     Ok(uri)
+}
+
+/// RFC 5322 dot-atom for the local part: no `@`, spaces, commas (several
+/// addresses) or empty / doubled dots.
+fn local_part_ok(local: &str) -> bool {
+    const SPECIALS: &str = "!#$%&'*+/=?^_`{|}~-";
+    !local.is_empty()
+        && local.split('.').all(|atom| {
+            !atom.is_empty()
+                && atom
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || SPECIALS.contains(c))
+        })
+}
+
+/// A DNS name: labels of letters, digits and inner hyphens, none empty.
+fn domain_ok(domain: &str) -> bool {
+    domain.len() <= 253
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
 }
