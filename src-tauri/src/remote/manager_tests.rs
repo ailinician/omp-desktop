@@ -66,6 +66,22 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// Apply an enabled config on a port that was free a moment ago. Another
+/// test thread can grab the port between `free_port` and the bind (Windows
+/// hands out just-closed ephemeral ports quickly), so retry on a fresh one.
+fn start_on_a_free_port(manager: &RemoteManager) -> u16 {
+    let mut last = None;
+    for _ in 0..5 {
+        let port = free_port();
+        let status = manager.apply(enabled(port)).unwrap();
+        if status.listening {
+            return port;
+        }
+        last = status.error;
+    }
+    panic!("no free port could be bound: {last:?}");
+}
+
 fn wait_until(what: &str, condition: impl FnMut() -> bool) {
     assert!(
         crate::test_support::wait_until(Duration::from_secs(5), condition),
@@ -348,8 +364,7 @@ fn a_push_only_change_keeps_the_server_and_its_sockets() {
     let (manager, _emit, _dir) = manager("push-only", &loopback());
     let hub = manager.hub();
     hub.set_ready(true);
-    let port = free_port();
-    assert!(manager.apply(enabled(port)).unwrap().listening);
+    let port = start_on_a_free_port(&manager);
     let (device, _token) = manager.core.devices.add("phone").unwrap();
     let (tx, rx) = std::sync::mpsc::sync_channel(8);
     hub.register(&device, tx, None, hub.generation()).unwrap();

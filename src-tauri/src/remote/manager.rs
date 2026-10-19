@@ -230,14 +230,7 @@ impl Core {
                 },
             },
             ws::upgrade_fn(Arc::clone(&self.hub), Arc::clone(&self.devices), generation),
-        )
-        .map_err(|error| {
-            if error.contains("in use") {
-                format!("port {} is in use", settings.port)
-            } else {
-                error
-            }
-        })?;
+        )?;
         Ok(Some(Running {
             port: server.local_addr().port(),
             _server: server,
