@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- macOS: tools the agent starts (`kubectl`, MCP servers, widget plugins) could not reach hosts on the local network, even with OMP Desktop switched on under System Settings → Privacy & Security → Local Network. The kernel dropped their connections (`reason: NECP`) without asking. The app now declares `NSLocalNetworkUsageDescription`, so macOS shows its Local Network prompt on first use.
 - The native window can now shrink to 480 × 320 instead of stopping at 960 × 640. Tiling window managers such as AeroSpace can fit it into narrower columns and shorter rows without overlapping adjacent windows. The normal 1440 × 900 startup size and saved side-column settings are unchanged.
 
 ## [0.11.0] - 2026-10-17
