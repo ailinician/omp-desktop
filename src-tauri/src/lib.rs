@@ -32,6 +32,7 @@ mod program_setting;
 mod project_file;
 mod recent_projects;
 mod redaction;
+mod remote;
 mod saved_sessions;
 mod spawn_gate;
 mod stats;
@@ -1387,6 +1388,9 @@ fn setup(app: &tauri::App) {
     app.manage(Arc::new(open_tabs::OpenTabsStore::new(config_file(
         "open-tabs.json",
     ))));
+    // Phone remote access: settings in <app_config_dir>/remote.json, devices
+    // in remote-devices.json; started once from the saved settings.
+    remote::bridge::install(app, resolved_config_dir.clone()); // `config_file` still borrows it
 
     // A cold start *is* how Windows and Linux file managers open a
     // folder, so the launch argv is the third delivery path into the
@@ -1446,6 +1450,12 @@ fn with_plugins_and_state(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder
         .plugin(navigation_guard::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .on_page_load(|webview, payload| {
+            remote::bridge::on_page_load(
+                webview,
+                matches!(payload.event(), tauri::webview::PageLoadEvent::Started),
+            );
+        })
         .manage(AgentBridge::new())
         .manage(GitWatcherState::new())
         .manage(OpenProjectState::new())
@@ -1460,6 +1470,8 @@ fn with_plugins_and_state(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder
 /// Panics if `tauri::Builder::build` returns an error (e.g. the webview
 /// runtime cannot be initialised). This is a fatal startup condition;
 /// there is no meaningful recovery from inside `main`.
+// The command list alone is what makes this long; `generate_handler!` takes one list.
+#[allow(clippy::too_many_lines)]
 pub fn run() {
     let builder = tauri::Builder::default();
     // Registered first, as the plugin requires (see `single_instance_plugin`).
@@ -1550,6 +1562,19 @@ pub fn run() {
             app_update_check,
             app_update_install,
             set_close_guard,
+            remote::commands::remote_status,
+            remote::commands::remote_interfaces,
+            remote::commands::remote_apply_settings,
+            remote::commands::remote_pair_start,
+            remote::commands::remote_pair_cancel,
+            remote::commands::remote_device_rename,
+            remote::commands::remote_device_revoke,
+            remote::commands::remote_regenerate_cert,
+            remote::commands::remote_publish,
+            remote::commands::remote_action_result,
+            remote::commands::remote_ready,
+            remote::commands::remote_push_test,
+            remote::commands::remote_default_contact,
         ])
         .setup(|app| {
             setup(app);
@@ -1564,7 +1589,10 @@ pub fn run() {
 /// Handle lifecycle and platform file-open events from the Tauri run loop.
 fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
     match &event {
-        tauri::RunEvent::Exit => kill_child_processes(app),
+        tauri::RunEvent::Exit => {
+            remote::bridge::stop(app);
+            kill_child_processes(app);
+        }
         // The OS close (title-bar menu, Alt+F4, taskbar) of a window the
         // [`CloseGuard`] holds: the webview confirms, then closes it itself.
         tauri::RunEvent::WindowEvent {

@@ -103,6 +103,10 @@ A real shell in every tab. `` Ctrl+` `` (`` ⌘` `` on macOS), the status-bar bu
 |---|---|
 | ![Phosphor theme](screenshots/theme-phosphor.webp) | ![Daylight theme](screenshots/theme-daylight.webp) |
 
+### Remote access
+
+Settings → Remote access lets a phone on your network (or VPN) open the app's tabs in its browser: read the active tab live, answer the agent's questions, send, steer and stop, and, with the page added to the home screen, get a push notification when a question waits or a long turn finishes. It is off until you enable it, listens only on the network interface you choose, pairs a phone with a one-time QR code, and each phone can be revoked. Use a generated certificate or your own (push needs one the phone trusts); macOS and Linux only. Internals and the security model: [`docs/architecture/remote-access.md`](docs/architecture/remote-access.md).
+
 ### Security
 
 - Agent output is rendered as Markdown, with any raw HTML escaped. Links open in your system browser, and `javascript:`/`data:` links are rendered as plain text.

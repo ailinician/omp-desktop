@@ -88,3 +88,27 @@
   display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 10px 16px;
   border-top: 1px solid var(--line); color: var(--fg-4); font-size: var(--d-text-xs);
 }
+
+/* ── Remote access (rows-remote.jsx) ────────────────────────────────── */
+.st-rem { display: flex; flex-direction: column; gap: 10px; }
+.st-rem-line { display: flex; align-items: center; gap: 12px; min-height: 28px; }
+.st-rem-lbl { width: 150px; flex: none; color: var(--fg-3); font-size: var(--d-text-sm); }
+.st-rem-input {
+  padding: 6px 10px; border-radius: 8px; max-width: 100%;
+  border: 1px solid var(--line-bright); background: var(--bg-input); color: var(--fg);
+  font-family: var(--font-mono); font-size: var(--d-text-sm);
+}
+.st-rem-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.st-rem-input:disabled { opacity: 0.5; }
+.st-rem-status { font-family: var(--font-mono); font-size: var(--d-text-xs); color: var(--fg-3); overflow-wrap: anywhere; }
+.st-rem-status.err { color: var(--rose); }
+.st-rem-warn { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line-bright); color: var(--fg-2); font-size: var(--d-text-xs); }
+.st-rem-dev { display: flex; align-items: center; gap: 12px; }
+.st-rem-sub { color: var(--fg-4); font-size: var(--d-text-xs); font-family: var(--font-mono); }
+.st-rem-dialog {
+  display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 14px 18px 18px;
+  width: min(380px, calc(100vw - 40px)); border: 1px solid var(--line-bright); border-radius: 12px;
+  background: var(--bg-elevated); box-shadow: var(--shadow-pop);
+}
+.st-rem-dialog-head { display: flex; align-items: center; justify-content: space-between; width: 100%; color: var(--fg-2); }
+.st-rem-qr { background: #fff; border-radius: 8px; padding: 8px; }

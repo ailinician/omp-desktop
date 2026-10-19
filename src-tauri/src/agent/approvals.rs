@@ -198,12 +198,14 @@ impl AgentBridge {
             })?
             .ok_or_else(|| format!("session '{session_id}' not found"))??;
 
-        if let Err(err) = write_command(&stdin, &approve_answer(request_id), None) {
+        let answer = approve_answer(request_id);
+        if let Err(err) = write_command(&stdin, &answer, None) {
             if let Ok(mut pending) = open.lock() {
                 pending.track(request_id.to_owned(), tool);
             }
             return Err(err);
         }
+        crate::remote::tracker::tracker().on_answered(session_id, request_id);
 
         let ended = || format!("session '{session_id}' ended before the grant was saved");
         let granted = root.map_or_else(
@@ -568,5 +570,50 @@ mod tests {
         );
         assert_eq!(written(&pipe), approve_line("req-1"));
         assert!(book.is_granted("sess-a", None, "bash"));
+    }
+
+    #[test]
+    fn approval_grant_settles_tracker_only_after_a_successful_answer() {
+        let dir = TempDir::new("tracker", "approval-grant");
+        let book = RuleBook::new(dir.path().join("rules"));
+        let bridge = AgentBridge::new();
+        let sid = "tracker-approval-grant";
+        let frame = prompt("q", "bash");
+        let open = Mutex::new(PendingApprovals::new(None));
+        observe(&open, Some("extension_ui_request"), &frame);
+        bridge.sessions.lock().unwrap().insert(
+            sid.into(),
+            BridgeInner {
+                approvals: Arc::new(open),
+                ..idle_inner(Arc::new(AtomicBool::new(true)))
+            },
+        );
+        let tracker = crate::remote::tracker::tracker();
+        tracker.on_frame(
+            sid,
+            Some("extension_ui_request"),
+            Some(&frame),
+            std::time::Instant::now(),
+            &AtomicBool::new(true),
+        );
+        assert!(bridge
+            .approve_and_grant_via(&book, sid, "q", RuleScope::Session, |_| Some(Arc::new(
+                Mutex::new(Broken)
+            )),)
+            .is_err());
+        assert_eq!(tracker.snapshot()[sid], (false, 1));
+        assert_eq!(
+            approve(
+                &bridge,
+                &book,
+                sid,
+                "q",
+                RuleScope::Session,
+                &Pipe::default()
+            ),
+            Ok(None)
+        );
+        assert_eq!(tracker.snapshot()[sid], (false, 0));
+        tracker.on_exit(sid);
     }
 }

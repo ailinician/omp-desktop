@@ -252,6 +252,10 @@
        OMP_PATH_SETTING at call time; precedes
        app/use-browser.jsx, design/settings/rows-programs.jsx and app-live.jsx. -->
   <script src="app/browser.js"></script>
+  <!-- Phone remote: bounded transcript mapping and serial action handler.
+       Dependency-free IIFE; app/use-remote.jsx reads OMP_REMOTE_VIEW when
+       its effect mounts, before app-live.jsx renders. -->
+  <script src="app/remote-view.js"></script>
   <!-- DOM side of the panel: paints the screencast on the canvas, forwards
        input (createScreen).
        Dependency-free IIFE; reads window.OMP_BROWSER and OMP_KEYMAP at
@@ -425,6 +429,7 @@
   <script type="text/babel" src="design/settings/rows-agent.jsx"></script>
   <script type="text/babel" src="design/settings/rows-session.jsx"></script>
   <script type="text/babel" src="design/settings/rows-approvals.jsx"></script>
+  <script type="text/babel" src="design/settings/rows-remote.jsx"></script>
   <script type="text/babel" src="design/settings/shortcuts-editor.jsx"></script>
   <script type="text/babel" src="design/settings/page.jsx"></script>
 
@@ -471,6 +476,9 @@
   <!-- Browser panel hook; destructures window.OMP_BROWSER and
        window.OMP_BROWSER_SCREEN at top level. -->
   <script type="text/babel" src="app/use-browser.jsx"></script>
+  <!-- Phone publisher and actions; follows live.js and app/remote-view.js,
+       exports useRemote for app-live.jsx. -->
+  <script type="text/babel" src="app/use-remote.jsx"></script>
   <script type="text/babel" src="app/use-conversation-tree.jsx"></script>
   <!-- Git browser data flow; destructures window.OMP_GIT_BROWSER at top
        level. -->

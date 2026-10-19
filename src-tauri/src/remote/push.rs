@@ -1,0 +1,444 @@
+//! Web Push to the paired phones when a tab asks a question or finishes a
+//! long turn. The tracker's reader thread only enqueues; a worker thread
+//! encrypts and POSTs, so neither the reader nor the hub ever waits on a
+//! push service.
+
+use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use serde_json::json;
+use tauri::Url;
+
+use super::devices::{DeviceStore, PushSubscription};
+use super::push_crypto::{encrypt, Vapid};
+use super::push_subs::endpoint_ok;
+use super::settings::PushSettings;
+use super::tracker::{TrackerSink, Transition};
+
+const QUEUE: usize = 32;
+const THROTTLE: Duration = Duration::from_secs(30);
+/// Shorter turns finish while the user is most likely still looking.
+const MIN_TURN: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const TTL_SECS: &str = "3600";
+const MAX_TITLE_CHARS: usize = 80;
+const CONTACT_ERROR: &str = "push contact must be a real mailto: or https: address";
+
+/// Why a phone is being told something.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Question,
+    Finished,
+}
+
+impl Kind {
+    const fn body(self) -> &'static str {
+        match self {
+            Self::Question => "Question waiting",
+            Self::Finished => "Finished",
+        }
+    }
+
+    /// A question blocks the agent; a finished turn can wait.
+    const fn urgency(self) -> &'static str {
+        match self {
+            Self::Question => "high",
+            Self::Finished => "normal",
+        }
+    }
+}
+
+/// The title of a tab, looked up when a trigger fires.
+pub type TitleOf = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+/// Called after the last push error changed, so the status can follow.
+pub type OnChange = Arc<dyn Fn() + Send + Sync>;
+
+struct Message {
+    tab: String,
+    title: String,
+    body: &'static str,
+    urgency: &'static str,
+}
+
+enum Job {
+    Notify(Message),
+    Test(SyncSender<Result<(), String>>),
+}
+
+struct Shared {
+    dir: std::path::PathBuf,
+    devices: Arc<DeviceStore>,
+    settings: Mutex<PushSettings>,
+    vapid: Mutex<Option<Arc<Vapid>>>,
+    error: Mutex<Option<String>>,
+    changed: OnChange,
+    /// Checked before every send; tests swap it to reach a local server.
+    endpoint_ok: fn(&str) -> bool,
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Shared {
+    fn set_error(&self, error: Option<String>) {
+        let differs = {
+            let mut slot = locked(&self.error);
+            let differs = *slot != error;
+            *slot = error;
+            differs
+        };
+        if differs {
+            (self.changed)();
+        }
+    }
+}
+
+pub struct Pusher {
+    shared: Arc<Shared>,
+    titles: TitleOf,
+    tx: SyncSender<Job>,
+    last_sent: Mutex<HashMap<String, Instant>>,
+}
+
+impl Pusher {
+    /// `dir` is the app config dir that holds the VAPID key.
+    pub fn new(
+        dir: std::path::PathBuf,
+        devices: Arc<DeviceStore>,
+        titles: TitleOf,
+        changed: OnChange,
+    ) -> Self {
+        Self::with_endpoint_check(dir, devices, titles, changed, endpoint_ok)
+    }
+
+    fn with_endpoint_check(
+        dir: std::path::PathBuf,
+        devices: Arc<DeviceStore>,
+        titles: TitleOf,
+        changed: OnChange,
+        endpoint_ok: fn(&str) -> bool,
+    ) -> Self {
+        let shared = Arc::new(Shared {
+            dir,
+            devices,
+            settings: Mutex::new(PushSettings::default()),
+            vapid: Mutex::new(None),
+            error: Mutex::new(None),
+            changed,
+            endpoint_ok,
+        });
+        let (tx, rx) = mpsc::sync_channel(QUEUE);
+        let worker = Arc::clone(&shared);
+        let spawned = std::thread::Builder::new()
+            .name("remote-push".to_owned())
+            .spawn(move || work(&worker, &rx));
+        if let Err(error) = spawned {
+            eprintln!("[omp-desktop] could not start the push worker: {error}");
+        }
+        Self {
+            shared,
+            titles,
+            tx,
+            last_sent: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Apply the push settings; returns the public key phones subscribe
+    /// with while push is on and the key is usable.
+    pub fn configure(&self, settings: &PushSettings) -> Option<String> {
+        *locked(&self.shared.settings) = settings.clone(); // the worker reads its own copy
+        if !settings.enabled {
+            self.shared.set_error(None);
+            return None;
+        }
+        let vapid = {
+            // One lock for check and create: no second key can be written.
+            let mut slot = locked(&self.shared.vapid);
+            if slot.is_none() {
+                match Vapid::load_or_create(&self.shared.dir) {
+                    Ok(vapid) => *slot = Some(Arc::new(vapid)),
+                    Err(error) => {
+                        drop(slot);
+                        self.shared.set_error(Some(error));
+                        return None;
+                    }
+                }
+            }
+            slot.clone() // shared with the worker
+        };
+        let key = vapid.map(|vapid| vapid.public_b64.clone()); // returned to the caller
+        self.shared.set_error(contact_uri(&settings.contact).err());
+        key
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        locked(&self.shared.error).clone() // owned snapshot for the status
+    }
+
+    /// Queue a push for `tab`; at most one per tab every 30 s.
+    pub fn notify(&self, tab: &str, title: &str, kind: Kind) {
+        let now = Instant::now();
+        let mut sent = locked(&self.last_sent);
+        if sent
+            .get(tab)
+            .is_some_and(|last| now.saturating_duration_since(*last) < THROTTLE)
+        {
+            return;
+        }
+        let title = if title.is_empty() {
+            "OMP".to_owned()
+        } else {
+            let shown: String = title.chars().take(MAX_TITLE_CHARS).collect();
+            format!("OMP \u{b7} {shown}")
+        };
+        let job = Job::Notify(Message {
+            tab: tab.to_owned(),
+            title,
+            body: kind.body(),
+            urgency: kind.urgency(),
+        });
+        match self.tx.try_send(job) {
+            Ok(()) => {
+                if sent.len() >= QUEUE * 2 {
+                    sent.retain(|_, last| now.saturating_duration_since(*last) < THROTTLE);
+                }
+                sent.insert(tab.to_owned(), now);
+                drop(sent);
+            }
+            Err(TrySendError::Full(_)) => eprintln!("[omp-desktop] push queue full; dropped"),
+            Err(TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Send "Test notification" to every subscription of every device and
+    /// wait for the outcome.
+    pub fn test(&self) -> Result<(), String> {
+        if !locked(&self.shared.settings).enabled {
+            return Err("push notifications are off".to_owned());
+        }
+        let subscriptions: usize = self
+            .shared
+            .devices
+            .list()
+            .iter()
+            .map(|device| device.push.len())
+            .sum();
+        // Sends are sequential, each bounded by the timeout; one more
+        // timeout covers a job already running when the test is queued.
+        let wait = REQUEST_TIMEOUT * u32::try_from(subscriptions + 1).unwrap_or(u32::MAX);
+        let (reply, outcome) = mpsc::sync_channel(1);
+        self.tx
+            .try_send(Job::Test(reply))
+            .map_err(|_| "the push queue is busy".to_owned())?;
+        outcome
+            .recv_timeout(wait)
+            .map_err(|_| "the push test did not finish".to_owned())?
+    }
+}
+
+impl TrackerSink for Pusher {
+    fn changed(&self, sid: &str, transition: Option<Transition>) {
+        let kind = match transition {
+            Some(Transition::QuestionOpened) => Kind::Question,
+            Some(Transition::TurnFinished { ran }) if ran >= MIN_TURN => Kind::Finished,
+            _ => return,
+        };
+        {
+            let settings = locked(&self.shared.settings);
+            let wanted = match kind {
+                Kind::Question => settings.questions,
+                Kind::Finished => settings.finished,
+            };
+            if !settings.enabled || !wanted {
+                return;
+            }
+        }
+        let title = (self.titles)(sid).unwrap_or_default();
+        self.notify(sid, &title, kind);
+    }
+}
+
+fn work(shared: &Shared, jobs: &Receiver<Job>) {
+    // Explicit, so TLS never depends on which provider the tree enabled.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("push client: {error}"));
+    while let Ok(job) = jobs.recv() {
+        let (payload, urgency, reply) = match job {
+            Job::Notify(message) => (
+                json!({
+                    "title": message.title, "body": message.body,
+                    "tag": message.tab, "tab": message.tab,
+                }),
+                message.urgency,
+                None,
+            ),
+            Job::Test(reply) => (
+                json!({
+                    "title": "OMP", "body": "Test notification", "tag": "test", "tab": "",
+                }),
+                "high",
+                Some(reply),
+            ),
+        };
+        let result = client
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|client| deliver(shared, client, payload.to_string().as_bytes(), urgency));
+        if let Err(error) = &result {
+            eprintln!("[omp-desktop] push failed: {error}");
+        }
+        shared.set_error(result.clone().err());
+        if let Some(reply) = reply {
+            let _ = reply.send(result.and_then(|sent| {
+                if sent == 0 {
+                    Err("no device has push notifications enabled".to_owned())
+                } else {
+                    Ok(())
+                }
+            }));
+        }
+    }
+}
+
+/// Send to every subscription; the number delivered, or the first failure.
+fn deliver(
+    shared: &Shared,
+    client: &reqwest::blocking::Client,
+    payload: &[u8],
+    urgency: &str,
+) -> Result<usize, String> {
+    let settings = locked(&shared.settings).clone(); // the worker owns its copy
+    if !settings.enabled {
+        return Ok(0);
+    }
+    let contact = contact_uri(&settings.contact)?;
+    let vapid = locked(&shared.vapid)
+        .clone() // shared with the settings thread
+        .ok_or("push is not configured")?;
+    let mut sent = 0;
+    let mut failure = None;
+    for device in shared.devices.list() {
+        for sub in &device.push {
+            if !(shared.endpoint_ok)(&sub.endpoint) {
+                forget(&shared.devices, &device.id, &sub.endpoint);
+                continue;
+            }
+            // Revoked or unsubscribed while this batch ran: nothing goes out.
+            if !shared.devices.has_push(&device.id, &sub.endpoint) {
+                continue;
+            }
+            match send(client, &vapid, &contact, sub, payload, urgency) {
+                Ok(200..=299) => sent += 1,
+                Ok(404 | 410) => forget(&shared.devices, &device.id, &sub.endpoint),
+                Ok(status) => {
+                    failure.get_or_insert_with(|| format!("push service answered {status}"));
+                }
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+    }
+    failure.map_or(Ok(sent), Err)
+}
+
+/// The subscription is gone for good: drop it from its device.
+fn forget(devices: &DeviceStore, device_id: &str, endpoint: &str) {
+    if let Err(error) = devices.remove_push(device_id, endpoint) {
+        eprintln!("[omp-desktop] could not drop a push subscription: {error}");
+    }
+}
+
+/// POST one encrypted message; the HTTP status the push service answered.
+pub fn send(
+    client: &reqwest::blocking::Client,
+    vapid: &Vapid,
+    contact: &str,
+    sub: &PushSubscription,
+    payload: &[u8],
+    urgency: &str,
+) -> Result<u16, String> {
+    let decode = |text: &str| {
+        URL_SAFE_NO_PAD
+            .decode(text.trim_end_matches('='))
+            .map_err(|_| "bad subscription".to_owned())
+    };
+    let body = encrypt(&decode(&sub.p256dh)?, &decode(&sub.auth)?, payload)?;
+    let url = Url::parse(&sub.endpoint).map_err(|_| "bad subscription".to_owned())?;
+    let mut audience = format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default());
+    if let Some(port) = url.port() {
+        let _ = write!(audience, ":{port}");
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let jwt = vapid.jwt(&audience, contact, now)?;
+    let response = client
+        .post(url)
+        .header(
+            "Authorization",
+            format!("vapid t={jwt}, k={}", vapid.public_b64),
+        )
+        .header("Content-Encoding", "aes128gcm")
+        .header("Content-Type", "application/octet-stream")
+        .header("TTL", TTL_SECS)
+        .header("Urgency", urgency)
+        .body(body)
+        .send()
+        .map_err(|error| format!("push request failed: {}", error.without_url()))?;
+    Ok(response.status().as_u16())
+}
+
+/// The VAPID `sub` claim: Apple answers 403 to placeholder contacts, so
+/// only an address that can belong to somebody is accepted. A bare email
+/// address becomes `mailto:`.
+fn contact_uri(raw: &str) -> Result<String, String> {
+    let bad = || CONTACT_ERROR.to_owned();
+    let raw = raw.trim();
+    let uri = if raw.contains(':') || !raw.contains('@') {
+        raw.to_owned()
+    } else {
+        format!("mailto:{raw}")
+    };
+    let host = if let Some(address) = uri.strip_prefix("mailto:") {
+        let address = address.split('?').next().unwrap_or_default();
+        let (local, domain) = address.rsplit_once('@').ok_or_else(bad)?;
+        if local.is_empty() {
+            return Err(bad());
+        }
+        domain.to_owned()
+    } else if uri.starts_with("https://") {
+        Url::parse(&uri)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .ok_or_else(bad)?
+    } else {
+        return Err(bad());
+    };
+    let host = host.to_ascii_lowercase();
+    let placeholder = ["invalid", "test", "example", "localhost"]
+        .iter()
+        .any(|tld| host == *tld || host.ends_with(&format!(".{tld}")))
+        || ["example.com", "example.org", "example.net"]
+            .iter()
+            .any(|name| host == *name);
+    if !host.contains('.') || placeholder {
+        return Err(bad());
+    }
+    Ok(uri)
+}
+
+#[cfg(test)]
+#[path = "push_tests.rs"]
+mod tests;

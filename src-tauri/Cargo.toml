@@ -23,6 +23,10 @@ notify = "8"
 gix = "0.87"
 open = { version = "5", features = ["shellexecute-on-windows"] }
 sha2 = "0.11"
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 # Read-only access to omp's own `agent.db` (model MRU for the picker, #11).
 # `bundled` compiles SQLite in, so no system library is needed on any OS.
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -34,6 +38,11 @@ base64 = "0.22"
 # Agent-facing CDP endpoint (`browser/proxy/ws.rs`): the server side of the
 # agent's plain `ws://` loopback connection, so `handshake` only - no TLS.
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# The pairing QR code, rendered as an SVG string (`remote/qr.rs`).
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# Web Push delivery (`remote/push.rs`): blocking client on a worker thread. The
+# same rustls (ring, no aws-lc) build tauri-plugin-updater already uses.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

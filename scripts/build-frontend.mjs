@@ -56,7 +56,8 @@ mkdirSync(out);
 // The filter only skips `.jsx`: on Windows, Node < 22.4 hands it `\\?\`-
 // prefixed paths, so matching dropped files by relative name there silently
 // fails. Delete them explicitly instead — without `force`, so a renamed
-// vendored file fails the build.
+// vendored file fails the build. This recursive copy includes src/remote/
+// verbatim at dist/remote/; the remote server serves its assets at "/".
 cpSync(src, out, { recursive: true, filter: (path) => !path.endsWith(".jsx") });
 for (const name of DROPPED) rmSync(join(out, name));
 
@@ -113,6 +114,19 @@ if (/<script\b(?![^>]*\ssrc=)[^>]*>/i.test(html)) {
 }
 if (/<[a-z][^>]*\son[a-z]+\s*=/i.test(html)) {
   throw new Error("dist/index.html: inline on* event handler attribute (the release CSP blocks it)");
+}
+// The phone is a separate document under a stricter CSP, with no Babel or
+// inline styles. Keep its root-relative URLs unchanged: the remote server
+// maps these assets itself and sends Cache-Control: no-store.
+const remoteHtml = readFileSync(join(src, "remote", "index.html"), "utf8");
+if (/<script\b(?![^>]*\ssrc=)[^>]*>/i.test(remoteHtml)) {
+  throw new Error("remote/index.html: inline <script> (the phone CSP blocks it)");
+}
+if (/<[a-z][^>]*\son[a-z]+\s*=/i.test(remoteHtml)) {
+  throw new Error("remote/index.html: inline on* event handler attribute (the phone CSP blocks it)");
+}
+if (/<style\b|<[a-z][^>]*\sstyle\s*=/i.test(remoteHtml)) {
+  throw new Error("remote/index.html: inline style (the phone CSP blocks it)");
 }
 const cspOf = (file) => JSON.parse(readFileSync(join(root, "src-tauri", file), "utf8")).app?.security?.csp;
 const devCsp = cspOf("tauri.conf.json");
