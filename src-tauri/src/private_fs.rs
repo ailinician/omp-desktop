@@ -3,7 +3,7 @@
 //! copies): creating them, finding the per-process ones an earlier run left
 //! behind, and removing them.
 
-use std::io;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -14,6 +14,39 @@ pub fn private_dirs(recursive: bool) -> std::fs::DirBuilder {
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder
+}
+
+/// Create `path` exclusively with `contents`, private to the user (unix
+/// `0600`). `O_EXCL` never follows a symlink nor reuses a file somebody else
+/// put there; a failed write removes the half-written file again.
+pub fn create_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    create_and_finish(path, contents, |_| Ok(()))
+}
+
+/// Write `bytes` to `temp_path` (created exclusively with mode `0600`), sync
+/// it, and rename it over `path`, removing `temp_path` on failure.
+pub fn write_private_via(path: &Path, temp_path: &Path, bytes: &[u8]) -> io::Result<()> {
+    create_and_finish(temp_path, bytes, |file| {
+        file.sync_all()?;
+        std::fs::rename(temp_path, path)
+    })
+}
+
+fn create_and_finish(
+    path: &Path,
+    bytes: &[u8],
+    after_write: impl FnOnce(std::fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    let result = file.write_all(bytes).and_then(|()| after_write(file));
+    if result.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    result
 }
 
 /// The subdirectories of `root` named by a process id, with that pid: the

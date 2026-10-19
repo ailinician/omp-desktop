@@ -46,8 +46,6 @@ function useBridgeSnapshot(bridge, setters) {
 function useThemeEffect(t) {
   React.useEffect(() => {
     const root = document.documentElement;
-    root.classList.remove("theme-aurora", "theme-phosphor", "theme-daylight");
-    root.classList.add(`theme-${t.theme}`);
     root.classList.remove("density-cozy", "density-compact", "density-dense");
     root.classList.add(`density-${t.density}`);
     if (t.monoChat) root.classList.add("mono-chat");
@@ -55,14 +53,7 @@ function useThemeEffect(t) {
     // The accent override and its three derived tokens (app/accent.js), so
     // focus rings, glows and the xterm selection follow it. Cleared first:
     // an accent equal to the theme's own keeps the theme's hand-tuned set.
-    const A = window.OMP_ACCENT;
-    for (const name of A.TOKEN_NAMES) root.style.removeProperty(name);
-    const tokens = t.accent ? A.accentTokens(t.accent) : null;
-    if (tokens && !A.sameColor(getComputedStyle(root).getPropertyValue("--accent").trim(), t.accent)) {
-      for (const [name, value] of Object.entries(tokens)) root.style.setProperty(name, value);
-    } else if (t.accent && !tokens) {
-      root.style.setProperty("--accent", t.accent);
-    }
+    window.OMP_ACCENT.applyThemeTokens(root, t.theme, t.accent);
     if (t.fontSize) root.style.fontSize = `${t.fontSize}%`;
   }, [t.theme, t.density, t.accent, t.monoChat, t.fontSize]);
 }

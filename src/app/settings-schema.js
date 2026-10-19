@@ -159,6 +159,19 @@
         custom("version", "Version", "The installed OMP Desktop and the newest release.", "version update check skipped"),
       ] },
     ] },
+    { id: "remote", icon: "live", title: "Remote access", blurb: "Read your sessions, answer questions and steer the agent from a phone on your network. Off by default; nothing listens until you enable it.", groups: [
+      { name: "Server", src: "remote.json", rows: [
+        custom("remoteServer", "Server", "The interface, port and name the phone connects to. The server only listens on the chosen interface.", "remote phone mobile server interface port host name https lan vpn"),
+        custom("remoteCert", "Certificate", "A generated certificate is self-signed; your own files (for example for `omp.home.lan`) let the phone trust the page.", "tls https certificate fingerprint pem key"),
+      ] },
+      { name: "Phones", rows: [
+        custom("remotePair", "Pair a phone", "Shows a one-time QR code; scanning it links that phone.", "qr code pairing link"),
+        custom("remoteDevices", "Paired phones", "Rename a phone or revoke its access.", "devices revoke rename"),
+      ] },
+      { name: "Notifications", rows: [
+        custom("remotePush", "Push notifications", "Tell the phone when a question waits or a turn finished, even with the page closed.", "web push vapid notification contact"),
+      ] },
+    ] },
     { id: "approvals", icon: "check", title: "Approvals", sep: true, blurb: "When the agent asks before it runs a tool.", groups: [
       { name: "Approval mode", src: "approval-mode.json", rows: [
         custom("approvalMode", "Tool approval mode", "When the agent asks before it runs a tool: a default for every project, and projects that override it. A change restarts omp in the affected open tabs; conversations continue.", "yolo write always ask permission project override default"),

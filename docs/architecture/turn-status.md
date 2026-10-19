@@ -9,3 +9,29 @@
 - **Stop** (`OMP_BRIDGE.stopRetry`, the row's button): `abort_retry` while the row waits — it only cancels the sleep, so the run ends on the last failure (`prompt_result` error, `retryable: true`) without `abort`'s other effects (goal mode, title generation, compaction, handoff). Sent while an attempt is in flight it is a no-op and omp keeps retrying (measured), so the `attempting` phase sends the id-less `abort`, as Esc does.
 - **Job rows**: the `async-result` custom message (the job result that wakes the agent) adds one live-only `kind: "job"` row per job (`finishedJobsOf`) above the reply it triggers. No omp message stands behind a row, so the merge keeps it in place; a relaunch drops it.
 - Not used: `prompt_result` for the auto-rename gates (`lastTurnOk` from `message_end` also covers runs no prompt started, such as a job's wake-up) and `get_state.isSettled`. The planned consumer of an id-correlated `prompt_result` plus `session_settled` is #18's on-close routine.
+
+## Remote status for all tabs
+
+`src-tauri/src/remote/tracker.rs` keeps process-level busy and open-dialog
+counts independently of the active webview tab. The stdout reader feeds its
+already parsed frames immediately after `ext_ui::record`: `agent_start` starts
+timing a turn; a yielding `agent_end` (`yielded`, else `isTerminal`, else yes)
+clears busy and unanswered dialogs and reports the elapsed time, while one that
+continues into another run changes nothing. `select`, `confirm`, `input`,
+`editor` and `ask` requests with string ids (at most 256 bytes) count as
+questions, at most 64 open per session; duplicate ids do not open another one.
+omp's own `cancel` request (`targetId`) closes that question. Auto-approved
+tool prompts and retired readers are excluded. Details of the remote consumer:
+`remote-access.md`.
+
+`AgentBridge::send` and the atomic approval-and-grant path remove an answered id
+only after writing and flushing the response successfully. Natural process exit,
+explicit stop, and replacement remove the session. Unrelated streaming frames
+need no tracker lock or parse.
+Question membership uses a hash set; updates never scan other tabs or dialogs.
+Clearing a finished turn releases its remaining questions.
+
+One replaceable `Arc<dyn TrackerSink>` receives committed changes after both
+tracker locks are released. Sinks must only enqueue work; transport and push
+fan-out belong to the remote manager, not the stdout reader. The tracker reports
+every timed finish; push consumers apply the 30-second notification threshold.

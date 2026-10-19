@@ -59,4 +59,21 @@ check("sameColor: case and shorthand insensitive; non-hex never matches", () => 
   assert.equal(A.sameColor("red", "red"), false);
 });
 
+check("applyThemeTokens switches theme class and sets derived tokens only when accent differs", () => {
+  const classes = new Set(["theme-phosphor"]);
+  const props = new Map([["--accent", "#8AF0C8"]]);
+  const root = {
+    classList: { remove: (...c) => c.forEach(x => classes.delete(x)), add: c => classes.add(c) },
+    style: { removeProperty: k => props.delete(k), setProperty: (k, v) => props.set(k, v) },
+  };
+  globalThis.getComputedStyle = () => ({ getPropertyValue: () => "#8AF0C8" });
+  A.applyThemeTokens(root, "aurora", "#8af0c8");
+  assert.deepEqual([...classes], ["theme-aurora"]);
+  assert.equal(props.size, 0, "matching theme accent leaves tokens unset");
+  A.applyThemeTokens(root, "daylight", "#FF7AC6");
+  assert.deepEqual([...classes], ["theme-daylight"]);
+  assert.equal(props.get("--accent"), "#ff7ac6");
+  assert.equal(props.get("--accent-soft"), "rgba(255, 122, 198, 0.12)");
+});
+
 console.log(`accent: ${passed} checks passed`);

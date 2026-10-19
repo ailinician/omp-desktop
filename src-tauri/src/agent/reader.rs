@@ -132,12 +132,7 @@ fn try_auto_approve<W: std::io::Write>(
         return None;
     }
     let id = approval::approval_request_id(frame)?;
-    let response = serde_json::json!({
-        "type": "extension_ui_response",
-        "id": id,
-        "value": "Approve",
-    })
-    .to_string();
+    let response = approvals::approve_answer(id);
     if let Ok(mut w) = stdin.lock() {
         let _ = writeln!(*w, "{response}");
         let _ = w.flush();
@@ -218,6 +213,60 @@ fn should_emit(alive: &AtomicBool) -> bool {
     alive.load(Ordering::Acquire)
 }
 
+/// Mirror frames from live processes only; auto-approved requests never open
+/// a human dialog. No webview listener is needed for a background tab.
+fn record_tracker_frame(
+    sid: &str,
+    frame_type: Option<&str>,
+    frame: Option<&serde_json::Value>,
+    auto_approved: bool,
+    alive: &AtomicBool,
+) {
+    if !auto_approved {
+        crate::remote::tracker::tracker().on_frame(
+            sid,
+            frame_type,
+            frame,
+            std::time::Instant::now(),
+            alive,
+        );
+    }
+}
+
+fn retire_reader_session(
+    sessions: &Mutex<HashMap<String, BridgeInner>>,
+    sid: &str,
+    gen: u64,
+    alive: &AtomicBool,
+) -> bool {
+    let mut announce = false;
+    if let Ok(mut s) = sessions.lock() {
+        match s.get(sid).map(|inner| inner.gen) {
+            Some(g) if g == gen => {
+                // Still ours — we're the last stop for this id. Clear
+                // `alive` and the tracker state before giving up the
+                // entry so a concurrent replacement cannot have its own
+                // tracker state wiped after the lock is released.
+                s.remove(sid);
+                alive.store(false, Ordering::Release);
+                announce = true;
+            }
+            // A fresher incarnation already owns the id — stay mute,
+            // its own reader speaks for it now.
+            Some(_) => {}
+            // Entry already gone: a racing `stop_session` or a
+            // superseding `start_session` removed it and cleared
+            // `alive` and the tracker inside that same critical section
+            // before releasing the `sessions` lock (see `agent/mod.rs`).
+            None => announce = should_emit(alive),
+        }
+        if announce {
+            crate::remote::tracker::tracker().on_exit(sid);
+        }
+    }
+    announce
+}
+
 pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
     let StdoutReaderConfig {
         sessions,
@@ -284,23 +333,25 @@ pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
                     // stdin and replaced with a synthetic notice — the human
                     // never sees the original ask, but does see that it was
                     // auto-approved.
-                    let text = parsed
-                        .as_ref()
-                        .and_then(|frame| {
-                            auto_approve_or_track(
-                                frame,
-                                frame_type,
-                                &rule_book,
-                                &sid,
-                                project_root.as_deref(),
-                                &stdin,
-                                &approvals,
-                            )
-                        })
-                        .unwrap_or(sanitized);
+                    let notice = parsed.as_ref().and_then(|frame| {
+                        auto_approve_or_track(
+                            frame,
+                            frame_type,
+                            &rule_book,
+                            &sid,
+                            project_root.as_deref(),
+                            &stdin,
+                            &approvals,
+                        )
+                    });
+                    let auto_approved = notice.is_some();
                     // One allocation for the line, shared with the journal
                     // by refcount rather than copied into it.
-                    let shared: std::sync::Arc<str> = std::sync::Arc::from(text);
+                    let shared: Arc<str> = Arc::from(notice.unwrap_or(sanitized));
+                    // Record in the tracker before exposing the frame in the
+                    // journal: a background tab activated in between cannot
+                    // replay and answer a question before the tracker knows it.
+                    record_tracker_frame(&sid, frame_type, parsed.as_ref(), auto_approved, &alive);
                     let seq = journal.lock().map_or(0, |mut j| j.push(shared.clone()));
                     // After the push, stamped with its seq: a snapshot taken
                     // in between names an older seq, so the frontend still
@@ -339,30 +390,7 @@ pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
         // stayed `alive` forever: nothing else ever clears the flag for an
         // incarnation that retires on its own, since `reap_and_clear_grants`
         // only runs when *something else* supersedes or reaps this entry.
-        let mut announce = false;
-        if let Ok(mut s) = sessions.lock() {
-            match s.get(&sid).map(|inner| inner.gen) {
-                Some(g) if g == gen => {
-                    // Still ours — we're the last stop for this id. Clear
-                    // `alive` ourselves before giving up the entry.
-                    s.remove(&sid);
-                    alive.store(false, Ordering::Release);
-                    announce = true;
-                }
-                // A fresher incarnation already owns the id — stay mute,
-                // its own reader speaks for it now.
-                Some(_) => {}
-                // Entry already gone: a racing `stop_session` or a
-                // superseding `start_session` removed it and cleared
-                // `alive` inside that same critical section before
-                // releasing the `sessions` lock (see `agent/mod.rs`), so
-                // `should_emit` is guaranteed to already read `false`
-                // here — kept as an explicit defensive check rather than
-                // hard-coding `false`, in case a future removal path ever
-                // forgets to clear it under the lock.
-                None => announce = should_emit(&alive),
-            }
-        }
+        let announce = retire_reader_session(&sessions, &sid, gen, &alive);
         // Empty payload = clean exit; non-empty = error reason. See the
         // AgentBridge doc-comment for the full event contract.
         if announce {
@@ -947,5 +975,36 @@ mod tests {
         let reason = tail.to_reason().expect("the oversized line must survive");
         assert!(!reason.contains("superseded"));
         assert!(reason.starts_with('z'));
+    }
+
+    #[test]
+    fn tracker_hook_records_background_frames_but_not_auto_approvals_or_retired_readers() {
+        let sid = "tracker-reader-background";
+        let tracker = crate::remote::tracker::tracker();
+        let alive = AtomicBool::new(true);
+        record_tracker_frame(sid, Some("agent_start"), None, false, &alive);
+        record_tracker_frame(
+            sid,
+            Some("extension_ui_request"),
+            Some(&approval_prompt("q1", "bash")),
+            false,
+            &alive,
+        );
+        record_tracker_frame(
+            sid,
+            Some("extension_ui_request"),
+            Some(&approval_prompt("automatic", "edit")),
+            true,
+            &alive,
+        );
+        assert_eq!(tracker.snapshot()[sid], (true, 1));
+        alive.store(false, Ordering::Release);
+        record_tracker_frame(sid, Some("agent_end"), None, false, &alive);
+        assert_eq!(
+            tracker.snapshot()[sid],
+            (true, 1),
+            "retired reader must not finish a replacement turn"
+        );
+        tracker.on_exit(sid);
     }
 }
