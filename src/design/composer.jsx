@@ -260,6 +260,13 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   React.useEffect(() => {
     if (!promptInsert || promptInsert.nonce === seenInsertRef.current) return;
     seenInsertRef.current = promptInsert.nonce;
+    // A widget insert for a freshly opened tab (`sessionId`, insert target
+    // new-tab) goes into that tab's own draft, appended like any widget insert.
+    if (promptInsert.sessionId) {
+      updateDraft(promptInsert.sessionId, d => ({ ...d, text: window.OMP_WIDGETS.appendToDraft(d.text, promptInsert.text), historyNav: null }));
+      requestAnimationFrame(() => taRef.current?.focus());
+      return;
+    }
     replaceDraft(promptInsert.append ? window.OMP_WIDGETS.appendToDraft(text, promptInsert.text) : promptInsert.text);
     const images = promptInsert.images ?? [];
     if (images.length === 0) return;

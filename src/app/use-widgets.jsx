@@ -112,7 +112,7 @@ function useWidgets({ bridge, activeSessionId, railVisible, tweaks }) {
       const k = _UW.runKey(key, id);
       const run = runsRef.current.get(k);
       const parsed = _UW.parsedLast(parseCacheRef.current, k, run?.last);
-      out.push({ id, title: p.title, resetKey: `${k}:${run?.seq ?? 0}`, run: _UW.cardRun(run, parsed) });
+      out.push({ id, title: p.title, insert: p.insert, resetKey: `${k}:${run?.seq ?? 0}`, run: _UW.cardRun(run, parsed) });
     }
     return out;
   }, [config.plugins, activeIds, hiddenIds, sessionId, runsVersion]); // eslint-disable-line react-hooks/exhaustive-deps

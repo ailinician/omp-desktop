@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Rail widgets: a plugin entry in `widgets.json` can set `"insert": { "target": "new-tab", "project": "~/GIT/work/inbox" }`. Clicking `+` on one of its items then opens a new tab in that folder and puts the text into the new tab's prompt box (never sent); ⌥-click appends to the current tab's draft as before. The default stays `"draft"`. A missing, relative or non-existent `project` shows an error card and falls back to the draft. Only `widgets.json` sets the target; plugin output cannot. See `docs/widgets.md`.
+
 ## [0.11.0] - 2026-10-17
 
 ### Added

@@ -29,7 +29,7 @@ function WidgetErrorCard({ title, error }) {
 /** `source`: set for content another program pushes (omp extensions, #52)
  *  rather than a plugin run — shown as the card's chip in place of the run
  *  timing, with the accent border. */
-function WidgetCard({ title, run, onRefresh, onInsert, source }) {
+function WidgetCard({ title, run, onRefresh, onInsert, insertCfg, source }) {
   const state = run?.state ?? "idle";
   const widget = run?.widget ?? null;
   const toneClass = state === "error" ? "tone-error" : state === "ok" && widget ? `tone-${widget.status}` : "tone-neutral";
@@ -55,7 +55,7 @@ function WidgetCard({ title, run, onRefresh, onInsert, source }) {
       )}
       {(state === "ok" || stale) && widget && (
         <>
-          <_WC_Blocks blocks={widget.blocks} onInsert={onInsert} />
+          <_WC_Blocks blocks={widget.blocks} onInsert={onInsert} insertCfg={insertCfg} />
           {widget.skipped > 0 && <div className="wdg-note mono">{widget.skipped} unsupported block{widget.skipped > 1 ? "s" : ""}</div>}
         </>
       )}

@@ -2,6 +2,8 @@
 //   parseOutput(stdout)        plugin stdout → validated, capped widget v1 or error
 //   insertText(item) / safeUrl(url) / appendToDraft(draft, insert)
 //                              what a click may do
+//   insertAction(cfg, altKey) / insertTitle(cfg)
+//                              where an insert click goes (widgets.json `insert`)
 //   runKey / mergeRun / cardRun / parsedLast
 //                              the hook's run bookkeeping (events → card props)
 //   hiddenPluginIds(tweaks, ids) / argvDisplay(arg)
@@ -133,6 +135,26 @@
     return (/\s$/.test(base) ? base : base + " ") + text + " ";
   }
 
+  // insertAction: where one insert click puts its text. `cfg` is the plugin's
+  // `insert` from widgets.json (Rust-validated: a `new-tab` always carries an
+  // existing project) — never from plugin output. Anything but a complete
+  // `new-tab`, or ⌥/Alt held, is the active tab's draft.
+  function insertAction(cfg, altKey) {
+    if (!altKey && cfg?.target === "new-tab" && typeof cfg.project === "string" && cfg.project) {
+      return { target: "new-tab", project: cfg.project };
+    }
+    return { target: "draft" };
+  }
+
+  // insertTitle: the insert button's tooltip. A new-tab plugin names the
+  // folder and the ⌥-click override.
+  function insertTitle(cfg) {
+    const a = insertAction(cfg, false);
+    if (a.target !== "new-tab") return "insert into prompt";
+    const folder = a.project.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || a.project;
+    return `Click: new tab in ${folder} · ⌥-click: insert here`;
+  }
+
   // Namespaced per source so #52's extension widgets can use `widget:ext:<key>`.
   const TWEAK_PREFIX = "widget:plugin:";
   const tweakKey = (id) => `${TWEAK_PREFIX}${id}`;
@@ -214,7 +236,7 @@
   }
 
   window.OMP_WIDGETS = {
-    parseOutput, insertText, safeUrl, appendToDraft, tweakKey, hiddenPluginIds, argvDisplay, relativeTime,
+    parseOutput, insertText, safeUrl, appendToDraft, insertAction, insertTitle, tweakKey, hiddenPluginIds, argvDisplay, relativeTime,
     runKey, mergeRun, parsedLast, cardRun,
   };
 })();

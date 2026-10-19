@@ -75,7 +75,8 @@ Settings → Rail has one toggle per enabled plugin, under the toggles for the b
       "timeoutMs": 10000,
       "intervalMs": 60000,
       "enabled": true,
-      "scope": "tab"
+      "scope": "tab",
+      "insert": { "target": "new-tab", "project": "~/GIT/work/inbox" }
     }
   ]
 }
@@ -93,6 +94,7 @@ Settings → Rail has one toggle per enabled plugin, under the toggles for the b
 | `intervalMs` | no | Periodic refresh. Absent or `0` means none. Clamped to 15000..3600000 (15 s to 1 h). |
 | `enabled` | no | Default `true`. A disabled plugin is never offered for approval and never runs, and it has no Settings toggle. |
 | `scope` | no | `"tab"` (default) or `"global"`; anything else rejects the entry. A `tab` plugin keeps one result per tab. A `global` plugin keeps one result for the whole app, computed with the active tab's context. |
+| `insert` | no | Where a click on an item's `+` button puts its text: `{ "target": "draft" \| "new-tab", "project": "<path>" }`. `draft` (default, the same as leaving `insert` out) appends to the active tab's draft. `new-tab` opens a **new** tab in `project` and puts the text into that tab's draft. `project` is required for `new-tab`: an absolute path, or `~/…` (expanded like `command`), naming an existing directory when the config is loaded. There is no `send` option: a click never submits a prompt. See [Insert target](#insert-target). |
 
 How the file is read:
 
@@ -100,8 +102,20 @@ How the file is read:
 - At most 32 entries are read. Any beyond that are ignored, with one error card.
 - A malformed entry (bad `id`, duplicate `id`, empty or relative `command`, unknown `scope`) is skipped with an error card naming it. The other plugins still run.
 - An unknown key (a typo such as `"intervallMs"`), an unknown trigger name, or `"interval"` in `triggers` adds an error card naming the key or value. The entry itself stays valid.
+- A bad `insert` (not an object, unknown `target`, `new-tab` without `project`, a relative or missing `project`, a path that is not a directory) adds an error card naming the problem. The plugin still runs and inserts into the draft. An unknown key inside `insert` (`insert.send`) is reported like any other unknown key.
 - A missing `widgets.json` means no plugins and no error.
 - If the desktop cannot determine its config directory, the plugins row says so and nothing runs.
+
+### Insert target
+
+```json
+{ "id": "mrs", "command": ["bash", "~/.omp-desktop/widgets/mrs.sh"],
+  "insert": { "target": "new-tab", "project": "~/GIT/work/inbox" } }
+```
+
+With `new-tab`, clicking `+` on a list item or `text` block opens a new tab in `project` (always a new tab, even when one for that folder is already open), moves focus to it and puts the insert text into its prompt box. The text is not sent. Holding ⌥ (Alt) while clicking uses the default instead: the text is appended to the active tab's draft. The `+` button's tooltip says so (`Click: new tab in inbox · ⌥-click: insert here`). The `url` button of an item still opens the URL; only the insert action follows the target. If the new tab cannot start (for example `omp` is missing), the usual open-failure note appears and nothing is inserted.
+
+The target comes **only** from `widgets.json`. Plugin output is untrusted and cannot choose or change it: an `insert` key in the output is ignored like any other unknown field, so a plugin cannot open tabs in folders you did not configure.
 
 ## Approval
 
@@ -303,7 +317,7 @@ Neither runs until you approve the new fingerprint in the rail. This matters bec
 
 **What approval does not protect against:**
 
-- **The rest of the entry.** The fingerprint pins only `command` and the files it names. Edits to `match`, `triggers`, `intervalMs`, `timeoutMs`, `scope`, `title` and `enabled` take effect on the next reload without a new approval. So whoever can edit `widgets.json` can, for example, widen an approved plugin's `match.path` to `/` so that it runs in every project, untrusted clones included, or turn an approved plugin you disabled back on. Approve only commands you are willing to run in any project.
+- **The rest of the entry.** The fingerprint pins only `command` and the files it names. Edits to `match`, `triggers`, `intervalMs`, `timeoutMs`, `scope`, `insert`, `title` and `enabled` take effect on the next reload without a new approval. So whoever can edit `widgets.json` can, for example, widen an approved plugin's `match.path` to `/` so that it runs in every project, untrusted clones included, or turn an approved plugin you disabled back on. Approve only commands you are willing to run in any project.
 - **Files the fingerprint does not cover.**
   - A program resolved via `PATH` (`bash`, `python3`, `node`) is hashed by name only.
   - So is anything the script loads by itself: modules, sourced files, config files, or packages fetched by `uv`/`npx`.

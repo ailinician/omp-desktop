@@ -52,6 +52,18 @@ pub enum Scope {
     Global,
 }
 
+/// Where a click on a plugin's insert button puts the text. Read from
+/// `widgets.json` only, never from plugin output.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "target", rename_all = "kebab-case")]
+pub enum InsertTarget {
+    /// Append to the active tab's draft (the default).
+    Draft,
+    /// Open a new tab on `project` (absolute, `~/` expanded, an existing
+    /// directory at load) and put the text into its draft.
+    NewTab { project: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginEntry {
     pub id: String,
@@ -69,6 +81,7 @@ pub struct PluginEntry {
     pub interval_ms: Option<u64>,
     pub enabled: bool,
     pub scope: Scope,
+    pub insert: InsertTarget,
 }
 
 impl PluginEntry {
@@ -137,6 +150,9 @@ struct RawEntry {
     interval_ms: Option<u64>,
     enabled: Option<bool>,
     scope: Option<String>,
+    /// Kept raw: a malformed `insert` must fall back to the draft with an
+    /// error card, not reject the entry (see [`parse_insert`]).
+    insert: Option<serde_json::Value>,
     /// Every key not named above; each is reported as a likely typo. serde's
     /// `flatten` needs a map; only the key names matter.
     #[serde(flatten)]
@@ -148,6 +164,15 @@ struct RawEntry {
 struct RawMatch {
     path: Option<String>,
     remote: Option<String>,
+    #[serde(flatten)]
+    #[allow(clippy::zero_sized_map_values)]
+    extra: BTreeMap<String, IgnoredAny>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawInsert {
+    target: Option<String>,
+    project: Option<String>,
     #[serde(flatten)]
     #[allow(clippy::zero_sized_map_values)]
     extra: BTreeMap<String, IgnoredAny>,
@@ -262,6 +287,74 @@ fn parse_triggers(list: Option<Vec<String>>, id: &str, warnings: &mut Vec<String
     out
 }
 
+/// Parses `insert`. Any problem is a warning and the target stays `Draft`:
+/// the plugin itself still runs, only the click target is refused.
+fn parse_insert(
+    raw: Option<serde_json::Value>,
+    label: &str,
+    home: Option<&str>,
+    warnings: &mut Vec<String>,
+) -> InsertTarget {
+    let Some(value) = raw.filter(|v| !v.is_null()) else {
+        return InsertTarget::Draft;
+    };
+    let insert = match serde_json::from_value::<RawInsert>(value) {
+        Ok(i) => i,
+        Err(e) => {
+            warnings.push(format!(
+                "{label}: insert must be an object with string \"target\" and \"project\" ({e}); inserting into the draft"
+            ));
+            return InsertTarget::Draft;
+        }
+    };
+    for key in insert.extra.keys() {
+        warnings.push(format!("{label}: unknown key \"insert.{key}\""));
+    }
+    match insert.target.as_deref() {
+        None | Some("draft") => {
+            if insert.project.is_some() {
+                warnings.push(format!(
+                    "{label}: insert.project is only used with insert.target \"new-tab\""
+                ));
+            }
+            InsertTarget::Draft
+        }
+        Some("new-tab") => {
+            let Some(mut project) = insert.project.filter(|p| !p.is_empty()) else {
+                warnings.push(format!(
+                    "{label}: insert.target \"new-tab\" needs insert.project; inserting into the draft"
+                ));
+                return InsertTarget::Draft;
+            };
+            if expand_home(std::slice::from_mut(&mut project), home).is_err() {
+                warnings.push(format!(
+                    "{label}: cannot expand ~ in insert.project: no home directory; inserting into the draft"
+                ));
+                return InsertTarget::Draft;
+            }
+            if !Path::new(&project).is_absolute() {
+                warnings.push(format!(
+                    "{label}: insert.project \"{project}\" must be an absolute path or start with ~/; inserting into the draft"
+                ));
+                return InsertTarget::Draft;
+            }
+            if !Path::new(&project).is_dir() {
+                warnings.push(format!(
+                    "{label}: insert.project \"{project}\" is not an existing directory; inserting into the draft"
+                ));
+                return InsertTarget::Draft;
+            }
+            InsertTarget::NewTab { project }
+        }
+        Some(other) => {
+            warnings.push(format!(
+                "{label}: unknown insert.target \"{other}\" (expected draft or new-tab); inserting into the draft"
+            ));
+            InsertTarget::Draft
+        }
+    }
+}
+
 /// Validates one entry. Problems that keep the entry usable (unknown keys,
 /// unknown triggers) go to `warnings`; the rest reject the entry.
 fn validate(
@@ -333,6 +426,7 @@ fn validate(
             .map_err(|()| format!("{label}: cannot expand ~ in match.path: no home directory"))?;
     }
     let triggers = parse_triggers(raw.triggers, &id, warnings);
+    let insert = parse_insert(raw.insert, &label, home.as_deref(), warnings);
     // `title` falls back to the id and the entry keeps both, so one copy is unavoidable.
     let title = match raw.title {
         Some(t) if !t.is_empty() => t,
@@ -349,6 +443,7 @@ fn validate(
         interval_ms,
         enabled: raw.enabled.unwrap_or(true),
         scope,
+        insert,
     })
 }
 
@@ -367,6 +462,7 @@ pub fn test_entry(command: &[&str]) -> PluginEntry {
         interval_ms: None,
         enabled: true,
         scope: Scope::Tab,
+        insert: InsertTarget::Draft,
     }
 }
 
@@ -415,6 +511,7 @@ mod tests {
             interval_ms: None,
             enabled: true,
             scope: Scope::Tab,
+            insert: InsertTarget::Draft,
         }
     }
 
@@ -736,6 +833,140 @@ mod tests {
             CONFIG_TRIGGERS
         );
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// `new-tab` project directories: one real, one missing, in the temp dir.
+    fn insert_dirs(name: &str) -> (PathBuf, PathBuf) {
+        let real = std::env::temp_dir().join(format!("omp-insert-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&real).expect("project dir");
+        let missing = real.join("missing");
+        (real, missing)
+    }
+
+    fn insert_body(insert: &str) -> String {
+        format!(r#"{{"version":1,"plugins":[{{"id":"a","command":["true"],"insert":{insert}}}]}}"#)
+    }
+
+    #[test]
+    fn insert_defaults_to_draft() {
+        let c = load_body(
+            "insert-none",
+            br#"{"version":1,"plugins":[{"id":"a","command":["true"]}]}"#,
+        )
+        .expect("ok");
+        assert_eq!(c.plugins[0].insert, InsertTarget::Draft);
+        assert_eq!(c.errors, Vec::<String>::new());
+        let d = load_body(
+            "insert-draft",
+            insert_body(r#"{"target":"draft"}"#).as_bytes(),
+        )
+        .expect("ok");
+        assert_eq!(d.plugins[0].insert, InsertTarget::Draft);
+        assert_eq!(d.errors, Vec::<String>::new());
+    }
+
+    #[test]
+    fn insert_new_tab_takes_an_existing_directory() {
+        let (real, _) = insert_dirs("ok");
+        let project = real.to_string_lossy().into_owned();
+        let body = insert_body(&format!(r#"{{"target":"new-tab","project":{project:?}}}"#));
+        let c = load_body("insert-ok", body.as_bytes()).expect("ok");
+        let _ = std::fs::remove_dir_all(&real);
+        assert_eq!(c.errors, Vec::<String>::new());
+        assert_eq!(c.plugins[0].insert, InsertTarget::NewTab { project });
+    }
+
+    #[test]
+    fn insert_new_tab_expands_tilde() {
+        let Some(home) = home_dir() else { return };
+        let c = load_body(
+            "insert-tilde",
+            insert_body(r#"{"target":"new-tab","project":"~/"}"#).as_bytes(),
+        )
+        .expect("ok");
+        assert_eq!(c.errors, Vec::<String>::new());
+        assert_eq!(
+            c.plugins[0].insert,
+            InsertTarget::NewTab {
+                project: Path::new(&home).join("").to_string_lossy().into_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn insert_problems_fall_back_to_draft_and_keep_the_plugin() {
+        let (real, missing) = insert_dirs("bad");
+        let missing = missing.to_string_lossy().into_owned();
+        let file = real.join("f");
+        std::fs::write(&file, "x").expect("file");
+        let file = file.to_string_lossy().into_owned();
+        let cases = [
+            (
+                r#"{"target":"new-tab"}"#.to_string(),
+                "needs insert.project",
+            ),
+            (
+                r#"{"target":"new-tab","project":""}"#.to_string(),
+                "needs insert.project",
+            ),
+            (
+                r#"{"target":"new-tab","project":"rel/dir"}"#.to_string(),
+                "absolute path",
+            ),
+            (
+                format!(r#"{{"target":"new-tab","project":{missing:?}}}"#),
+                "not an existing directory",
+            ),
+            (
+                format!(r#"{{"target":"new-tab","project":{file:?}}}"#),
+                "not an existing directory",
+            ),
+            (
+                r#"{"target":"tab"}"#.to_string(),
+                "unknown insert.target \"tab\"",
+            ),
+            (r#""new-tab""#.to_string(), "insert must be an object"),
+            (r#"{"target":5}"#.to_string(), "insert must be an object"),
+        ];
+        for (i, (insert, needle)) in cases.iter().enumerate() {
+            let c =
+                load_body(&format!("insert-bad{i}"), insert_body(insert).as_bytes()).expect("ok");
+            assert_eq!(ids(&c), vec!["a"], "{insert}: the plugin still loads");
+            assert_eq!(c.plugins[0].insert, InsertTarget::Draft, "{insert}");
+            assert_eq!(c.errors.len(), 1, "{insert}: {:?}", c.errors);
+            assert!(c.errors[0].starts_with("plugin \"a\": "), "{:?}", c.errors);
+            assert!(c.errors[0].contains(needle), "{insert}: {:?}", c.errors);
+        }
+        let _ = std::fs::remove_dir_all(&real);
+    }
+
+    #[test]
+    fn insert_unknown_keys_are_reported() {
+        let c = load_body(
+            "insert-keys",
+            insert_body(r#"{"target":"draft","send":true}"#).as_bytes(),
+        )
+        .expect("ok");
+        assert_eq!(c.plugins[0].insert, InsertTarget::Draft);
+        assert_eq!(
+            c.errors,
+            vec!["plugin \"a\": unknown key \"insert.send\"".to_string()]
+        );
+    }
+
+    #[test]
+    fn insert_serialises_with_a_kebab_target() {
+        assert_eq!(
+            serde_json::to_value(InsertTarget::Draft).expect("serialize"),
+            serde_json::json!({"target": "draft"})
+        );
+        assert_eq!(
+            serde_json::to_value(InsertTarget::NewTab {
+                project: "/p".into()
+            })
+            .expect("serialize"),
+            serde_json::json!({"target": "new-tab", "project": "/p"})
+        );
     }
 
     #[test]

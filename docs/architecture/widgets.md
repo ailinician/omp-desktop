@@ -19,7 +19,7 @@ It never sends a path, a command, a trigger or a context to Rust: only plugin id
 
 | File | Purpose |
 |---|---|
-| `src-tauri/src/widgets/config.rs` | load/validate `widgets.json` → `WidgetConfig { plugins: Vec<PluginEntry>, errors }`; `PluginEntry::matches(project, remote)` (directory-prefix path match, backslash normalised, `/` root special case, remote substring), `PluginEntry::wants(Trigger)` (`Manual` always, `Interval` iff `interval_ms`, else `triggers`) |
+| `src-tauri/src/widgets/config.rs` | load/validate `widgets.json` → `WidgetConfig { plugins: Vec<PluginEntry>, errors }`; `PluginEntry::matches(project, remote)` (directory-prefix path match, backslash normalised, `/` root special case, remote substring), `PluginEntry::wants(Trigger)` (`Manual` always, `Interval` iff `interval_ms`, else `triggers`); `InsertTarget` (`Draft` \| `NewTab { project }`) from `parse_insert`: every problem is a warning in `errors` and leaves `Draft` |
 | `src-tauri/src/widgets/schedule.rs` | **pure** scheduler state machine: `Scheduler::handle(Event, now_ms) -> Vec<Action>`, `next_deadline()`; no threads, IO or clock |
 | `src-tauri/src/widgets/trust.rs` | `fingerprint(&PluginEntry)`, `is_fingerprint`, and `ApprovalStore` (`<app config>/widget-approvals.json`); the hashing steps `snapshot.rs` reuses |
 | `src-tauri/src/widgets/snapshot.rs` | `ScriptStore` (`<app cache>/widget-runs/`): `prepare(entry, approved)` → `Prepared::Ready(Run)` (`Run.argv` names verified copies in `store/<fingerprint>/`; owns a staging dir when they could not be stored) or `Prepared::Changed(fingerprint)`; `prune(approved)` |
@@ -27,7 +27,7 @@ It never sends a path, a command, a trigger or a context to Rust: only plugin id
 | `src-tauri/src/widgets/run.rs` | `run_plugin(entry, argv, ctx, on_spawn) -> Outcome`: spawn of the given argv, stdin context, timeout, stdout cap, process-tree kill |
 | `src-tauri/src/widgets/context.rs` | `session_ctx(project)` (branch, password-free default remote; one repo discovery) and the bounded `PluginContext` |
 | `src-tauri/src/widgets/redact.rs` | credential masking for error text, on top of the crate-level `redaction.rs` shared with `agent/reader.rs` |
-| `src/app/widgets.js` | pure: `parseOutput`, `insertText`, `safeUrl`, `tweakKey`, `relativeTime`, `appendToDraft`, and the run bookkeeping `runKey`, `mergeRun`, `parsedLast`, `cardRun` (`test-widgets.mjs`) |
+| `src/app/widgets.js` | pure: `parseOutput`, `insertText`, `safeUrl`, `tweakKey`, `relativeTime`, `appendToDraft`, `insertAction(cfg, altKey)` / `insertTitle(cfg)` (insert click target and tooltip), and the run bookkeeping `runKey`, `mergeRun`, `parsedLast`, `cardRun` (`test-widgets.mjs`) |
 | `src/app/use-widgets.jsx` | thin hook: snapshot + run map from events, sends view state, memoised parse per (key, `last.at`) |
 | `src/design/widgets/` | `WidgetCard`, `WidgetApprovalCard`, `WidgetErrorCard`, `WidgetBoundary`, block renderers |
 
@@ -153,7 +153,8 @@ WidgetsSnapshot = { configPath: string|null, fatal: string|null, errors: string[
                     active: { sessionId: string|null, applicable: string[] } }
 PluginView = { id, title, scope: "tab"|"global", enabled: boolean,
                approval: "approved"|"pending"|"changed",
-               command: string[], fingerprint: string }
+               command: string[], fingerprint: string,
+               insert: { target: "draft" } | { target: "new-tab", project: string } }
 RunView    = { key: string /* session id or "__global__" */, pluginId: string, seq: number,
                phase: "idle"|"waiting"|"running",
                last: null | { at: number, stdout: string|null, error: string|null, durationMs: number },
@@ -167,6 +168,7 @@ Frontend handling:
 
 - **Rail order:** `fatal` + config error cards, then all approval cards, then result cards; each group in config order.
 - **Approval cards** render for every enabled plugin whose approval is not `approved`, regardless of `match`, unless its `widget:plugin:<id>` tweak is off.
+- **Insert flow.** `use-widgets.jsx` copies the plugin's `insert` onto its card; `WidgetCard` → `WidgetBlocks` take it as `insertCfg` (stable, so the memo holds). A `+` click calls `onInsert(text, insertAction(insertCfg, e.altKey))`. In `app-live.jsx` `handleWidgetInsert`: a `draft` action sets `promptInsert { append: true }` for the active tab; a `new-tab` action awaits `bridge.openSession(project)` (always spawns, activates the new tab, reports failures itself), then sets `promptInsert { append: true, sessionId }`, which `composer.jsx` appends to that session's own draft and focuses. It never sends. ⌥/Alt-click yields a `draft` action. The target is read from `widgets.json` (Rust) only; plugin output has no path to it. Extension widgets (no `insertCfg`) always insert into the draft.
 - **Result cards** render per id in `active.applicable` (idle until the first run). The run shown is the one keyed by the active session id, or `__global__` for global plugins.
 - **Event ordering.** `use-widgets.jsx` fetches `widgets_state` on mount and merges events by `seq`, so a `widgets://run` that arrives before the fetch resolves is not lost.
 - **`live.js` exposes** `widgetsState`, `widgetsReload`, `widgetsApprove`, `widgetsSetView`, `widgetsRefresh` and `onWidgetsEvent`. In browser mode (no `__TAURI__`) the snapshot calls return `{}`; `applySnapshot` defaults every missing field.

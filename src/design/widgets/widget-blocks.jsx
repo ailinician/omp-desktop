@@ -5,7 +5,7 @@
    navigation guard after a second safeUrl check. */
 
 const { Icon: _WB_Icon, useSaNow: _WB_useNow } = window;
-const { safeUrl: _wbSafeUrl, insertText: _wbInsertText, relativeTime: _wbRelativeTime } = window.OMP_WIDGETS;
+const { safeUrl: _wbSafeUrl, insertText: _wbInsertText, relativeTime: _wbRelativeTime, insertAction: _wbInsertAction, insertTitle: _wbInsertTitle } = window.OMP_WIDGETS;
 
 /** Relative "time" labels are minute-granular, so a list re-renders once a
  *  minute — and only while it shows at least one timed item. */
@@ -23,7 +23,7 @@ function _wbOpen(url) {
   );
 }
 
-function WidgetItem({ item, now, onInsert }) {
+function WidgetItem({ item, now, onInsert, insertCfg }) {
   const insert = _wbInsertText(item);
   const url = _wbSafeUrl(item.url);
   const timed = item.time != null;
@@ -43,7 +43,7 @@ function WidgetItem({ item, now, onInsert }) {
       {(insert || url) && (
         <span className="wdg-item-actions">
           {insert && (
-            <button className="btn icon ghost" title="insert into prompt" aria-label="insert into prompt" onClick={() => onInsert?.(insert)}>
+            <button className="btn icon ghost" title={_wbInsertTitle(insertCfg)} aria-label="insert into prompt" onClick={(e) => onInsert?.(insert, _wbInsertAction(insertCfg, e.altKey))}>
               <_WB_Icon name="plus" size={9} />
             </button>
           )}
@@ -58,7 +58,7 @@ function WidgetItem({ item, now, onInsert }) {
   );
 }
 
-function WidgetList({ block, onInsert }) {
+function WidgetList({ block, onInsert, insertCfg }) {
   const [expanded, setExpanded] = React.useState(false);
   const { items, limit } = block;
   const shown = limit && !expanded && items.length > limit ? items.slice(0, limit) : items;
@@ -68,7 +68,7 @@ function WidgetList({ block, onInsert }) {
     <>
       {block.title && <div className="wdg-section mono">{block.title}<span className="wdg-count">{items.length}</span></div>}
       <div className="wdg-list">
-        {shown.map((it, i) => <WidgetItem key={i} item={it} now={now} onInsert={onInsert} />)}
+        {shown.map((it, i) => <WidgetItem key={i} item={it} now={now} onInsert={onInsert} insertCfg={insertCfg} />)}
         {shown.length < items.length && (
           <button className="btn ghost wdg-more" onClick={() => setExpanded(true)}>+{items.length - shown.length} more</button>
         )}
@@ -91,7 +91,7 @@ function WidgetLink({ block }) {
   );
 }
 
-function WidgetBlock({ block, onInsert }) {
+function WidgetBlock({ block, onInsert, insertCfg }) {
   switch (block.type) {
     case "status":
       return (
@@ -122,7 +122,7 @@ function WidgetBlock({ block, onInsert }) {
         <div className="wdg-text-row">
           <div className={`wdg-text selectable${block.mono ? " mono" : ""}`}>{block.text}</div>
           {block.insert && (
-            <button className="btn icon ghost" title="insert into prompt" aria-label="insert into prompt" onClick={() => onInsert?.(block.insert)}>
+            <button className="btn icon ghost" title={_wbInsertTitle(insertCfg)} aria-label="insert into prompt" onClick={(e) => onInsert?.(block.insert, _wbInsertAction(insertCfg, e.altKey))}>
               <_WB_Icon name="plus" size={9} />
             </button>
           )}
@@ -143,7 +143,7 @@ function WidgetBlock({ block, onInsert }) {
         </>
       );
     case "list":
-      return <WidgetList block={block} onInsert={onInsert} />;
+      return <WidgetList block={block} onInsert={onInsert} insertCfg={insertCfg} />;
     case "link":
       return <WidgetLink block={block} />;
     default:
@@ -153,9 +153,11 @@ function WidgetBlock({ block, onInsert }) {
 
 // Memoised: the App re-renders on every streaming delta, while `blocks` is
 // the cached parse of the last output (OMP_WIDGETS.parsedLast) and
-// `onInsert` is stable, so the blocks re-render only on a new result.
-const WidgetBlocks = React.memo(function WidgetBlocks({ blocks, onInsert }) {
-  return <>{blocks.map((b, i) => <WidgetBlock key={i} block={b} onInsert={onInsert} />)}</>;
+// `onInsert` and `insertCfg` (the plugin's `insert` from widgets.json,
+// undefined for extension widgets) are stable, so the blocks re-render only
+// on a new result. `onInsert(text, action)`: `action` from insertAction.
+const WidgetBlocks = React.memo(function WidgetBlocks({ blocks, onInsert, insertCfg }) {
+  return <>{blocks.map((b, i) => <WidgetBlock key={i} block={b} onInsert={onInsert} insertCfg={insertCfg} />)}</>;
 });
 
 Object.assign(window, { WidgetBlocks });
