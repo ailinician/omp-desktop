@@ -262,8 +262,11 @@ fn same_req_id_from_two_connections_is_forwarded_independently_and_duplicate_on_
     let mut second = s.authed_socket();
     first.send_text(r#"{"t":"action","reqId":"same","tabId":"t1","kind":"abort"}"#);
     second.send_text(r#"{"t":"action","reqId":"same","tabId":"t2","kind":"abort"}"#);
-    let a1 = s.emit.next_action();
-    let a2 = s.emit.next_action();
+    // The two sockets race to the webview, so order the actions by tab: t1 is
+    // `first`'s request, t2 is `second`'s.
+    let mut actions = [s.emit.next_action(), s.emit.next_action()];
+    actions.sort_by(|x, y| x.tab_id.cmp(&y.tab_id));
+    let [a1, a2] = actions;
     assert_ne!(a1.req_id, a2.req_id);
     // A duplicate reqId on the same connection is still refused.
     first.send_text(r#"{"t":"action","reqId":"same","tabId":"t1","kind":"abort"}"#);
