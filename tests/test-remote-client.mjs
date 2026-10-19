@@ -472,6 +472,14 @@ await check("clicking the active tab keeps its view; another tab clears it until
   await b.button("Two").emit("click");
   assert.ok(!b.app.textContent.includes("<img user>"));
   assert.ok(b.control("Send").disabled);
+  const selectReq = b.frames.filter(f => f.t === "select").at(-1).reqId;
+  await b.message({ t: "ack", reqId: selectReq, ok: false, error: "tab not available" });
+  assert.ok(b.app.textContent.includes("<img user>"), "failed select ack restores the previous tab view");
+  draft.value = "recover me"; await draft.emit("input"); await b.control("Send").emit("click");
+  const promptReq = b.frames.filter(f => f.t === "action").at(-1).reqId;
+  assert.equal(draft.value, "");
+  await b.message({ t: "ack", reqId: promptReq, ok: false, error: "desktop could not deliver" });
+  assert.equal(draft.value, "recover me", "rejected prompt restores the cleared draft");
 });
 // Contract: the Rust server literals. The test reads the Rust files, takes
 // every occurrence of each anchor, cuts the literal from the anchor to its

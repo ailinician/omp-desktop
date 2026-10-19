@@ -256,6 +256,7 @@ impl AgentBridge {
             );
             if let Some(inner) = &prev {
                 inner.alive.store(false, Ordering::Release);
+                crate::remote::tracker::tracker().on_exit(&session_id);
             }
             // Explicit, and not one line earlier: the store above *must*
             // happen while the lock is held, so a reader parked on this mutex
@@ -316,6 +317,7 @@ impl AgentBridge {
             // reader.rs's post-EOF `None` arm.
             if let Some(inner) = &removed {
                 inner.alive.store(false, Ordering::Release);
+                crate::remote::tracker::tracker().on_exit(session_id);
             }
             removed
         };
@@ -351,10 +353,11 @@ impl AgentBridge {
         let command = validate_command_type(trimmed)?;
         let answered = approvals::answered_id(&command);
 
-        let Some((stdin_arc, open)) = self.with_entry(session_id, |inner| {
+        let Some((stdin_arc, open, alive)) = self.with_entry(session_id, |inner| {
             (
                 inner.stdin.as_ref().map(Arc::clone),
                 answered.map(|_| Arc::clone(&inner.approvals)),
+                answered.map(|_| Arc::clone(&inner.alive)),
             )
         })?
         else {
@@ -364,8 +367,8 @@ impl AgentBridge {
         };
         let stdin_arc = stdin_arc.ok_or_else(|| "agent not running".to_string())?;
         write_command(&stdin_arc, trimmed, answered.zip(open.as_deref()))?;
-        if let Some(id) = answered {
-            crate::remote::tracker::tracker().on_answered(session_id, id);
+        if let (Some(id), Some(alive)) = (answered, alive) {
+            crate::remote::tracker::tracker().on_answered(session_id, id, &alive);
         }
         Ok(())
     }
@@ -515,7 +518,8 @@ fn reap_and_clear_grants(
     rule_book: &crate::approval::RuleBook,
 ) {
     prev.alive.store(false, Ordering::Release);
-    crate::remote::tracker::tracker().on_exit(session_id);
+    // Both callers already cleared `alive` and the tracker under `sessions`
+    // so a replacement session's state cannot be wiped after the lock drops.
     rule_book.clear_session(session_id);
     prev.stdin = None;
     let prev_supervisor = prev.supervisor.take();

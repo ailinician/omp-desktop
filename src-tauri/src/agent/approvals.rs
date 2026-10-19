@@ -173,7 +173,7 @@ impl AgentBridge {
         scope: RuleScope,
         stdin_of: impl FnOnce(&BridgeInner) -> Option<Arc<Mutex<W>>>,
     ) -> Result<Option<String>, String> {
-        let (stdin, open, tool, root) = self
+        let (stdin, open, alive, tool, root) = self
             .with_entry(session_id, |inner| {
                 let stdin = stdin_of(inner).ok_or_else(|| "agent not running".to_string())?;
                 let mut pending = inner
@@ -194,7 +194,13 @@ impl AgentBridge {
                 };
                 pending.remove(request_id);
                 drop(pending);
-                Ok::<_, String>((stdin, Arc::clone(&inner.approvals), tool, root))
+                Ok::<_, String>((
+                    stdin,
+                    Arc::clone(&inner.approvals),
+                    Arc::clone(&inner.alive),
+                    tool,
+                    root,
+                ))
             })?
             .ok_or_else(|| format!("session '{session_id}' not found"))??;
 
@@ -205,8 +211,7 @@ impl AgentBridge {
             }
             return Err(err);
         }
-        crate::remote::tracker::tracker().on_answered(session_id, request_id);
-
+        crate::remote::tracker::tracker().on_answered(session_id, request_id, &alive);
         let ended = || format!("session '{session_id}' ended before the grant was saved");
         let granted = root.map_or_else(
             || {
@@ -226,7 +231,7 @@ impl AgentBridge {
 }
 
 /// The answer that approves omp's prompt `request_id`.
-fn approve_answer(request_id: &str) -> String {
+pub(super) fn approve_answer(request_id: &str) -> String {
     serde_json::json!({
         "type": "extension_ui_response", "id": request_id, "value": "Approve",
     })

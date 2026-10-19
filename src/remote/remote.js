@@ -11,8 +11,8 @@
   let connected = false, attempt = 0, notificationsEnabled = false, notificationsPending = false;
   let connectionText = "Connecting…";
   let renderedAsks = null;
-  const askDrafts = new Map();
-
+  const askDrafts = new Map(), sentDrafts = new Map();
+  let fallbackView = null, selectReqId = null;
   function node(tag, text, className) {
     const element = document.createElement(tag);
     if (text !== undefined) element.textContent = text;
@@ -146,12 +146,12 @@
     return true;
   }
   function action(kind, fields = {}) {
-    if (!state.view || !connected) return false;
+    if (!state.view || !connected) return null;
     const frame = C.actionFor(kind, { tabId: state.view.tabId, ...fields });
-    if (!transmit(frame)) return false;
+    if (!transmit(frame)) return null;
     state = { ...state, pending: { ...state.pending, [frame.reqId]: kind }, error: null };
     updateControls();
-    return true;
+    return frame.reqId;
   }
   const currentAction = () => C.composerAction({ busy: Boolean(state.view?.busy), draft: draft.value });
   function onComposerButton() {
@@ -174,8 +174,15 @@
   }
   draft.addEventListener("input", () => { fitDraft(); syncComposer(); });
   function submit() {
-    if (!draft.value.trim()) return;
-    if (action(state.view?.busy ? "steer" : "prompt", { text: draft.value })) { draft.value = ""; fitDraft(); updateControls(); }
+    const text = draft.value;
+    if (!text.trim()) return;
+    if (typeof TextEncoder !== "undefined" && new TextEncoder().encode(text).length > 32768) {
+      state = { ...state, error: "Message is too long (max 32 KB)." };
+      updateControls();
+      return;
+    }
+    const reqId = action(state.view?.busy ? "steer" : "prompt", { text });
+    if (reqId) { sentDrafts.set(reqId, text); draft.value = ""; fitDraft(); updateControls(); }
   }
   function updateControls() {
     status.textContent = connectionText;
@@ -305,10 +312,15 @@
     let restoreFocus = null;
     for (const tab of state.tabs) {
       const item = button("", () => {
-        if (!transmit(C.selectFor(tab.id))) return;
+        const frame = C.selectFor(tab.id);
+        if (!transmit(frame)) return;
         selected = tab.id;
+        selectReqId = frame.reqId;
         // The same tab keeps its view: no new view frame is coming for it.
-        if (tab.id !== state.view?.tabId) state = { ...state, view: null };
+        if (tab.id !== state.view?.tabId) {
+          if (state.view) fallbackView = state.view;
+          state = { ...state, view: null };
+        }
         closeSheet(); renderTabs(); renderView(); updateControls();
       });
       item.className = `sheet-tab${tab.id === activeId ? " active" : ""}`;
@@ -621,10 +633,28 @@
           if (state.view && !state.tabs.some(tab => tab.id === state.view.tabId)) {
             state = { ...state, view: null }; selected = null; renderView();
           }
+          if (fallbackView && !state.tabs.some(tab => tab.id === fallbackView.tabId)) fallbackView = null;
           renderTabs();
         }
-        if (msg.t === "view") { selected = state.view?.tabId ?? null; renderTabs(); renderView(); }
+        if (msg.t === "view") {
+          fallbackView = null; selectReqId = null;
+          selected = state.view?.tabId ?? null; renderTabs(); renderView();
+        }
         if (msg.t === "theme") applyTheme(state.theme);
+        if (msg.t === "ack") {
+          const sentText = sentDrafts.get(msg.reqId);
+          sentDrafts.delete(msg.reqId);
+          if (!msg.ok && sentText && !draft.value) { draft.value = sentText; fitDraft(); }
+          if (msg.reqId && msg.reqId === selectReqId) {
+            selectReqId = null;
+            if (!msg.ok && !state.view && fallbackView && state.tabs.some(tab => tab.id === fallbackView.tabId)) {
+              state = { ...state, view: fallbackView };
+              selected = fallbackView.tabId;
+              fallbackView = null;
+              renderTabs(); renderView();
+            }
+          }
+        }
         if (msg.t === "ack" && msg.kind === "push") {
           notificationsPending = false;
           if (msg.ok) {
@@ -640,6 +670,7 @@
     socket.onclose = event => {
       connected = false;
       state = { ...state, device: null, pending: {} };
+      sentDrafts.clear(); selectReqId = null;
       notificationsPending = false;
       if (event.code === 4401) {
         token = null;

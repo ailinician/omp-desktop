@@ -147,12 +147,12 @@ impl Pusher {
     /// Apply the push settings; returns the public key phones subscribe
     /// with while push is on and the key is usable.
     pub fn configure(&self, settings: &PushSettings) -> Option<String> {
-        *locked(&self.shared.settings) = settings.clone(); // the worker reads its own copy
         if !settings.enabled {
+            *locked(&self.shared.settings) = settings.clone(); // the worker reads its own copy
             self.shared.set_error(None);
             return None;
         }
-        let vapid = {
+        let key = {
             // One lock for check and create: no second key can be written.
             let mut slot = locked(&self.shared.vapid);
             if slot.is_none() {
@@ -160,14 +160,15 @@ impl Pusher {
                     Ok(vapid) => *slot = Some(Arc::new(vapid)),
                     Err(error) => {
                         drop(slot);
+                        *locked(&self.shared.settings) = settings.clone(); // the worker reads its own copy
                         self.shared.set_error(Some(error));
                         return None;
                     }
                 }
             }
-            slot.clone() // shared with the worker
+            slot.as_ref().map(|vapid| vapid.public_b64.clone()) // returned to the caller
         };
-        let key = vapid.map(|vapid| vapid.public_b64.clone()); // returned to the caller
+        *locked(&self.shared.settings) = settings.clone(); // the worker reads its own copy
         self.shared.set_error(contact_uri(&settings.contact).err());
         key
     }

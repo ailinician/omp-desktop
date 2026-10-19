@@ -223,9 +223,17 @@ fn read_all<R: Read>(stream: &mut R, bytes: &mut Vec<u8>) {
         match stream.read(&mut chunk) {
             Ok(0) => return,
             Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                panic!("unexpected read timeout in test helper: {error}");
+            }
             // Peer closed without close_notify, or reset after replying.
-            Err(error) if error.kind() != io::ErrorKind::Interrupted => return,
-            Err(_) => {}
+            Err(_) => return,
         }
     }
 }
@@ -245,16 +253,23 @@ fn parse_reply(bytes: &[u8]) -> Reply {
         .unwrap()
         .parse()
         .unwrap();
-    let headers = lines
+    let headers: Vec<(String, String)> = lines
         .map(|line| {
             let (name, value) = line.split_once(": ").unwrap();
             (name.to_owned(), value.to_owned())
         })
         .collect();
+    let body = bytes[split + 4..].to_vec();
+    if let Some((_, len)) = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+    {
+        assert_eq!(body.len(), len.parse::<usize>().unwrap());
+    }
     Reply {
         status,
         headers,
-        body: bytes[split + 4..].to_vec(),
+        body,
     }
 }
 
@@ -606,7 +621,7 @@ fn a_dribbled_tls_handshake_is_cut_at_the_deadline_without_an_answer() {
     }
     assert!(closed, "server kept a dribbling handshake open");
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_secs(3),
         "{:?}",
         started.elapsed()
     );

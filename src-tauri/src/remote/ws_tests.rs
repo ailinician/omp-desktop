@@ -101,6 +101,7 @@ impl Client {
         let deadline = Instant::now() + within;
         while Instant::now() < deadline {
             match self.ws.read() {
+                Ok(Message::Ping(_) | Message::Pong(_)) => {}
                 Ok(message) => return Some(message),
                 Err(tungstenite::Error::Io(error)) if is_idle(&error) => {}
                 Err(_) => return None,
@@ -430,6 +431,7 @@ fn trickle_frame_is_cut(client: &mut Client, delay: Duration) -> bool {
 
 fn trickle_is_cut(s: &TestServer) -> bool {
     let mut client = s.ws_connect();
+    client.ws.send(Message::Pong(Vec::new().into())).unwrap();
     trickle_frame_is_cut(&mut client, Duration::from_millis(10))
 }
 
@@ -480,6 +482,7 @@ fn revoked_connection_gets_its_close_and_nothing_else() {
         text: None,
         ask_id: None,
         value: None,
+        dispatched_at: None,
     };
     s.hub.action(conn, &action);
     assert!(
@@ -603,4 +606,29 @@ fn authenticated_tls_trickle_has_an_absolute_deadline() {
 #[test]
 fn authenticated_partial_reads_do_not_reset_the_frame_deadline() {
     authenticated_trickle_is_cut(false, Duration::from_millis(100), "ws-authed-partials");
+}
+
+#[test]
+fn authenticated_ping_and_long_ask_id_work_without_spurious_timeout_or_truncation() {
+    let s = test_server_with(false, "ws-ping-and-ask-id");
+    let mut client = s.authed_socket();
+    client
+        .ws
+        .send(tungstenite::Message::Ping(b"hb".to_vec().into()))
+        .unwrap();
+    let ask_id = "q".repeat(256);
+    client.send_text(&format!(
+        r#"{{"t":"action","reqId":"r-256","tabId":"t1","kind":"answer","askId":"{ask_id}","value":"yes"}}"#
+    ));
+    let action = s.emit.next_action();
+    assert_eq!(action.ask_id.as_deref(), Some(ask_id.as_str()));
+    s.hub.action_result(&action.req_id, true, None);
+    assert_eq!(client.read_json_where(|m| m["t"] == "ack")["ok"], true);
+
+    let too_long = "q".repeat(257);
+    client.send_text(&format!(
+        r#"{{"t":"action","reqId":"r-257","tabId":"t1","kind":"answer","askId":"{too_long}","value":"yes"}}"#
+    ));
+    let rejected = client.read_json_where(|m| m["t"] == "ack");
+    assert_eq!(rejected["ok"], false);
 }

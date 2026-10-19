@@ -151,12 +151,30 @@
   // or the ask wait stops the action before it reaches omp.
   function makeActionHandler(bridge, getSnapshot, getStatus) {
     let queue = Promise.resolve(), waiting = 0;
+    const activeTab = () => bridge.activeSessionId !== undefined ? bridge.activeSessionId : getSnapshot()?.activeSessionId;
     const refusal = (action, enqueuedAt) => {
       const status = getStatus();
       if (!status?.listening) return "remote access disabled";
       if (!status.devices?.some(device => device.id === action.deviceId && device.connected)) return "device revoked";
-      return Date.now() - enqueuedAt > ACTION_MAX_AGE_MS ? "expired" : null;
+      const startedAt = typeof action.dispatchedAt === "number" ? Math.min(enqueuedAt, action.dispatchedAt) : enqueuedAt;
+      return Date.now() - startedAt > ACTION_MAX_AGE_MS ? "expired" : null;
     };
+    async function ensureTab(action, enqueuedAt) {
+      if (typeof bridge.waitForActivation === "function") await bridge.waitForActivation();
+      if (activeTab() !== action.tabId) {
+        try {
+          await bridge.activateSession(action.tabId);
+        } catch {
+          throw new Error("tab not available");
+        }
+      }
+      if (typeof bridge.waitForActivation === "function") await bridge.waitForActivation();
+      const reason = refusal(action, enqueuedAt);
+      if (reason) throw new Error(reason);
+      if (!action.tabId || activeTab() !== action.tabId || getSnapshot()?.activeSessionId !== action.tabId) {
+        throw new Error("tab not available");
+      }
+    }
     async function execute(action, enqueuedAt) {
       const { reqId, tabId, kind } = action;
       const guard = () => {
@@ -165,18 +183,13 @@
       };
       try {
         guard();
-        if (getSnapshot()?.activeSessionId !== tabId) {
-          try {
-            await bridge.activateSession(tabId);
-          } catch {
-            throw new Error("tab not available");
-          }
-        }
-        guard();
-        if (!tabId || getSnapshot()?.activeSessionId !== tabId) throw new Error("tab not available");
+        await ensureTab(action, enqueuedAt);
         // The bridge reports the IPC hand-off: `false` or a rejection means omp
         // never got the command.
         const deliver = async call => {
+          if (typeof bridge.waitForActivation === "function") await bridge.waitForActivation();
+          guard();
+          if (activeTab() !== tabId || getSnapshot()?.activeSessionId !== tabId) throw new Error("tab not available");
           let result;
           try { result = await call(); } catch { throw new Error("desktop could not deliver"); }
           if (result === false) throw new Error("desktop could not deliver");
@@ -198,7 +211,7 @@
             while (true) {
               guard();
               const snapshot = getSnapshot();
-              if (snapshot?.activeSessionId !== tabId) throw new Error("tab not available");
+              if (activeTab() !== tabId || snapshot?.activeSessionId !== tabId) throw new Error("tab not available");
               ask = (snapshot.messages ?? []).map(askCard).find(q => q?.id === action.askId);
               if (ask || Date.now() >= deadline) break;
               await new Promise(resolve => setTimeout(resolve, 100));

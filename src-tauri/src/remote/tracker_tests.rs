@@ -61,7 +61,7 @@ fn question_lifecycle_and_turn_finish() {
         (true, 1),
         "status frames are not questions"
     );
-    t.on_answered("s1", "q1");
+    t.on_answered("s1", "q1", &AtomicBool::new(true));
     assert_eq!(t.snapshot()["s1"], (true, 0));
     t.on_frame(
         "s1",
@@ -154,7 +154,7 @@ fn unrelated_frames_and_unknown_answers_do_not_create_sessions() {
         t.on_frame("missing", kind, None, now, &AtomicBool::new(true));
     }
     for id in ["q", "other"] {
-        t.on_answered("missing", id);
+        t.on_answered("missing", id, &AtomicBool::new(true));
     }
     t.on_exit("missing");
     assert!(t.snapshot().is_empty());
@@ -235,8 +235,8 @@ fn callbacks_observe_committed_state_outside_both_locks_and_sink_is_replaceable(
         now,
         &AtomicBool::new(true),
     );
-    t.on_answered("s1", "q");
-    t.on_answered("s1", "q");
+    t.on_answered("s1", "q", &AtomicBool::new(true));
+    t.on_answered("s1", "q", &AtomicBool::new(true));
     assert_eq!(
         *first.changes.lock().unwrap(),
         [(true, 0), (true, 1), (true, 0)]
@@ -302,7 +302,7 @@ fn omp_cancel_removes_only_target_and_notifies_only_when_removed() {
     }
     assert_eq!(sink.notifications(), 3);
     assert!(!t.snapshot().contains_key("missing"));
-    t.on_answered("s1", "q2");
+    t.on_answered("s1", "q2", &AtomicBool::new(true));
     assert_eq!(t.snapshot()["s1"], (false, 0));
     assert_eq!(sink.notifications(), 4);
 }
@@ -405,9 +405,9 @@ fn question_ids_are_bounded_by_bytes_and_open_count_and_space_is_reusable() {
     }
     assert_eq!(t.snapshot()["s1"], (false, 64));
     assert_eq!(sink.notifications(), 64);
-    t.on_answered("s1", "q63");
+    t.on_answered("s1", "q63", &AtomicBool::new(true));
     assert_eq!(sink.notifications(), 64, "overflow id was never tracked");
-    t.on_answered("s1", &boundary);
+    t.on_answered("s1", &boundary, &AtomicBool::new(true));
     t.on_frame(
         "s1",
         Some("extension_ui_request"),
@@ -447,6 +447,22 @@ fn a_retired_reader_changes_nothing_and_notifies_nobody() {
         &live,
     );
     t.on_frame("s1", Some("agent_end"), None, now, &retired);
+    t.on_answered("s1", "q", &retired);
     assert_eq!(t.snapshot()["s1"], (true, 1));
     assert_eq!(sink.notifications(), 2);
+}
+
+#[test]
+fn snapshot_reads_without_locking_sessions_mutex() {
+    let t = Tracker::default();
+    t.on_frame(
+        "s1",
+        Some("agent_start"),
+        None,
+        Instant::now(),
+        &AtomicBool::new(true),
+    );
+    let _held = t.inner.lock().unwrap();
+    let snap = t.snapshot();
+    assert_eq!(snap["s1"], (true, 0));
 }

@@ -443,9 +443,15 @@ fn a_phone_gets_the_push_key_after_hello_only_while_push_is_on() {
         serde_json::from_str(on.read().unwrap().to_text().unwrap()).unwrap();
     assert_eq!(key["t"], "push-key");
     assert!(key["key"].as_str().is_some_and(|key| key.len() == 87));
+    assert!(on.read().unwrap().to_text().unwrap().contains("\"tabs\""));
 
     settings.push.enabled = false;
     manager.apply(settings).unwrap();
+    let withdrawn: serde_json::Value =
+        serde_json::from_str(on.read().unwrap().to_text().unwrap()).unwrap();
+    assert_eq!(withdrawn["t"], "push-key");
+    assert!(withdrawn["key"].is_null());
+
     let mut off = upgraded(port);
     auth(&mut off, &token);
     assert!(off.read().unwrap().to_text().unwrap().contains("hello"));

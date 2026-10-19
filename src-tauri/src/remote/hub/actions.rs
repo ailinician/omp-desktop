@@ -1,7 +1,7 @@
 //! Phone requests in flight: forwarded to the webview, answered by request
 //! id, expired after [`ACTION_TIMEOUT`].
 
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 
@@ -47,6 +47,10 @@ impl Hub {
             let id = format!("act-{}", state.next_action);
             let mut forwarded = action.clone(); // the webview gets its own hub correlation id
             forwarded.req_id.clone_from(&id);
+            forwarded.dispatched_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|d| u64::try_from(d.as_millis()).ok());
             state.pending.insert(
                 id,
                 Pending {

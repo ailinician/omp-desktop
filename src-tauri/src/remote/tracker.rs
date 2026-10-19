@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -30,9 +30,12 @@ struct SessionState {
     open: HashSet<String>,
 }
 
+pub type Snapshot = HashMap<String, (bool, usize)>;
+
 #[derive(Default)]
 pub struct Tracker {
     inner: Mutex<HashMap<String, SessionState>>,
+    snapshot: RwLock<Arc<Snapshot>>,
     sink: Mutex<Option<Arc<dyn TrackerSink>>>,
 }
 
@@ -101,51 +104,86 @@ fn apply(
     event: Event<'_>,
     now: Instant,
 ) -> Outcome {
-    if let Event::Cancel(target) = event {
-        let removed = sessions
-            .get_mut(sid)
-            .is_some_and(|state| state.open.remove(target));
-        return Outcome::when(removed, None);
-    }
-    // Allocate the session key only once, not for each observed frame.
-    let new_session = !sessions.contains_key(sid);
-    if new_session {
-        sessions.insert(sid.to_owned(), SessionState::default());
-    }
-    let Some(state) = sessions.get_mut(sid) else {
-        return Outcome::Unchanged;
-    };
     match event {
+        Event::Cancel(target) => {
+            let removed = sessions
+                .get_mut(sid)
+                .is_some_and(|state| state.open.remove(target));
+            Outcome::when(removed, None)
+        }
         Event::Start => {
-            // A continuation keeps the first start, so the turn's time is whole.
-            let changed = new_session || !state.busy;
-            if !state.busy {
-                state.busy = true;
-                state.turn_started = Some(now);
+            if let Some(state) = sessions.get_mut(sid) {
+                // A continuation keeps the first start, so the turn's time is whole.
+                if state.busy {
+                    Outcome::Unchanged
+                } else {
+                    state.busy = true;
+                    state.turn_started = Some(now);
+                    Outcome::Changed(None)
+                }
+            } else {
+                sessions.insert(
+                    sid.to_owned(),
+                    SessionState {
+                        busy: true,
+                        turn_started: Some(now),
+                        open: HashSet::new(),
+                    },
+                );
+                Outcome::Changed(None)
             }
-            Outcome::when(changed, None)
         }
         Event::End => {
-            let started = state.turn_started.take();
-            let changed = new_session || state.busy || !state.open.is_empty();
-            state.busy = false;
-            state.open.clear();
-            let finished = started.map(|start| Transition::TurnFinished {
-                ran: now.saturating_duration_since(start),
-            });
-            Outcome::when(changed || finished.is_some(), finished)
+            if let Some(state) = sessions.get_mut(sid) {
+                let started = state.turn_started.take();
+                let changed = state.busy || !state.open.is_empty();
+                state.busy = false;
+                state.open.clear();
+                let finished = started.map(|start| Transition::TurnFinished {
+                    ran: now.saturating_duration_since(start),
+                });
+                Outcome::when(changed || finished.is_some(), finished)
+            } else {
+                Outcome::Unchanged
+            }
         }
         Event::Open(id) => {
-            let opened = state.open.len() < MAX_OPEN_QUESTIONS && state.open.insert(id.to_owned());
+            let opened = if let Some(state) = sessions.get_mut(sid) {
+                state.open.len() < MAX_OPEN_QUESTIONS && state.open.insert(id.to_owned())
+            } else {
+                let mut state = SessionState::default();
+                state.open.insert(id.to_owned());
+                sessions.insert(sid.to_owned(), state);
+                true
+            };
             Outcome::when(opened, Some(Transition::QuestionOpened))
         }
-        Event::Cancel(_) => Outcome::Unchanged,
     }
 }
 
 impl Tracker {
     fn sessions(&self) -> Option<std::sync::MutexGuard<'_, HashMap<String, SessionState>>> {
         self.inner.lock().ok()
+    }
+
+    fn publish_snapshot(&self, changed_sid: (&str, Option<(bool, usize)>)) {
+        let (sid, entry) = changed_sid;
+        let mut guard = self
+            .snapshot
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        match entry {
+            Some(value) => {
+                if let Some(slot) = Arc::make_mut(&mut *guard).get_mut(sid) {
+                    *slot = value;
+                } else {
+                    Arc::make_mut(&mut *guard).insert(sid.to_owned(), value);
+                }
+            }
+            None => {
+                Arc::make_mut(&mut *guard).remove(sid);
+            }
+        }
     }
 
     pub fn set_sink(&self, sink: Arc<dyn TrackerSink>) {
@@ -171,6 +209,27 @@ impl Tracker {
         let Some(event) = Event::classify(frame_type, frame) else {
             return;
         };
+        self.mutate_live(sid, alive, |sessions| apply(sessions, sid, event, now));
+    }
+
+    pub fn on_answered(&self, sid: &str, id: &str, alive: &AtomicBool) {
+        if id.len() > MAX_ID_BYTES {
+            return;
+        }
+        self.mutate_live(sid, alive, |sessions| {
+            let removed = sessions
+                .get_mut(sid)
+                .is_some_and(|state| state.open.remove(id));
+            Outcome::when(removed, None)
+        });
+    }
+
+    fn mutate_live(
+        &self,
+        sid: &str,
+        alive: &AtomicBool,
+        change: impl FnOnce(&mut HashMap<String, SessionState>) -> Outcome,
+    ) {
         let outcome = {
             let Some(mut sessions) = self.sessions() else {
                 return;
@@ -180,27 +239,17 @@ impl Tracker {
             if !alive.load(Ordering::Acquire) {
                 return;
             }
-            apply(&mut sessions, sid, event, now)
+            let outcome = change(&mut sessions);
+            if matches!(outcome, Outcome::Changed(_)) {
+                let entry = sessions
+                    .get(sid)
+                    .map(|state| (state.busy, state.open.len()));
+                self.publish_snapshot((sid, entry));
+            }
+            outcome
         };
         if let Outcome::Changed(transition) = outcome {
             self.notify(sid, transition);
-        }
-    }
-
-    pub fn on_answered(&self, sid: &str, id: &str) {
-        if id.len() > MAX_ID_BYTES {
-            return;
-        }
-        let changed = {
-            let Some(mut sessions) = self.sessions() else {
-                return;
-            };
-            sessions
-                .get_mut(sid)
-                .is_some_and(|state| state.open.remove(id))
-        };
-        if changed {
-            self.notify(sid, None);
         }
     }
 
@@ -209,22 +258,20 @@ impl Tracker {
             let Some(mut sessions) = self.sessions() else {
                 return;
             };
-            sessions.remove(sid)
+            let removed = sessions.remove(sid);
+            if removed.is_some() {
+                self.publish_snapshot((sid, None));
+            }
+            removed
         };
         if removed.is_some() {
             self.notify(sid, None);
         }
     }
 
-    pub fn snapshot(&self) -> HashMap<String, (bool, usize)> {
-        let Some(sessions) = self.sessions() else {
-            return HashMap::new();
-        };
-        sessions
-            .iter()
-            // Snapshot owns its session ids independently of future updates.
-            .map(|(sid, state)| (sid.clone(), (state.busy, state.open.len())))
-            .collect()
+    pub fn snapshot(&self) -> Arc<Snapshot> {
+        let guard = self.snapshot.read().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(&*guard)
     }
 
     fn notify(&self, sid: &str, transition: Option<Transition>) {

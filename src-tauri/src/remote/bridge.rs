@@ -221,7 +221,8 @@ pub fn stop(app: &AppHandle) {
 pub fn on_page_load(webview: &Webview, started: bool) {
     if started && webview.label() == MAIN_WINDOW {
         if let Some(manager) = webview.app_handle().try_state::<Arc<RemoteManager>>() {
-            manager.hub().set_ready(false);
+            let manager = Arc::clone(&*manager);
+            tauri::async_runtime::spawn_blocking(move || manager.hub().set_ready(false));
         }
     }
 }

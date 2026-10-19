@@ -140,6 +140,7 @@ impl RemoteManager {
         self.core.hub.set_push_key(key);
     }
 
+    #[cfg(test)]
     pub fn settings(&self) -> RemoteSettings {
         self.core.state().settings.clone() // owned snapshot
     }
@@ -150,17 +151,19 @@ impl RemoteManager {
 
     /// Start with the persisted settings (the app is starting up).
     pub fn start_saved(&self) -> Status {
-        let settings = self.settings();
-        if settings.enabled {
-            self.apply(settings).unwrap_or_else(|_| self.status())
-        } else {
-            {
-                let _serial = self.core.serial();
-                let push = self.core.state().settings.push.clone();
-                self.configure_push(&push);
+        let core = &self.core;
+        {
+            let _serial = core.serial();
+            let settings = core.state().settings.clone(); // owned snapshot under serial
+            if settings.enabled {
+                let old = core.state().monitor.take();
+                drop(old);
+                core.rebind(&settings);
+                core.state().monitor = core.spawn_monitor();
             }
-            self.status()
+            self.configure_push(&settings.push);
         }
+        self.publish_status()
     }
 
     /// Persist `settings` and make the server match them.

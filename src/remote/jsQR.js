@@ -1,8 +1,21 @@
 /* jsQR v1.4.0 — unminified webpack UMD build, vendored under Apache-2.0.
    Source: npm pack jsqr@1.4.0 (https://www.npmjs.com/package/jsqr)
-   License: package/LICENSE (Apache-2.0)
    SHA-256 of jsqr-1.4.0.tgz: b5299b37917a1fe7a8cab9dd5cc6b8accf82663add80abe5bf7761a921cc6602
    SHA-256 of this extracted dist/jsQR.js: bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859
+
+   Copyright 2017 Cosmo Wolfe
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
    No changes below this header.
 */
 (function webpackUniversalModuleDefinition(root, factory) {

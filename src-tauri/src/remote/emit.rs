@@ -17,6 +17,8 @@ pub struct Action {
     pub text: Option<String>,
     pub ask_id: Option<String>,
     pub value: Option<Value>,
+    #[serde(default)]
+    pub dispatched_at: Option<u64>,
 }
 
 #[derive(Serialize, Clone, Debug)]

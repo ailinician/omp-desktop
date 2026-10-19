@@ -879,8 +879,13 @@
   // state after a newer switch already took over; guarded stale call detects
   // the generation mismatch and bails without touching shared state).
   let _switchGen = 0;
+  let _switchPromise = Promise.resolve();
   async function _switchToSession(id) {
     if (!window.__TAURI__) return;
+    let done;
+    const p = new Promise(resolve => { done = resolve; });
+    _switchPromise = p;
+    try {
     const myGen = ++_switchGen;
 
     // Snapshot current session so we can restore it when switching back
@@ -1052,6 +1057,9 @@
     // get_messages handler merges completed turns with the cached streaming bubble.
     _initFetch();
     notify();
+    } finally {
+      done();
+    }
   }
 
   // ── v2 lossless transport: rpc_chunk reassembly ──────────────────────────
@@ -3268,6 +3276,8 @@
   // ── OMP_BRIDGE public API ─────────────────────────────────────────────────
   window.OMP_BRIDGE = {
     get isConnected() { return !!window.__TAURI__ && !!activeSessionId; },
+    get activeSessionId() { return activeSessionId; },
+    waitForActivation() { return _switchPromise; },
 
     // ── Messaging ────────────────────────────────────────────────────────────
     // The bubble shows at once; omp's echo (`message_start`) ties it to the

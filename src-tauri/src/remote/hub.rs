@@ -93,7 +93,7 @@ pub struct Hub {
     state: Mutex<State>,
 }
 
-fn push_key_message(key: &str) -> String {
+fn push_key_message(key: Option<&str>) -> String {
     json!({ "t": "push-key", "key": key }).to_string()
 }
 
@@ -125,9 +125,21 @@ impl State {
     }
 
     fn broadcast(&mut self, text: &str) {
-        let ids: Vec<u64> = self.conns.keys().copied().collect();
-        for id in ids {
-            self.send(id, Out::Text(text.to_owned()));
+        let mut dropped = false;
+        self.conns.retain(|_, entry| {
+            if entry.tx.try_send(Out::Text(text.to_owned())).is_ok() {
+                true
+            } else {
+                if let Some(tcp) = entry.tcp.take() {
+                    let _ = tcp.shutdown(Shutdown::Both);
+                }
+                dropped = true;
+                false
+            }
+        });
+        if dropped {
+            self.pending
+                .retain(|_, pending| self.conns.contains_key(&pending.conn));
         }
     }
 
@@ -148,10 +160,13 @@ impl State {
     }
 
     fn close_all(&mut self, code: u16) {
-        let ids: Vec<u64> = self.conns.keys().copied().collect();
-        for id in ids {
-            self.close(id, code);
+        for (_, entry) in self.conns.drain() {
+            let _ = entry.tx.try_send(Out::Close(code));
+            if let Some(tcp) = entry.tcp {
+                let _ = tcp.shutdown(Shutdown::Both);
+            }
         }
+        self.pending.clear();
     }
 
     /// Broadcast the merged tab list if it differs from the last one sent.
@@ -272,13 +287,11 @@ impl Hub {
             .map(|tab| tab.title.clone()) // owned for the push message
     }
 
-    /// Set (or withdraw) the push key; phones already connected get a new one.
+    /// Set (or withdraw) the push key; phones already connected get the update.
     pub fn set_push_key(&self, key: Option<String>) {
         self.with_state(|state| {
             if state.push_key != key {
-                if let Some(key) = &key {
-                    state.broadcast(&push_key_message(key));
-                }
+                state.broadcast(&push_key_message(key.as_deref()));
                 state.push_key = key;
             }
         });
@@ -330,8 +343,8 @@ impl Hub {
             );
             let hello = json!({ "t": "hello", "deviceId": device.id, "name": device.name });
             state.send(conn, Out::Text(hello.to_string()));
-            if let Some(text) = state.push_key.as_deref().map(push_key_message) {
-                state.send(conn, Out::Text(text));
+            if let Some(key) = state.push_key.as_deref() {
+                state.send(conn, Out::Text(push_key_message(Some(key))));
             }
             let tabs = json!({ "t": "tabs", "tabs": state.merged_tabs() });
             state.send(conn, Out::Text(tabs.to_string()));
@@ -354,21 +367,30 @@ impl Hub {
         self.with_state(|state| state.remove(conn));
     }
 
+    fn finish_push_change(&self, result: Result<(), String>) -> Result<(), String> {
+        if result.is_ok() {
+            self.emit.connections(&self.connected_devices());
+        }
+        result
+    }
+
     /// Replace one subscription (same endpoint) or add it, up to the cap.
     pub fn subscribe(&self, device_id: &str, sub: PushSubscription) -> Result<(), String> {
-        self.devices
-            .add_push(device_id, sub, MAX_PUSH_PER_DEVICE)
-            .map_err(|err| {
-                if err == "remote device not found" {
-                    "unknown device".to_owned()
-                } else {
-                    err
-                }
-            })
+        self.finish_push_change(
+            self.devices
+                .add_push(device_id, sub, MAX_PUSH_PER_DEVICE)
+                .map_err(|err| {
+                    if err == "remote device not found" {
+                        "unknown device".to_owned()
+                    } else {
+                        err
+                    }
+                }),
+        )
     }
 
     pub fn unsubscribe(&self, device_id: &str) -> Result<(), String> {
-        self.devices.set_push(device_id, Vec::new())
+        self.finish_push_change(self.devices.set_push(device_id, Vec::new()))
     }
 
     /// Revoke a device and close its sockets (4401); they get no further

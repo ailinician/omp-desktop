@@ -10,6 +10,7 @@ use super::rand::{ct_eq, random_b64};
 pub const CODE_TTL: Duration = Duration::from_secs(300);
 pub const MAX_FAILURES: usize = 5;
 pub const FAILURE_WINDOW: Duration = Duration::from_secs(60);
+const MAX_TRACKED_PEERS: usize = 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PairError {
@@ -50,7 +51,9 @@ impl Pairing {
             attempts.retain(|at| now.saturating_duration_since(*at) < FAILURE_WINDOW);
             !attempts.is_empty()
         });
-        if failures.get(&peer).is_some_and(|v| v.len() >= MAX_FAILURES) {
+        if failures.get(&peer).is_some_and(|v| v.len() >= MAX_FAILURES)
+            || (!failures.contains_key(&peer) && failures.len() >= MAX_TRACKED_PEERS)
+        {
             return Err(PairError::RateLimited);
         }
         let mut codes = self.codes.lock().unwrap_or_else(PoisonError::into_inner);

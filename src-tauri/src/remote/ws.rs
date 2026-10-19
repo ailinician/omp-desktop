@@ -43,6 +43,7 @@ const MAX_AUTH_FRAME: usize = 4096;
 const CLOSE_WRITE: Duration = Duration::from_secs(2);
 const OUTBOX: usize = 64;
 const MAX_ID_LEN: usize = 128;
+const MAX_ASK_ID_LEN: usize = 256;
 const CLOSE_TOO_BIG: u16 = 1009;
 const CLOSE_BINARY: u16 = 1003;
 const CLOSE_OVERLOAD: u16 = 1013;
@@ -164,6 +165,7 @@ fn run(
         } else if Instant::now() >= auth_deadline {
             Step::Close(CLOSE_UNAUTHORIZED)
         } else {
+            ws.get_mut().set_deadline(Some(auth_deadline));
             match read_text(ws) {
                 Ok(Frame::Idle | Frame::Skipped) => Step::Continue,
                 Ok(Frame::Text(text)) => match authenticate(hub, devices, generation, tcp, &text) {
@@ -226,21 +228,23 @@ enum Frame {
     Idle,
 }
 
+fn flush_control(ws: &mut Socket, restore_deadline: Option<Instant>) {
+    ws.get_mut()
+        .set_deadline(Some(Instant::now() + CLOSE_WRITE));
+    let _ = ws.flush();
+    ws.get_mut().set_deadline(restore_deadline);
+}
+
 fn read_text(ws: &mut Socket) -> Result<Frame, Step> {
     match ws.read() {
         Ok(Message::Text(text)) => Ok(Frame::Text(text.as_str().to_owned())),
         Ok(Message::Binary(_)) => Err(Step::Close(CLOSE_BINARY)),
         Ok(Message::Close(_)) => {
-            ws.get_mut()
-                .set_deadline(Some(Instant::now() + CLOSE_WRITE));
-            let _ = ws.flush();
+            flush_control(ws, None);
             Err(Step::Stop)
         }
         Ok(_) => {
-            ws.get_mut()
-                .set_deadline(Some(Instant::now() + CLOSE_WRITE));
-            let _ = ws.flush();
-            ws.get_mut().set_deadline(None);
+            flush_control(ws, None);
             Ok(Frame::Skipped)
         }
         Err(WsError::Io(error)) if is_idle(&error) => Ok(Frame::Idle),
@@ -288,8 +292,12 @@ fn read_step(
             handle(hub, session, &text);
             Step::Continue
         }
-        // Control frames must not renew an incomplete data message's deadline.
-        Ok(Frame::Skipped | Frame::Idle) => {
+        // Control frames must not start or renew an incomplete data message's deadline.
+        Ok(Frame::Skipped) => match frame_since {
+            Some(since) if since.elapsed() >= FRAME_LIFETIME => Step::Close(CLOSE_OVERLOAD),
+            _ => Step::Continue,
+        },
+        Ok(Frame::Idle) => {
             if ws.get_ref().bytes_read() != before {
                 frame_since.get_or_insert(started);
             }
@@ -354,6 +362,10 @@ fn build_action(session: &Authed, message: &Value, kind: &str) -> Option<Action>
     if message.get("text").is_some_and(|raw| !raw.is_null()) && text.is_none() {
         return None;
     }
+    let ask_id = text_field(message, "askId").filter(|id| id.len() <= MAX_ASK_ID_LEN);
+    if message.get("askId").is_some_and(|raw| !raw.is_null()) && ask_id.is_none() {
+        return None;
+    }
     let value = message.get("value").cloned(); // owned for the webview event
     if value
         .as_ref()
@@ -367,7 +379,8 @@ fn build_action(session: &Authed, message: &Value, kind: &str) -> Option<Action>
         tab_id,
         kind: kind.to_owned(),
         text,
-        ask_id: text_field(message, "askId").filter(|id| id.len() <= MAX_ID_LEN),
+        ask_id,
         value,
+        dispatched_at: None,
     })
 }

@@ -631,7 +631,7 @@ test("two delayed push toggles both survive: nested push merges inside the queue
     for (const child of node.children.flat()) { const hit = find(child, label); if (hit) return hit; }
     return null;
   };
-  render(); await flush();
+  render(); await flush(); await flush();
   const tree = render();
   find(tree, "Notify on questions").props.onChange(true);
   find(tree, "Notify on finished turns").props.onChange(true);

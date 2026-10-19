@@ -3,7 +3,7 @@ use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerNam
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
-use std::io::Write;
+
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -175,23 +175,8 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
             .map_err(|error| format!("create {}: {error}", parent.display()))?;
     }
     let temporary = path.with_extension(format!("{}.tmp", super::rand::random_b64(12)?));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let result = (|| {
-        let mut file = options.open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result.map_err(|error| format!("write {}: {error}", path.display()))
+    crate::private_fs::write_private_via(path, &temporary, bytes)
+        .map_err(|error| format!("write {}: {error}", path.display()))
 }
 
 #[cfg(test)]

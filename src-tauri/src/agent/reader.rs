@@ -132,12 +132,7 @@ fn try_auto_approve<W: std::io::Write>(
         return None;
     }
     let id = approval::approval_request_id(frame)?;
-    let response = serde_json::json!({
-        "type": "extension_ui_response",
-        "id": id,
-        "value": "Approve",
-    })
-    .to_string();
+    let response = approvals::approve_answer(id);
     if let Ok(mut w) = stdin.lock() {
         let _ = writeln!(*w, "{response}");
         let _ = w.flush();
