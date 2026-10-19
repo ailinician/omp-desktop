@@ -60,7 +60,12 @@ pub fn interfaces() -> Result<Vec<Iface>, String> {
     Ok(list)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::interfaces;
+
+#[cfg(not(any(unix, windows)))]
 pub fn interfaces() -> Result<Vec<Iface>, String> {
     Err("remote access is not supported on this platform yet".into())
 }

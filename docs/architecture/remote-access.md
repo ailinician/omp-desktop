@@ -31,7 +31,7 @@ phone page ⇄ TLS/WebSocket ⇄ Rust hub ⇄ Tauri events/commands ⇄ webview 
 - The device token is 32 random bytes (base64url), returned once; only its SHA-256 hex is stored and it is compared in constant time. The phone keeps it in `localStorage`.
 - WebSocket `/ws`: the first frame must be `{"t":"auth","token":…}` within 5 s, else close 4401. A revoked token closes with 4401 and the page forgets it. Max 4 sockets per device (4429), 8 in total.
 - DNS-rebinding guard: `Host` must equal `<ip>:<port>` or `<host name>:<port>`; a WebSocket `Origin` must equal the matching `https://…` (`http://…` only with the plain-HTTP switch). Anything else is 403 before any handler runs.
-- The server binds only the IPv4 of the interface chosen **by name**, never `0.0.0.0`/`::`; a changed or vanished interface IP rebinds or stops it. Windows has no interface lookup yet: enabling it reports "remote access is not supported on this platform yet".
+- The server binds only the IPv4 of the interface chosen **by name**, never `0.0.0.0`/`::`; a changed or vanished interface IP rebinds or stops it. Unix uses `getifaddrs`; Windows uses `GetAdaptersAddresses(AF_INET)` and its UTF-16 friendly names (for example, `Ethernet` or `Wi-Fi`). Both list only up, non-loopback interfaces with non-loopback, non-wildcard IPv4 addresses; Windows also excludes tentative, duplicate and invalid addresses. VPN/tunnel adapters remain eligible. Renaming the selected adapter requires selecting its new name in Settings.
 
 ## TLS and certificates
 
@@ -87,12 +87,12 @@ Server → phone: `hello {deviceId,name}`, `tabs`, `view`, `theme {id,tone,accen
 - A paired phone is trusted with the capabilities above and nothing more; it never gets a Tauri bridge. Anyone on the network without a token receives only 4401/403/429.
 - Tokens: hashed at rest, constant-time compare, revocable per device (Settings → Paired phones; revoking drops its sockets and push subscriptions).
 - Attack surface limits: one interface, bounded connections, bounded frames, rate-limited pairing, DNS-rebinding checks, CSP, no inline script.
-- Secrets (`remote.json`, `remote-devices.json`, `cert.pem`, `key.pem`, VAPID key) are written 0600.
+- Secrets (`remote.json`, `remote-devices.json`, `cert.pem`, `key.pem`, VAPID key) are written with mode 0600 on Unix; on Windows they inherit the per-user app config directory's ACLs.
 - Phone actions run serially in the desktop webview. Each carries its device id and enqueue time; before running, and again after every wait (tab switch, the 5 s ask wait), the executor requires the server to listen, the device to be paired and connected, and the action to be at most 15 s old (the Rust ack timeout). Otherwise it acks `ok:false` (`remote access disabled`, `device revoked`, `expired`). At most 16 actions wait; more are acked `busy`. The ack reports the IPC hand-off: `send`, `steer`, `abort` and the answer methods resolve to a boolean, and `false` or a rejection acks `desktop could not deliver`.
 
 ## Limits
 
-- Windows is not supported (no interface lookup); Linux and macOS are.
+- Supported on Windows, Linux and macOS. Windows Firewall may need permission for the app's incoming connections on the chosen network; the app does not add firewall rules or request elevation.
 - The phone tab is the desktop tab: only the desktop's active tab has a live view, and a phone selecting a tab switches the desktop.
 - Push has only been verified with a certificate the phone trusts.
 - The phone page has no file picker, attachments, model switching or settings.
