@@ -159,7 +159,7 @@ class Element {
 }
 function descendants(node) { return [node, ...node.children.flatMap(descendants)]; }
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
-function browser({ pair = false, token = "saved-token", standalone = true } = {}) {
+function browser({ pair = false, token = "saved-token", standalone = true, pairStatus = 200 } = {}) {
   const app = new Element("main");
   const windowHandlers = {}, docHandlers = {};
   const frames = [], sockets = [], timers = [], requests = [], registrations = [];
@@ -194,7 +194,7 @@ function browser({ pair = false, token = "saved-token", standalone = true } = {}
     addEventListener(name, fn) { (windowHandlers[name] ??= []).push(fn); },
     history: { replaceState(_state, _title, url) { const next = new URL(url, "https://phone.test:7470/"); location.search = next.search; location.hash = next.hash; requests.push(["history", url]); } },
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
-    fetch: async (url, options) => { requests.push([url, JSON.parse(options.body)]); return { ok: true, json: async () => ({ token: "paired-token", deviceId: "d" }) }; },
+    fetch: async (url, options) => { requests.push([url, JSON.parse(options.body)]); return { ok: pairStatus === 200, status: pairStatus, json: async () => ({ token: "paired-token", deviceId: "d" }) }; },
     setTimeout: (fn, delay) => { timers.push({ fn, delay }); return timers.length; }, clearTimeout() {},
     setInterval: () => 1, clearInterval() {},
   });
@@ -221,6 +221,20 @@ const view = (busy = false) => ({ t: "view", view: { tabId: "t", busy, messages:
   { id: "x", role: "tool", tool: { name: "read", summary: "<tool>", output: "<output>" } },
   { id: "h", role: "thinking", text: "secret thinking" },
 ], asks: [{ id: "q", kind: "confirm", title: "<Question>", message: "Allow?" }] } });
+await check("a failed #pair= code falls back to the stored token and keeps it", async () => {
+  const b = browser({ pair: true, token: "saved-token", pairStatus: 410 });
+  await b.connect();
+  assert.ok(b.requests.some(r => r[0] === "/pair"), "the code was tried");
+  assert.equal(b.storage.get("omp-remote-token"), "saved-token");
+  assert.equal(b.ctx.location.hash, "", "the spent code leaves the URL");
+  assert.deepEqual(b.frames[0], { t: "auth", token: "saved-token" });
+});
+await check("a failed #pair= code without a stored token stays unpaired", async () => {
+  const b = browser({ pair: true, token: null, pairStatus: 410 });
+  await b.connect().catch(() => {});
+  assert.equal(b.sockets.length, 0, "no socket without a token");
+  assert.equal(b.storage.get("omp-remote-token"), undefined);
+});
 await check("pairing exchanges fragment, stores token, removes fragment, then authenticates first", async () => {
   const b = browser({ pair: true, token: null });
   await b.connect();

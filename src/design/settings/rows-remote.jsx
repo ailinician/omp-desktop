@@ -53,11 +53,18 @@ function _SRR_useRemote(bridge) {
   return { status, error, apply, run, setError };
 }
 
-/** Text field committed on blur or Enter; re-syncs when the saved value changes. */
+/** The port a text field holds, or `null` for anything but an integer in 1–65535. */
+function _SRR_parsePort(text) {
+  const n = Number(text);
+  return text.trim() !== "" && Number.isInteger(n) && n > 0 && n < 65536 ? n : null;
+}
+
+/** Text field committed on blur or Enter; re-syncs when the saved value changes.
+ *  `onCommit` returning `false` rejects the text: the field shows the saved value again. */
 function _SRR_Field({ value, onCommit, label, placeholder, width, disabled, mono = true }) {
   const [text, setText] = React.useState(value);
   React.useEffect(() => setText(value), [value]);
-  const commit = () => { if (text !== value) onCommit(text); };
+  const commit = () => { if (text !== value && onCommit(text) === false) setText(value); };
   return (
     <input className="st-rem-input" type="text" value={text} aria-label={label} placeholder={placeholder}
       disabled={disabled} spellCheck={false} style={{ width, fontFamily: mono ? undefined : "inherit" }}
@@ -108,7 +115,11 @@ function _SRR_Server({ row, ctx, query }) {
         </_SRR_Line>
         <_SRR_Line label="Port">
           <_SRR_Field value={String(s?.port ?? "")} label="Port" width={90} disabled={!s}
-            onCommit={text => { const n = Number(text); if (Number.isInteger(n) && n > 0 && n < 65536) apply({ port: n }); }} />
+            onCommit={text => {
+              const port = _SRR_parsePort(text);
+              if (port === null) return false;
+              apply({ port });
+            }} />
         </_SRR_Line>
         <_SRR_Line label="Host name">
           <_SRR_Field value={s?.hostName ?? ""} label="Host name" placeholder="e.g. omp.home.lan" width={240} disabled={!s}

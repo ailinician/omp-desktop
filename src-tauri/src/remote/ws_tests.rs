@@ -602,9 +602,8 @@ fn authenticated_partial_reads_do_not_reset_the_frame_deadline() {
     authenticated_trickle_is_cut(Duration::from_millis(100), "ws-authed-partials");
 }
 
-/// A masked client text frame (zero mask key) of a valid `push-unsubscribe`
-/// message padded to `len` bytes of payload, plus the time it takes to send
-/// it one byte per `total / bytes`.
+/// A masked client text frame (zero mask key) carrying a valid
+/// `push-unsubscribe` message padded to `len` bytes of payload.
 fn padded_frame(len: usize) -> Vec<u8> {
     let head = r#"{"t":"push-unsubscribe","pad":""#;
     let mut payload = head.as_bytes().to_vec();

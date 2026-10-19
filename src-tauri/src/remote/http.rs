@@ -269,6 +269,7 @@ pub const fn reason(status: u16) -> &'static str {
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
         501 => "Not Implemented",
+        503 => "Service Unavailable",
         _ => "Internal Server Error",
     }
 }
@@ -293,3 +294,7 @@ pub fn write_response<W: Write>(out: &mut W, response: &Response) -> io::Result<
     out.write_all(&response.body)?;
     out.flush()
 }
+
+#[cfg(test)]
+#[path = "http_tests.rs"]
+mod tests;

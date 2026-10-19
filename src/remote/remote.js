@@ -260,9 +260,11 @@
       scanHint.textContent = "";
       updateControls();
       connect();
+      return true;
     } catch (err) {
       scanHint.textContent = err.message;
       updateControls();
+      return false;
     }
   }
 
@@ -689,9 +691,10 @@
     try {
       const code = new URLSearchParams(location.hash.slice(1)).get("pair");
       if (code) {
-        await pairFromCode(code);
+        const paired = await pairFromCode(code);
         history.replaceState(null, "", location.pathname);
-        return;
+        // An expired or used code must not hide a token this phone already has.
+        if (paired) return;
       }
       token = localStorage.getItem(TOKEN_KEY);
       if (token) connect();

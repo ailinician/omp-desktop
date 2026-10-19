@@ -18,7 +18,7 @@ phone page ⇄ TLS/WebSocket ⇄ Rust hub ⇄ Tauri events/commands ⇄ webview 
 
 ## Commands and `Status`
 
-`remote_status`, `remote_interfaces`, `remote_apply_settings` (always the **complete** `RemoteSettings`: enabled, interface name, port, host name, cert `generated | files{cert,key}`, push{enabled, questions, finished, contact}), `remote_pair_start` (→ `{url, svg, expiresAt}`), `remote_pair_cancel`, `remote_device_rename`, `remote_device_revoke`, `remote_regenerate_cert`, `remote_push_test`, `remote_default_contact` (`user.email` of the global git config, read through gix), `remote_publish`, `remote_action_result`, `remote_ready`.
+`remote_status`, `remote_interfaces`, `remote_apply_settings` (always the **complete** `RemoteSettings`: enabled, interface name, port, host name, cert `generated | files{cert,key}`, push{enabled, questions, finished, contact}), `remote_pair_start` (→ `{url, svg, expiresAt}`), `remote_pair_cancel`, `remote_device_rename`, `remote_device_revoke`, `remote_regenerate_cert`, `remote_push_test`, `remote_default_contact` (`user.email` of the global and system git config, read through gix), `remote_publish`, `remote_action_result`, `remote_ready`.
 
 `Status` carries `enabled`, `listening`, `url`, `ip`, `error`, `fingerprint`, `pushError`, `devices[{id,name,pairedAt,lastSeen,connected,pushSubscribed}]` and the saved `settings`, so the Settings rows prefill from it and refresh on every `remote://status`.
 
@@ -77,14 +77,14 @@ Server → phone: `hello {deviceId,name}`, `tabs`, `view`, `theme {id,tone,accen
 ## Web Push
 
 - Triggers (Settings): a question opened (immediately) and a turn finished (only if it ran ≥ 30 s). At most one push per tab per 30 s; the notification `tag` is the tab id. Title `OMP · <tab title>`, body `Question waiting` / `Finished`; no transcript text. `TTL 3600`, urgency high (question) / normal (finished).
-- Needs the VAPID key (generated in the app config dir) and a **real contact** (`mailto:` or `https:`) in Settings; Apple rejects placeholders with 403 `BadJwtToken`. The Settings row prefills it from the global git config `user.email`. Without a valid contact nothing is sent and `Status.pushError` says why.
+- Needs the VAPID key (generated in the app config dir) and a **real contact** (`mailto:` or `https:`) in Settings; Apple rejects placeholders with 403 `BadJwtToken`. The Settings row prefills it from the global and system git config `user.email`. Without a valid contact nothing is sent and `Status.pushError` says why.
 - Subscriptions come from the page (`push-subscribe`, after a user gesture in the home-screen app); the page registers `/sw.js`, which shows the notification and on tap focuses or opens `/?tab=<id>` (`clients.claim()` on activate; `navigate` rejecting falls back to `openWindow`).
 - **Endpoint allowlist**: a subscription is only stored for `https` endpoints on `fcm.googleapis.com`, `updates.push.services.mozilla.com`, `*.push.apple.com` and `*.notify.windows.com`, so a paired phone cannot make the desktop send requests to arbitrary hosts. 404/410 from the push service deletes the subscription.
 - Earlier spike evidence (not feature acceptance): push delivery worked once with a certificate the phone trusts (the mkcert wildcard above, iOS 18.7 home-screen app). Real-phone acceptance of this feature is still pending. `PushManager` exists only in the home-screen app, not in a normal Safari tab.
 
 ## Security model
 
-- A paired phone is trusted with the capabilities above and nothing more; it never gets a Tauri bridge. Anyone on the network without a token receives only 4401/403/429.
+- A paired phone is trusted with the capabilities above and nothing more; it never gets a Tauri bridge. Without a token the network reaches only the static phone page and assets (public, no secrets in them) and `POST /pair` (a valid one-use code, rate-limited: 429 after 5 failures per minute per IP, 403 for a wrong code, 410 for an expired or spent one, 503 when the server was replaced meanwhile). Every protected request is refused: a WebSocket without a valid first `auth` frame closes 4401, a wrong `Host` or `Origin` gets 403, a flood gets 429.
 - Tokens: hashed at rest, constant-time compare, revocable per device (Settings → Paired phones; revoking drops its sockets and push subscriptions).
 - Attack surface limits: one interface, bounded connections, bounded frames, rate-limited pairing, DNS-rebinding checks, CSP, no inline script.
 - Secrets (`remote.json`, `remote-devices.json`, `cert.pem`, `key.pem`, VAPID key) are written 0600.

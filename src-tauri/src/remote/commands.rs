@@ -115,9 +115,10 @@ pub async fn remote_push_test(app: AppHandle) -> Result<(), String> {
     with_manager(app, RemoteManager::push_test).await
 }
 
-/// The `user.email` of the user's global git configuration, to prefill the
-/// push contact; empty when it is not set. Read through gix: no `git`
-/// process, and never the config of whatever repository the app was started in.
+/// The `user.email` of the user's global and system git configuration, to
+/// prefill the push contact; empty when it is not set. Read through gix: no
+/// `git` process, and never the config of whatever repository the app was
+/// started in.
 #[tauri::command]
 pub async fn remote_default_contact() -> String {
     tauri::async_runtime::spawn_blocking(|| {

@@ -325,26 +325,22 @@ impl Hub {
                     tcp,
                 },
             );
+            // Serialise everything from `state` first: `send` needs it mutably.
             let hello = json!({ "t": "hello", "deviceId": device.id, "name": device.name });
-            state.send(conn, Out::Text(hello.to_string()));
-            if let Some(key) = state.push_key.clone() {
-                // The new socket's own copy of the key.
-                state.send(conn, Out::Text(push_key_message(&key)));
-            }
+            let key = state.push_key.as_deref().map(push_key_message);
             let tabs = json!({ "t": "tabs", "tabs": state.merged_tabs() });
-            state.send(conn, Out::Text(tabs.to_string()));
-            if let Some(view) = state.view.clone() {
-                // The new socket's own copy of the current view.
-                state.send(
-                    conn,
-                    Out::Text(json!({ "t": "view", "view": view }).to_string()),
-                );
-            }
-            if let Some(theme) = state.theme.clone() {
-                state.send(
-                    conn,
-                    Out::Text(json!({ "t": "theme", "theme": theme }).to_string()),
-                );
+            let view =
+                (state.view.as_ref()).map(|view| json!({ "t": "view", "view": view }).to_string());
+            let theme = (state.theme.as_ref())
+                .map(|theme| json!({ "t": "theme", "theme": theme }).to_string());
+            state.send(conn, Out::Text(hello.to_string()));
+            for text in key
+                .into_iter()
+                .chain([tabs.to_string()])
+                .chain(view)
+                .chain(theme)
+            {
+                state.send(conn, Out::Text(text));
             }
             Ok(conn)
         })

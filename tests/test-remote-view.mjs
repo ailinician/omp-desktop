@@ -664,6 +664,51 @@ test("Enter during IME composition does not blur a settings field", () => {
   assert.equal(press({ key: "a" }), 0, "other keys do not blur");
 });
 
+// ---- settings: a rejected value does not stay in the field -------------------
+test("parsePort accepts only integers in 1-65535", () => {
+  const { scope } = remoteRows();
+  for (const [text, want] of [["7470", 7470], [" 80 ", 80], ["65535", 65535], ["1", 1],
+    ["", null], ["  ", null], ["abc", null], ["0", null], ["65536", null], ["70000", null], ["-1", null], ["1.5", null]]) {
+    assert.equal(scope._SRR_parsePort(text), want, JSON.stringify(text));
+  }
+});
+
+test("a field whose onCommit rejects shows the saved value again; an accepted one keeps the text", () => {
+  const { scope, reset } = remoteRows();
+  const field = (value, onCommit) => { reset(); return scope._SRR_Field({ value, onCommit, label: "Port" }); };
+  const typeAndBlur = (value, onCommit, typed) => {
+    field(value, onCommit).props.onChange({ target: { value: typed } });
+    field(value, onCommit).props.onBlur(); // re-render with the typed text, then leave the field
+    return field(value, onCommit).props.value;
+  };
+  assert.equal(typeAndBlur("7470", () => false, "abc"), "7470", "rejected text is dropped");
+  assert.equal(typeAndBlur("7470", () => {}, "8080"), "8080", "accepted text stays until Rust reports the new value");
+});
+
+test("the Port row rejects non-numeric, zero and out-of-range text and applies a valid port", async () => {
+  const { window, reset } = remoteRows();
+  const applies = [];
+  const settings = { enabled: true, interface: "en0", port: 7470, hostName: null, cert: {}, push: {} };
+  const bridge = {
+    onRemoteEvent: () => () => {}, remoteStatus: async () => ({ settings, devices: [] }),
+    remoteInterfaces: async () => [], remoteApply: async s => { applies.push(s); return { ok: true, value: { settings: s, devices: [] } }; },
+  };
+  const render = () => { reset(); return window.OMP_SETTINGS_ROWS.remoteServer({ row: {}, ctx: { bridge }, query: "" }); };
+  const find = (node, label) => {
+    if (!node || typeof node !== "object") return null;
+    if (node.props?.label === label && node.props.onCommit) return node;
+    for (const child of node.children.flat()) { const hit = find(child, label); if (hit) return hit; }
+    return null;
+  };
+  render(); await flush();
+  const port = find(render(), "Port");
+  for (const text of ["abc", "0", "70000", ""]) assert.equal(port.props.onCommit(text), false, text);
+  assert.equal(applies.length, 0, "a rejected port is never applied");
+  assert.notEqual(port.props.onCommit("8080"), false);
+  await flush();
+  assert.equal(applies[0].port, 8080);
+});
+
 // ---- settings: the server row has no plain-HTTP switch any more -------------
 test("the server row offers no plain HTTP, even for settings that still carry allowHttp", async () => {
   const { window, reset } = remoteRows();

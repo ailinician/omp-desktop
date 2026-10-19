@@ -15,7 +15,9 @@ const MAX_DEVICE_NAME_CHARS: usize = 64;
 const LAST_SEEN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A device name as stored: trimmed and cut to [`MAX_DEVICE_NAME_CHARS`].
-/// `None` when nothing is left. Pairing and renaming both go through this.
+/// `None` when nothing is left. Pairing and renaming both go through this;
+/// the phone sends the first 120 characters of its user agent, and a longer
+/// name is cut, not refused.
 pub fn normalize_name(name: &str) -> Option<String> {
     let name: String = name.trim().chars().take(MAX_DEVICE_NAME_CHARS).collect();
     (!name.is_empty()).then_some(name)

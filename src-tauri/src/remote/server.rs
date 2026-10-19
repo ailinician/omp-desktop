@@ -19,8 +19,6 @@ use super::pairing::{PairError, Pairing};
 
 /// `POST /pair` bodies are tiny JSON; anything bigger is refused.
 const MAX_PAIR_BODY: usize = 4096;
-/// The phone sends the first 120 characters of its user agent; longer names
-/// are cut, not refused.
 /// Live connections, all peers together, from accept to the end of the
 /// connection thread (an upgraded WebSocket included): each holds a thread
 /// and two descriptors, and macOS defaults to 256 descriptors per process.
