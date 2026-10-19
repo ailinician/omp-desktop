@@ -27,7 +27,7 @@ It never sends a path, a command, a trigger or a context to Rust: only plugin id
 | `src-tauri/src/widgets/run.rs` | `run_plugin(entry, argv, ctx, on_spawn) -> Outcome`: spawn of the given argv, stdin context, timeout, stdout cap, process-tree kill |
 | `src-tauri/src/widgets/context.rs` | `session_ctx(project)` (branch, password-free default remote; one repo discovery) and the bounded `PluginContext` |
 | `src-tauri/src/widgets/redact.rs` | credential masking for error text, on top of the crate-level `redaction.rs` shared with `agent/reader.rs` |
-| `src/app/widgets.js` | pure: `parseOutput`, `insertText`, `safeUrl`, `tweakKey`, `relativeTime`, `appendToDraft`, and the run bookkeeping `runKey`, `mergeRun`, `parsedLast`, `cardRun` (`test-widgets.mjs`) |
+| `src/app/widgets.js` | pure: `parseOutput`, `insertText`, `safeUrl`, `tweakKey`, `relativeTime`, `appendToDraft`, `attentionStep`, `ackKey`, and the run bookkeeping `runKey`, `mergeRun`, `parsedLast`, `cardRun` (`test-widgets.mjs`) |
 | `src/app/use-widgets.jsx` | thin hook: snapshot + run map from events, sends view state, memoised parse per (key, `last.at`) |
 | `src/design/widgets/` | `WidgetCard`, `WidgetApprovalCard`, `WidgetErrorCard`, `WidgetBoundary`, block renderers |
 
@@ -169,6 +169,7 @@ Frontend handling:
 - **Approval cards** render for every enabled plugin whose approval is not `approved`, regardless of `match`, unless its `widget:plugin:<id>` tweak is off.
 - **Result cards** render per id in `active.applicable` (idle until the first run). The run shown is the one keyed by the active session id, or `__global__` for global plugins.
 - **Event ordering.** `use-widgets.jsx` fetches `widgets_state` on mount and merges events by `seq`, so a `widgets://run` that arrives before the fetch resolves is not lost.
+- **Attention.** `parseOutput` keeps a clipped `attention` string on the widget. `OMP_WIDGETS.attentionStep({key, ack, seen, hasWidget})` (pure) decides `active` (`hasWidget`, key non-empty and ≠ the stored ack), `seen` (the key to remember in a ref in `use-widgets.jsx`), `writeAck` (true once a successful run has no key, to clear a stored ack to `null`) and `bounce` (`active` and ≠ `seen`). `OMP_WIDGETS.ackKey(id, scopeId)` builds the tweak key (`widgetAck:<id>` for global plugins, `widgetAck:<id>:<hash of project path>` for tab plugins — not `widget:`, which Settings → Rail treats as a toggle) so acks survive restarts; click → `acknowledge(id)` stores the shown key. On `bounce` with `_uwVisible()` and `!document.hasFocus()`, `_uwRequestAttention` calls the Tauri window API `requestUserAttention(Informational)` (capability `core:window:allow-request-user-attention`); errors are swallowed. Without a widget (idle, error) `hasWidget` is false and the step leaves the ack and `seen` alone.
 - **`live.js` exposes** `widgetsState`, `widgetsReload`, `widgetsApprove`, `widgetsSetView`, `widgetsRefresh` and `onWidgetsEvent`. In browser mode (no `__TAURI__`) the snapshot calls return `{}`; `applySnapshot` defaults every missing field.
 
 ## Trust

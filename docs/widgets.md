@@ -220,6 +220,7 @@ Top level:
 | `version` | yes | Must be the number `1`. Another number gives the error card "plugin reports version N, this desktop supports 1"; a non-number gives "plugin reports an invalid version, …". |
 | `status` | no | `ok` \| `warn` \| `error` \| `info` \| `neutral` (default `neutral`). Tints the dot in the card head. |
 | `blocks` | yes | An array of at most 32 blocks. |
+| `attention` | no | A string of at most 200 chars that asks for notice: see [Attention](#attention). Missing, empty or not a string means no attention. |
 
 Blocks:
 
@@ -248,13 +249,29 @@ Field rules:
   - The tooltip shows the ISO timestamp.
 - **A `list`** scrolls inside a 220 px area, so a long list never makes the card taller than the rail.
 - **Strings** are rendered as text, never as HTML or markdown.
-- **Lengths.** `label`, `value`, `detail`, `k`, `v` and `title` are cut to 200 chars; `text` to 2000. A list keeps at most 50 items and a `kv` block at most 50 rows. These caps are enforced by the frontend parser (`src/app/widgets.js`).
+- **Lengths.** `label`, `value`, `detail`, `k`, `v`, `title` and `attention` are cut to 200 chars; `text` to 2000. A list keeps at most 50 items and a `kv` block at most 50 rows. These caps are enforced by the frontend parser (`src/app/widgets.js`).
 
 ### Conventions
 
 - **List items are the clickable rows.** Use them for MRs, CI jobs, branches, or any other row the user can act on.
 - **Empty state.** Use a `text` block ("No open MRs.", "Pipeline never run.") rather than an empty `list` or `kv`.
 - **One card per plugin.** Each config entry produces one card, with up to 32 blocks.
+
+### Attention
+
+A plugin that needs the user to look at its card sets `"attention": "<key>"`. The key says *what* needs notice, so it must change when the situation does and stay the same while it does not. A good key is a hash of the sorted set of problems (for example the sorted failing job names), not a timestamp or a counter.
+
+- **State.** A card is in attention while its current key is non-empty and differs from the key you last acknowledged. A rerun that prints the same key changes nothing.
+- **Look.** The card border and the dot before the title pulse (about 1.5 s) in the card's status colour: red for `error`, amber for `warn`, otherwise the accent. With reduced motion (`prefers-reduced-motion: reduce`) the border is static and thicker and the dot is static. While the plugin reruns, the pulse keeps the status colour of the widget still shown.
+- **Acknowledge.** A click anywhere on the card acknowledges the key; a click on a list item still inserts or opens as usual. For keyboard and screen reader users the card head has a small "Acknowledge" button while the card is in attention (the card is also announced as "needs attention"); it does nothing else. The acknowledged key is stored in the tweak store and survives restarts: for a global plugin per plugin id (`widgetAck:<id>`), for a tab plugin per plugin id and project path (`widgetAck:<id>:<hash of the path>`, not per tab, because tab ids change every launch). Two tabs of the same project share the ack; a tab of another project never touches it, so a project with no key does not reset the ack of a project that has one.
+- **Clear.** When a successful run has no key (or an empty one), the attention ends and the stored key is dropped, so the same key alerts again if it comes back. A failed or running run changes nothing.
+- **Dock.** When a card *enters* attention (a new, unacknowledged key) while the window is visible but not focused, the desktop requests the user's attention once with the informational type (a single dock bounce on macOS). A rerun with the same key does not bounce again. The widget scheduler pauses while the window is hidden or minimized, so no new key arrives then and nothing bounces: the bounce only fires for a visible window without focus. Where the OS or the window API does not support it, nothing happens.
+
+```json
+{ "version": 1, "status": "warn", "attention": "9f2c41aa", "blocks": [ … ] }
+```
+
+Here `9f2c41aa` is a short hash of `["build", "lint"]`, the sorted names of the failing jobs.
 
 ## Errors
 

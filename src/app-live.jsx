@@ -335,7 +335,7 @@ function App() {
   // tab's id (see handleSelectProfile below). Widgets only run while the
   // rail is on screen — not in focus layout, not under the tree or browser.
   const widgets = useWidgets({
-    bridge, activeSessionId: activeProject.id, railVisible: t.layout !== "focus" && side === "rail", tweaks: t,
+    bridge, activeSessionId: activeProject.id, activeProjectPath: activeProject.path ?? null, railVisible: t.layout !== "focus" && side === "rail", tweaks: t, setTweak,
   });
   // Pushed by omp, not run by the desktop: nothing to schedule, only a
   // Settings → Rail toggle per card (`widget:ext-status`, `widget:ext:<key>`).
@@ -974,7 +974,7 @@ function App() {
                   ))}
                   {widgets.cards.map(c => (
                     <WidgetBoundary key={c.id} title={c.title} resetKey={c.resetKey}>
-                      <WidgetCard title={c.title} run={c.run}
+                      <WidgetCard title={c.title} run={c.run} attention={c.attention} onAck={() => widgets.acknowledge(c.id)}
                         onRefresh={() => widgets.refresh(c.id)} onInsert={handleWidgetInsert} />
                     </WidgetBoundary>
                   ))}

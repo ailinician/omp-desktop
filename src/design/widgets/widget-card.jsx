@@ -28,19 +28,29 @@ function WidgetErrorCard({ title, error }) {
 
 /** `source`: set for content another program pushes (omp extensions, #52)
  *  rather than a plugin run — shown as the card's chip in place of the run
- *  timing, with the accent border. */
-function WidgetCard({ title, run, onRefresh, onInsert, source }) {
+ *  timing, with the accent border. `attention`: the plugin's unacknowledged
+ *  attention key (docs/widgets.md#attention); a click anywhere on the card
+ *  calls `onAck`. */
+function WidgetCard({ title, run, onRefresh, onInsert, source, attention, onAck }) {
   const state = run?.state ?? "idle";
   const widget = run?.widget ?? null;
-  const toneClass = state === "error" ? "tone-error" : state === "ok" && widget ? `tone-${widget.status}` : "tone-neutral";
   const stale = state === "running" && widget != null;
+  const toneClass = state === "error" ? "tone-error" : (state === "ok" || stale) && widget ? `tone-${widget.status}` : "tone-neutral";
   const meta = source ?? (state === "running" ? "running…" : run?.durationMs != null ? `${run.durationMs} ms · ${_wcTime(run.at)}` : "");
   return (
-    <div className={`rail-card glass wdg-card ${toneClass}${stale ? " wdg-stale" : ""}${source ? " wdg-pushed" : ""}`}>
+    <div role={attention ? "group" : undefined} aria-label={attention ? `${title}: needs attention` : undefined}
+      className={`rail-card glass wdg-card ${toneClass}${stale ? " wdg-stale" : ""}${source ? " wdg-pushed" : ""}${attention ? " wdg-attn" : ""}`}
+      onClick={attention ? onAck : undefined}>
       <div className="rail-card-head">
         <span className={`wdg-dot${state === "running" ? " pulse-dot" : ""}`} />
         <span className="mono wdg-title">{title}</span>
         {meta ? <span className="chip muted mono wdg-meta">{meta}</span> : <span className="wdg-meta" />}
+        {attention && (
+          <button className="btn icon ghost wdg-ack" title="Acknowledge" aria-label="Acknowledge"
+            onClick={(e) => { e.stopPropagation(); onAck?.(); }}>
+            <_WC_Icon name="check" size={10} />
+          </button>
+        )}
         {onRefresh && (
           <button className="btn icon ghost" title="refresh" aria-label={`refresh ${title}`} disabled={state === "running"} onClick={onRefresh}>
             <_WC_Icon name="refresh" size={10} />
