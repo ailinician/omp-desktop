@@ -356,21 +356,15 @@ impl Hub {
 
     /// Replace one subscription (same endpoint) or add it, up to the cap.
     pub fn subscribe(&self, device_id: &str, sub: PushSubscription) -> Result<(), String> {
-        let mut subs = self
-            .devices
-            .list()
-            .into_iter()
-            .find(|device| device.id == device_id)
-            .map(|device| device.push)
-            .ok_or("unknown device")?;
-        if let Some(slot) = subs.iter_mut().find(|known| known.endpoint == sub.endpoint) {
-            *slot = sub;
-        } else if subs.len() >= MAX_PUSH_PER_DEVICE {
-            return Err("too many push subscriptions".to_owned());
-        } else {
-            subs.push(sub);
-        }
-        self.devices.set_push(device_id, subs)
+        self.devices
+            .add_push(device_id, sub, MAX_PUSH_PER_DEVICE)
+            .map_err(|err| {
+                if err == "remote device not found" {
+                    "unknown device".to_owned()
+                } else {
+                    err
+                }
+            })
     }
 
     pub fn unsubscribe(&self, device_id: &str) -> Result<(), String> {

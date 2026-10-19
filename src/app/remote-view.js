@@ -23,6 +23,7 @@
     return {
       id: ask.id ?? message.id, kind, title: ask.title ?? "", message: ask.message ?? "",
       ...(kind === "select" ? { options: ask.options ?? [] } : {}),
+      ...(kind === "editor" && typeof (ask.prefill ?? ask.value) === "string" ? { value: ask.prefill ?? ask.value } : {}),
       ...(kind === "dialog" ? { questions: ask.questions ?? [] } : {}),
     };
   }

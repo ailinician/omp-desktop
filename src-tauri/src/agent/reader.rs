@@ -238,6 +238,40 @@ fn record_tracker_frame(
     }
 }
 
+fn retire_reader_session(
+    sessions: &Mutex<HashMap<String, BridgeInner>>,
+    sid: &str,
+    gen: u64,
+    alive: &AtomicBool,
+) -> bool {
+    let mut announce = false;
+    if let Ok(mut s) = sessions.lock() {
+        match s.get(sid).map(|inner| inner.gen) {
+            Some(g) if g == gen => {
+                // Still ours — we're the last stop for this id. Clear
+                // `alive` and the tracker state before giving up the
+                // entry so a concurrent replacement cannot have its own
+                // tracker state wiped after the lock is released.
+                s.remove(sid);
+                alive.store(false, Ordering::Release);
+                announce = true;
+            }
+            // A fresher incarnation already owns the id — stay mute,
+            // its own reader speaks for it now.
+            Some(_) => {}
+            // Entry already gone: a racing `stop_session` or a
+            // superseding `start_session` removed it and cleared
+            // `alive` and the tracker inside that same critical section
+            // before releasing the `sessions` lock (see `agent/mod.rs`).
+            None => announce = should_emit(alive),
+        }
+        if announce {
+            crate::remote::tracker::tracker().on_exit(sid);
+        }
+    }
+    announce
+}
+
 pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
     let StdoutReaderConfig {
         sessions,
@@ -319,12 +353,15 @@ pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
                     // One allocation for the line, shared with the journal
                     // by refcount rather than copied into it.
                     let shared: Arc<str> = Arc::from(notice.unwrap_or(sanitized));
+                    // Record in the tracker before exposing the frame in the
+                    // journal: a background tab activated in between cannot
+                    // replay and answer a question before the tracker knows it.
+                    record_tracker_frame(&sid, frame_type, parsed.as_ref(), auto_approved, &alive);
                     let seq = journal.lock().map_or(0, |mut j| j.push(shared.clone()));
                     // After the push, stamped with its seq: a snapshot taken
                     // in between names an older seq, so the frontend still
                     // applies this frame from the replay.
                     ext_ui::record(&ext_ui, seq, frame_type, parsed.as_ref());
-                    record_tracker_frame(&sid, frame_type, parsed.as_ref(), auto_approved, &alive);
                     if should_emit(&alive) {
                         let _ = app.emit(&line_event, LineEvent { seq, text: &shared });
                         // Rail widgets with a `turn_end` trigger rerun after
@@ -358,34 +395,10 @@ pub(super) fn spawn_stdout_reader(config: StdoutReaderConfig) {
         // stayed `alive` forever: nothing else ever clears the flag for an
         // incarnation that retires on its own, since `reap_and_clear_grants`
         // only runs when *something else* supersedes or reaps this entry.
-        let mut announce = false;
-        if let Ok(mut s) = sessions.lock() {
-            match s.get(&sid).map(|inner| inner.gen) {
-                Some(g) if g == gen => {
-                    // Still ours — we're the last stop for this id. Clear
-                    // `alive` ourselves before giving up the entry.
-                    s.remove(&sid);
-                    alive.store(false, Ordering::Release);
-                    announce = true;
-                }
-                // A fresher incarnation already owns the id — stay mute,
-                // its own reader speaks for it now.
-                Some(_) => {}
-                // Entry already gone: a racing `stop_session` or a
-                // superseding `start_session` removed it and cleared
-                // `alive` inside that same critical section before
-                // releasing the `sessions` lock (see `agent/mod.rs`), so
-                // `should_emit` is guaranteed to already read `false`
-                // here — kept as an explicit defensive check rather than
-                // hard-coding `false`, in case a future removal path ever
-                // forgets to clear it under the lock.
-                None => announce = should_emit(&alive),
-            }
-        }
+        let announce = retire_reader_session(&sessions, &sid, gen, &alive);
         // Empty payload = clean exit; non-empty = error reason. See the
         // AgentBridge doc-comment for the full event contract.
         if announce {
-            crate::remote::tracker::tracker().on_exit(&sid);
             if !exit_reason.is_empty() {
                 // Recorded before the emit so a `session_status` query that
                 // races the event still finds it. Only for the incarnation

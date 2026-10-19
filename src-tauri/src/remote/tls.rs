@@ -48,22 +48,31 @@ struct GeneratedCertificate {
     not_after: u64,
 }
 
+pub fn generated_cert_valid(dir: &Path, ip: Ipv4Addr, host: Option<&str>) -> bool {
+    stored_generated(dir, ip, host).is_some()
+}
+
+fn stored_generated(dir: &Path, ip: Ipv4Addr, host: Option<&str>) -> Option<GeneratedCertificate> {
+    let metadata_path = dir.join("remote").join("cert.json");
+    let renew_before = (SystemTime::now() + Duration::from_hours(30 * 24))
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    std::fs::read(&metadata_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<GeneratedCertificate>(&bytes).ok())
+        .filter(|stored| {
+            stored.ip == ip && stored.host.as_deref() == host && stored.not_after > renew_before
+        })
+}
+
 fn generated(dir: &Path, ip: Ipv4Addr, host: Option<&str>) -> Result<TlsMaterial, String> {
     let remote = dir.join("remote");
     let cert_path = remote.join("cert.pem");
     let key_path = remote.join("key.pem");
     let metadata_path = remote.join("cert.json");
     let now = SystemTime::now();
-    let renew_before = (now + Duration::from_hours(30 * 24))
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_err(|error| format!("read TLS certificate time: {error}"))?
-        .as_secs();
-    let stored = std::fs::read(&metadata_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<GeneratedCertificate>(&bytes).ok())
-        .filter(|stored| {
-            stored.ip == ip && stored.host.as_deref() == host && stored.not_after > renew_before
-        });
+    let stored = stored_generated(dir, ip, host);
     if let Some(stored) = stored {
         if let Ok((chain, key)) = read_pair(&cert_path, &key_path) {
             if let Ok(material) = material(chain, key) {
@@ -88,9 +97,6 @@ fn generated(dir: &Path, ip: Ipv4Addr, host: Option<&str>) -> Result<TlsMaterial
     let cert = params
         .self_signed(&key)
         .map_err(|error| format!("generate TLS certificate: {error}"))?;
-    crate::private_fs::private_dirs(true)
-        .create(&remote)
-        .map_err(|error| format!("create {}: {error}", remote.display()))?;
     write_private(&key_path, key.serialize_pem().as_bytes())?;
     write_private(&cert_path, cert.pem().as_bytes())?;
     let material = material(
@@ -163,6 +169,11 @@ fn material(
 
 /// Replace the destination with a fresh private file, never briefly exposing key bytes.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        crate::private_fs::private_dirs(true)
+            .create(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
     let temporary = path.with_extension(format!("{}.tmp", super::rand::random_b64(12)?));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);

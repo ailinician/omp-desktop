@@ -282,6 +282,7 @@ fn omp_cancel_removes_only_target_and_notifies_only_when_removed() {
     for frame in [
         cancel,
         json!({"method":"cancel","targetId":42}),
+        json!({"method":"cancel","targetId":"x".repeat(MAX_ID_BYTES + 1)}),
         json!({"method":"cancel"}),
     ] {
         t.on_frame(

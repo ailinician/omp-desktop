@@ -224,9 +224,12 @@ impl Pusher {
             .iter()
             .map(|device| device.push.len())
             .sum();
-        // Sends are sequential, each bounded by the timeout; one more
-        // timeout covers a job already running when the test is queued.
-        let wait = REQUEST_TIMEOUT * u32::try_from(subscriptions + 1).unwrap_or(u32::MAX);
+        // Sends are sequential, each bounded by the timeout; account for any
+        // jobs already queued ahead of the test in the channel.
+        let batches = u32::try_from(QUEUE + 1)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(u32::try_from(subscriptions.max(1)).unwrap_or(u32::MAX));
+        let wait = REQUEST_TIMEOUT.saturating_mul(batches);
         let (reply, outcome) = mpsc::sync_channel(1);
         self.tx
             .try_send(Job::Test(reply))
@@ -324,8 +327,11 @@ fn deliver(
     let mut failure = None;
     for device in shared.devices.list() {
         for sub in &device.push {
+            if !locked(&shared.settings).enabled {
+                return Ok(sent);
+            }
             if !(shared.endpoint_ok)(&sub.endpoint) {
-                forget(&shared.devices, &device.id, &sub.endpoint);
+                forget(shared, &device.id, &sub.endpoint);
                 continue;
             }
             // Revoked or unsubscribed while this batch ran: nothing goes out.
@@ -334,7 +340,7 @@ fn deliver(
             }
             match send(client, &vapid, &contact, sub, payload, urgency) {
                 Ok(200..=299) => sent += 1,
-                Ok(404 | 410) => forget(&shared.devices, &device.id, &sub.endpoint),
+                Ok(404 | 410) => forget(shared, &device.id, &sub.endpoint),
                 Ok(status) => {
                     failure.get_or_insert_with(|| format!("push service answered {status}"));
                 }
@@ -348,9 +354,11 @@ fn deliver(
 }
 
 /// The subscription is gone for good: drop it from its device.
-fn forget(devices: &DeviceStore, device_id: &str, endpoint: &str) {
-    if let Err(error) = devices.remove_push(device_id, endpoint) {
-        eprintln!("[omp-desktop] could not drop a push subscription: {error}");
+fn forget(shared: &Shared, device_id: &str, endpoint: &str) {
+    match shared.devices.remove_push(device_id, endpoint) {
+        Ok(true) => (shared.changed)(),
+        Ok(false) => {}
+        Err(error) => eprintln!("[omp-desktop] could not drop a push subscription: {error}"),
     }
 }
 

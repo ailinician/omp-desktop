@@ -87,6 +87,7 @@ test("buildView maps live message shapes, drops thinking and retains only open a
     ask("q", "ask", { questions: [{ id: "q1", question: "Pick", options: [] }] }),
     ask("answered", "select", { answered: true }), ask("cancelled", "input", { cancelled: true }),
     ask("closed", "editor", { closedByOmp: true }),
+    ask("ed", "editor", { prefill: "initial draft" }),
   ] }));
   assert.deepEqual(own(view), {
     tabId: "a", busy: true,
@@ -97,7 +98,10 @@ test("buildView maps live message shapes, drops thinking and retains only open a
       { id: "r", role: "assistant", text: "Role entry" },
       { id: "n", role: "notice", text: "Stopped" },
     ],
-    asks: [{ id: "q", kind: "dialog", title: "Continue?", message: "", questions: [{ id: "q1", question: "Pick", options: [] }] }],
+    asks: [
+      { id: "q", kind: "dialog", title: "Continue?", message: "", questions: [{ id: "q1", question: "Pick", options: [] }] },
+      { id: "ed", kind: "editor", title: "Continue?", message: "", value: "initial draft" },
+    ],
   });
   assert.ok(!JSON.stringify(view).includes("secret"));
   assert.deepEqual(own(api.tabMeta([{ id: "x", name: "Title", path: "/work", profile: "private" }])), [{ id: "x", title: "Title", project: "work" }]);
@@ -631,11 +635,18 @@ test("two delayed push toggles both survive: nested push merges inside the queue
   const tree = render();
   find(tree, "Notify on questions").props.onChange(true);
   find(tree, "Notify on finished turns").props.onChange(true);
+  // Editing the contact and enabling push before the first apply settles must
+  // keep the newly committed contact instead of the initial render's contact.
+  const contactField = find(tree, "Push contact");
+  contactField.props.onCommit("fresh@omp-desktop.app");
+  find(tree, "Enable push notifications").props.onChange(true);
   await flush();
-  assert.equal(applies.length, 1, "the second apply waits for the first");
+  assert.equal(applies.length, 1, "subsequent applies wait in the queue");
   assert.equal(applies[0].s.push.questions, true);
-  applies[0].resolve({ ok: true, value: { settings: applies[0].s, devices: [] } });
-  await flush();
-  assert.equal(applies.length, 2);
-  assert.deepEqual(own(applies[1].s.push), { enabled: true, questions: true, finished: true, contact: "me@example.test" });
+  while (applies.length < 4) {
+    const cur = applies.at(-1);
+    cur.resolve({ ok: true, value: { settings: cur.s, devices: [] } });
+    await flush();
+  }
+  assert.deepEqual(own(applies[3].s.push), { enabled: true, questions: true, finished: true, contact: "fresh@omp-desktop.app" });
 });

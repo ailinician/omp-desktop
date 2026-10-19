@@ -99,11 +99,6 @@ impl RemoteSettings {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
-            crate::private_fs::private_dirs(true)
-                .create(parent)
-                .map_err(|error| format!("create {}: {error}", parent.display()))?;
-        }
         let bytes = serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?;
         write_private(path, &bytes)
     }

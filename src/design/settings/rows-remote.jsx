@@ -43,8 +43,9 @@ function _SRR_useRemote(bridge) {
     if (!_SRR_latest && !status?.settings) return Promise.resolve(false);
     const next = _SRR_queue.then(() => {
       const base = _SRR_latest ?? status.settings;
-      const merged = { ...base, ...patch };
-      if (patch.push) merged.push = { ...base.push, ...patch.push };
+      const patchValue = typeof patch === "function" ? patch(base) : patch;
+      const merged = { ...base, ...patchValue };
+      if (patchValue.push) merged.push = { ...base.push, ...patchValue.push };
       return run(() => bridge.remoteApply(merged));
     });
     _SRR_queue = next.catch(() => {});
@@ -181,14 +182,15 @@ function _SRR_Cert({ row, ctx, query }) {
 /** Seconds left until `expiresAt` (unix seconds), never negative. */
 const _SRR_left = (expiresAt, now) => Math.max(0, Math.ceil(expiresAt - now / 1000));
 
-function _SRR_PairDialog({ pair, onClose }) {
+function _SRR_PairDialog({ pair, active = true, onClose }) {
   const [now, setNow] = React.useState(Date.now());
   React.useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
   React.useEffect(() => {
+    if (!active) return undefined;
     const onKey = e => { if (e.key === "Escape") { e.stopPropagation(); onClose(); } };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+  }, [active, onClose]);
   const left = _SRR_left(pair.expiresAt, now);
   const src = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(pair.svg)))}`;
   return (
@@ -218,14 +220,22 @@ function _SRR_Pair({ row, ctx, query }) {
   const base = React.useRef(0);
   const count = status?.devices?.length ?? 0;
   const close = React.useCallback(() => { setPair(null); void ctx.bridge.remotePairCancel(); }, [ctx.bridge]);
+  const liveRef = React.useRef(true);
   const pairing = React.useRef(false);
-  pairing.current = pair !== null;
-  React.useEffect(() => () => { if (pairing.current) void ctx.bridge.remotePairCancel(); }, [ctx.bridge]);
+  React.useEffect(() => {
+    liveRef.current = true;
+    return () => {
+      liveRef.current = false;
+      if (pairing.current) { pairing.current = false; void ctx.bridge.remotePairCancel(); }
+    };
+  }, [ctx.bridge]);
   // A new device while the dialog is up means the code was used.
-  React.useEffect(() => { if (pair && count > base.current) setPair(null); }, [count, pair]);
+  React.useEffect(() => { if (pair && count > base.current) { pairing.current = false; setPair(null); } }, [count, pair]);
   const start = async () => {
+    pairing.current = true;
     const r = await ctx.bridge.remotePairStart();
-    if (r?.ok === false) { setError(r.error ?? "failed"); return; }
+    if (!liveRef.current) { if (r?.ok !== false) void ctx.bridge.remotePairCancel(); return; }
+    if (r?.ok === false) { pairing.current = false; setError(r.error ?? "failed"); return; }
     setError(null);
     base.current = count;
     setPair(r.value);
@@ -234,7 +244,7 @@ function _SRR_Pair({ row, ctx, query }) {
     <Row label={row.label} desc={row.desc} query={query}>
       <Btn accent onClick={start} disabled={!status?.listening}
         title={status?.listening ? undefined : "Enable remote access first"}>Pair a phone…</Btn>
-      {pair && <_SRR_PairDialog pair={pair} onClose={close} />}
+      {pair && <_SRR_PairDialog pair={pair} active={ctx.active !== false} onClose={() => { pairing.current = false; close(); }} />}
       {error && <div className="st-row-error">{error}</div>}
     </Row>
   );
@@ -292,7 +302,7 @@ function _SRR_Push({ row, ctx, query }) {
       <div className="st-rem">
         <_SRR_Line label="Enable push">
           <Toggle value={!!push?.enabled} label="Enable push notifications"
-            onChange={v => set(v ? { enabled: true, contact: contact.trim() } : { enabled: false })} />
+            onChange={v => apply(base => ({ push: v ? { enabled: true, contact: (base.push?.contact || suggest).trim() } : { enabled: false } }))} />
         </_SRR_Line>
         <_SRR_Line label="A question is waiting">
           <Toggle value={!!push?.questions} label="Notify on questions" onChange={v => set({ questions: v })} />

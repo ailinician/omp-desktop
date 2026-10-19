@@ -8,7 +8,7 @@
   let socket, token, selected = null, pendingTab = new URLSearchParams(location.search).get("tab");
   if (pendingTab) history.replaceState(null, "", location.pathname + location.hash);
   const openTools = new Set();
-  let connected = false, attempt = 0, notificationsEnabled = false;
+  let connected = false, attempt = 0, notificationsEnabled = false, notificationsPending = false;
   let connectionText = "Connecting…";
   let renderedAsks = null;
   const askDrafts = new Map();
@@ -187,7 +187,7 @@
     syncComposer();
     notifications.hidden = !(navigator.standalone || window.matchMedia("(display-mode: standalone)").matches)
       || !("PushManager" in window) || !("serviceWorker" in navigator);
-    notifications.disabled = !connected || !state.pushKey || notificationsEnabled;
+    notifications.disabled = !connected || !state.pushKey || notificationsEnabled || notificationsPending;
     for (const element of asks.querySelectorAll?.("button, input, textarea") || []) element.disabled = !connected;
     const canPair = !token && !connected;
     scan.hidden = !canPair;
@@ -299,8 +299,10 @@
     const signature = JSON.stringify([activeId, state.tabs]);
     if (signature === sheetSignature) return;
     sheetSignature = signature;
+    const focusedTabId = sheetOpen ? (document.activeElement?.getAttribute?.("data-tab-id") ?? document.activeElement?.["data-tab-id"] ?? null) : null;
     sheetList.replaceChildren();
     if (!state.tabs.length) sheetList.append(node("p", "No sessions open on the desktop.", "status"));
+    let restoreFocus = null;
     for (const tab of state.tabs) {
       const item = button("", () => {
         if (!transmit(C.selectFor(tab.id))) return;
@@ -310,6 +312,8 @@
         closeSheet(); renderTabs(); renderView(); updateControls();
       });
       item.className = `sheet-tab${tab.id === activeId ? " active" : ""}`;
+      item.setAttribute("data-tab-id", tab.id);
+      if (tab.id === focusedTabId) restoreFocus = item;
       if (tab.id === activeId) item.setAttribute("aria-current", "true");
       const dot = node("span", "", "tab-run-dot");
       setDot(dot, tab);
@@ -320,6 +324,7 @@
       item.append(dot, text);
       sheetList.append(item);
     }
+    if (focusedTabId) (restoreFocus ?? sheet).focus();
   }
   function openSheet() {
     sheetOpen = true;
@@ -620,6 +625,13 @@
         }
         if (msg.t === "view") { selected = state.view?.tabId ?? null; renderTabs(); renderView(); }
         if (msg.t === "theme") applyTheme(state.theme);
+        if (msg.t === "ack" && msg.kind === "push") {
+          notificationsPending = false;
+          if (msg.ok) {
+            notificationsEnabled = true;
+            notifications.textContent = "Notifications enabled";
+          }
+        }
         updateControls();
       } catch (err) {
         state = { ...state, error: err.message }; updateControls();
@@ -628,8 +640,11 @@
     socket.onclose = event => {
       connected = false;
       state = { ...state, device: null, pending: {} };
+      notificationsPending = false;
       if (event.code === 4401) {
         token = null;
+        notificationsEnabled = false;
+        notifications.textContent = "Enable notifications";
         localStorage.removeItem(TOKEN_KEY);
         connectionText = "This device is no longer paired — pair again from the desktop";
       } else {
@@ -656,9 +671,8 @@
       const sub = await registration.pushManager.getSubscription()
         || await ready.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey });
       if (!transmit({ t: "push-subscribe", sub: sub.toJSON() })) throw new Error("Connection lost; enable notifications again after reconnecting");
-      notificationsEnabled = true;
-      notifications.textContent = "Notifications enabled";
-    } catch (err) { state = { ...state, error: err.message }; }
+      notificationsPending = true;
+    } catch (err) { notificationsPending = false; state = { ...state, error: err.message }; }
     updateControls();
   }
 

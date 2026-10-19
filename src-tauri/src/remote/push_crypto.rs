@@ -21,8 +21,8 @@ const HEADER_LEN: usize = SALT_LEN + 4 + 1 + P256_POINT;
 /// Padding delimiter that ends the last (only) record.
 const LAST_RECORD: u8 = 0x02;
 const TAG_LEN: usize = 16;
-/// What fits in one record next to the delimiter and the AEAD tag.
-pub const MAX_PLAINTEXT: usize = RECORD_SIZE as usize - TAG_LEN - 1;
+/// What fits in one record next to the header, the delimiter and the AEAD tag.
+pub const MAX_PLAINTEXT: usize = RECORD_SIZE as usize - HEADER_LEN - TAG_LEN - 1;
 
 /// The key the desktop signs its push requests with. It persists, so the
 /// phones' subscriptions (bound to its public half) stay valid.
@@ -53,9 +53,6 @@ impl Vapid {
                     &SystemRandom::new(),
                 )
                 .map_err(|_| "could not generate the push key".to_owned())?;
-                crate::private_fs::private_dirs(true)
-                    .create(&folder)
-                    .map_err(|error| format!("create {}: {error}", folder.display()))?;
                 write_private(&path, generated.as_ref())?;
                 generated.as_ref().to_vec()
             }

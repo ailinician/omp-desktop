@@ -53,7 +53,9 @@ impl<'a> Event<'a> {
                 let frame = frame?;
                 let text = |key: &str| frame.get(key).and_then(Value::as_str);
                 match text("method")? {
-                    "cancel" => text("targetId").map(Self::Cancel),
+                    "cancel" => text("targetId")
+                        .filter(|id| id.len() <= MAX_ID_BYTES)
+                        .map(Self::Cancel),
                     "select" | "confirm" | "input" | "editor" | "ask" => text("id")
                         .filter(|id| id.len() <= MAX_ID_BYTES)
                         .map(Self::Open),

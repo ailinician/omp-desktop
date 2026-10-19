@@ -104,12 +104,12 @@ pub async fn remote_action_result(
 }
 
 #[tauri::command]
-pub async fn remote_ready(ready: bool, app: AppHandle) -> Result<(), String> {
-    with_manager(app, move |manager| {
-        manager.hub().set_ready(ready);
-        Ok(())
-    })
-    .await
+pub fn remote_ready(ready: bool, app: AppHandle) -> Result<(), String> {
+    let manager = app
+        .try_state::<Arc<RemoteManager>>()
+        .ok_or("remote access needs the app config directory")?;
+    manager.hub().set_ready(ready);
+    Ok(())
 }
 
 #[tauri::command]

@@ -124,20 +124,26 @@ impl DeviceStore {
         Some(device)
     }
 
-    fn update_device(&self, id: &str, modify: impl FnOnce(&mut Device)) -> Result<(), String> {
+    fn update_device(
+        &self,
+        id: &str,
+        modify: impl FnOnce(&mut Device) -> Result<(), String>,
+    ) -> Result<(), String> {
         self.update(&mut self.devices(), Instant::now(), |devices| {
             let device = devices
                 .iter_mut()
                 .find(|device| device.id == id)
                 .ok_or_else(|| "remote device not found".to_string())?;
-            modify(device);
-            Ok(())
+            modify(device)
         })
     }
 
     pub fn rename(&self, id: &str, name: &str) -> Result<(), String> {
         let name = normalize_device_name(name)?;
-        self.update_device(id, |device| device.name = name)
+        self.update_device(id, |device| {
+            device.name = name;
+            Ok(())
+        })
     }
 
     /// False means no durable revocation occurred (unknown id or write error).
@@ -153,19 +159,43 @@ impl DeviceStore {
         .is_ok()
     }
 
-    pub fn set_push(&self, id: &str, subs: Vec<PushSubscription>) -> Result<(), String> {
-        self.update_device(id, |device| device.push = subs)
-    }
-
-    /// Drop one subscription inside the locked update; a missing device is
-    /// already gone, so there is nothing to drop.
-    pub fn remove_push(&self, id: &str, endpoint: &str) -> Result<(), String> {
-        self.update(&mut self.devices(), Instant::now(), |devices| {
-            if let Some(device) = devices.iter_mut().find(|device| device.id == id) {
-                device.push.retain(|sub| sub.endpoint != endpoint);
+    pub fn add_push(&self, id: &str, sub: PushSubscription, max: usize) -> Result<(), String> {
+        self.update_device(id, |device| {
+            if let Some(slot) = device
+                .push
+                .iter_mut()
+                .find(|known| known.endpoint == sub.endpoint)
+            {
+                *slot = sub;
+            } else if device.push.len() >= max {
+                return Err("too many push subscriptions".to_owned());
+            } else {
+                device.push.push(sub);
             }
             Ok(())
         })
+    }
+
+    pub fn set_push(&self, id: &str, subs: Vec<PushSubscription>) -> Result<(), String> {
+        self.update_device(id, |device| {
+            device.push = subs;
+            Ok(())
+        })
+    }
+
+    /// Drop one subscription inside the locked update; returns whether one was
+    /// actually removed. A missing device is already gone.
+    pub fn remove_push(&self, id: &str, endpoint: &str) -> Result<bool, String> {
+        let mut removed = false;
+        self.update(&mut self.devices(), Instant::now(), |devices| {
+            if let Some(device) = devices.iter_mut().find(|device| device.id == id) {
+                let before = device.push.len();
+                device.push.retain(|sub| sub.endpoint != endpoint);
+                removed = device.push.len() != before;
+            }
+            Ok(())
+        })?;
+        Ok(removed)
     }
 
     pub fn list(&self) -> Vec<Device> {

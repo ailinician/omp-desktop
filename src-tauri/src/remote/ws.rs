@@ -230,8 +230,19 @@ fn read_text(ws: &mut Socket) -> Result<Frame, Step> {
     match ws.read() {
         Ok(Message::Text(text)) => Ok(Frame::Text(text.as_str().to_owned())),
         Ok(Message::Binary(_)) => Err(Step::Close(CLOSE_BINARY)),
-        Ok(Message::Close(_)) => Err(Step::Stop),
-        Ok(_) => Ok(Frame::Skipped),
+        Ok(Message::Close(_)) => {
+            ws.get_mut()
+                .set_deadline(Some(Instant::now() + CLOSE_WRITE));
+            let _ = ws.flush();
+            Err(Step::Stop)
+        }
+        Ok(_) => {
+            ws.get_mut()
+                .set_deadline(Some(Instant::now() + CLOSE_WRITE));
+            let _ = ws.flush();
+            ws.get_mut().set_deadline(None);
+            Ok(Frame::Skipped)
+        }
         Err(WsError::Io(error)) if is_idle(&error) => Ok(Frame::Idle),
         Err(WsError::Capacity(_)) => Err(Step::Close(CLOSE_TOO_BIG)),
         Err(_) => Err(Step::Stop),
@@ -239,7 +250,7 @@ fn read_text(ws: &mut Socket) -> Result<Frame, Step> {
 }
 
 fn flush_outbox(ws: &mut Socket, session: &Authed) -> Step {
-    loop {
+    for _ in 0..OUTBOX {
         match session.rx.try_recv() {
             Ok(Out::Text(text)) => {
                 if ws.send(Message::text(text)).is_err() {
@@ -251,6 +262,7 @@ fn flush_outbox(ws: &mut Socket, session: &Authed) -> Step {
             Err(TryRecvError::Disconnected) => return Step::Close(CLOSE_OVERLOAD),
         }
     }
+    Step::Continue
 }
 
 /// Authenticated read. A frame that has started must finish within
@@ -277,8 +289,7 @@ fn read_step(
             Step::Continue
         }
         // Control frames must not renew an incomplete data message's deadline.
-        Ok(Frame::Skipped) => Step::Continue,
-        Ok(Frame::Idle) => {
+        Ok(Frame::Skipped | Frame::Idle) => {
             if ws.get_ref().bytes_read() != before {
                 frame_since.get_or_insert(started);
             }

@@ -5,6 +5,7 @@ use crate::remote::hub::{Hub, PublishPayload, TabMeta};
 use crate::remote::tls::{load_or_generate, CertSource};
 use rustls::pki_types::{pem::PemObject, CertificateDer, ServerName};
 use serde_json::Value;
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -640,7 +641,11 @@ fn connections_over_the_in_flight_caps_are_closed_at_once() {
     let mut over = TcpStream::connect(s.server.local_addr()).unwrap();
     over.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     let mut byte = [0_u8; 1];
-    let closed = matches!(over.read(&mut byte), Ok(0)) || over.read(&mut byte).is_err();
+    let closed = match over.read(&mut byte) {
+        Ok(0) => true,
+        Err(error) => !crate::remote::ws::is_idle(&error),
+        Ok(_) => false,
+    };
     assert!(closed, "over-cap socket is closed");
     drop(idle);
     let served = crate::test_support::eventually(Duration::from_secs(5), || {

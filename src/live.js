@@ -249,7 +249,8 @@
    * @param {number}  [timeout]   Ms to wait before rejecting (0 = no timeout).
    */
   function _sendWithResponse(cmd, timeout = 120000) {
-    return new Promise((resolve, reject) => {
+    let handedOff = Promise.resolve(false);
+    const response = new Promise((resolve, reject) => {
       if (!window.__TAURI__ || !activeSessionId) {
         reject(new Error("Not connected"));
         return;
@@ -271,12 +272,15 @@
       // A failed hand-off (the tab's process is gone) never produces a
       // response; reject now instead of waiting out the timeout. Still
       // logged, since several callers swallow rejections.
-      _invokeSend({ ...cmd, id }).catch(e => {
+      handedOff = _invokeSend({ ...cmd, id }).then(() => true, e => {
         _logSendError(e);
         _pendingResponses.get(id)?.reject(e instanceof Error ? e : new Error(String(e)));
         _pendingResponses.delete(id);
+        return false;
       });
     });
+    response.handedOff = handedOff;
+    return response;
   }
 
   // ── Subscriber system ─────────────────────────────────────────────────────
@@ -3145,8 +3149,10 @@
     _recordPrompt(text);
     state.queueSending = [...state.queueSending, QUEUE.sendingEntry(id, kind, text, images.length, state.queue, state.queueSending)];
     notify();
-    // Resolves to whether omp took the message; a timeout counts as handed off.
-    return send().then(() => { _dropSending(origin, id); return true; }, e => {
+    // Resolves to whether the IPC hand-off succeeded; omp's RPC response is
+    // processed asynchronously so a tab switch never stalls remote callers.
+    const sent = send();
+    sent.then(() => { _dropSending(origin, id); return true; }, e => {
       if (!e?.timedOut) {
         const reason = e?.message ?? String(e);
         // Responses are only dispatched for the active tab, so a refusal
@@ -3157,6 +3163,7 @@
       _dropSending(origin, id);
       return Boolean(e?.timedOut);
     });
+    return sent.handedOff ?? sent.then(() => true, () => false);
   }
 
   /** Remove a "sending" row from its tab, wherever that tab's state lives

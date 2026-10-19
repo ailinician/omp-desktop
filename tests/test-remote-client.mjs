@@ -320,6 +320,14 @@ await check("push opt-in registers worker and sends subscription only on user ge
   await b.button("Enable notifications").emit("click");
   assert.deepEqual(b.registrations, ["/sw.js"]);
   assert.deepEqual(b.frames.at(-1), { t: "push-subscribe", sub: { endpoint: "https://push.test", keys: { auth: "a", p256dh: "p" } } });
+  assert.equal(b.button("Enable notifications").disabled, true, "pending until ack");
+  await b.message({ t: "ack", reqId: null, kind: "push", ok: false, error: "bad subscription" });
+  assert.equal(b.button("Enable notifications").disabled, false, "failed ack re-enables button for retry");
+  await b.button("Enable notifications").emit("click");
+  await b.message({ t: "ack", reqId: null, kind: "push", ok: true, error: null });
+  assert.ok(b.button("Notifications enabled").disabled, "enabled after positive ack");
+  b.sockets.at(-1).onclose({ code: 4401 });
+  assert.ok(b.button("Enable notifications"), "4401 revocation resets notification button label");
   const tab = browser({ standalone: false }); await tab.connect(); await tab.message({ t: "push-key", key: "AQID" });
   assert.ok(tab.button("Enable notifications").hidden);
 });
