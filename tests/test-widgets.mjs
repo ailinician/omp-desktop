@@ -524,26 +524,61 @@ check("missing, empty and non-string attention is no attention", () => {
     assert.equal("attention" in out({ version: 1, blocks: [], attention }).widget, false, JSON.stringify(attention));
   }
 });
-check("attentionStep: a new unacknowledged key is active and enters", () => {
-  assert.deepEqual(W.attentionStep({ key: "a", ack: null, seen: undefined }), { active: true, enter: true, ack: null });
-  assert.deepEqual(W.attentionStep({ key: "b", ack: "a", seen: "a" }), { active: true, enter: true, ack: "a" });
+const step = (o) => W.attentionStep({ hasWidget: true, ...o });
+check("attentionStep: a new unacknowledged key is active and bounces", () => {
+  assert.deepEqual(step({ key: "a", ack: null, seen: undefined }), { active: true, seen: "a", writeAck: false, bounce: true });
+  assert.deepEqual(step({ key: "b", ack: "a", seen: "a" }), { active: true, seen: "b", writeAck: false, bounce: true });
 });
-check("attentionStep: a rerun with the same key is active but does not enter again", () => {
-  assert.deepEqual(W.attentionStep({ key: "a", ack: null, seen: "a" }), { active: true, enter: false, ack: null });
+check("attentionStep: a rerun with the same key is active but bounces only on entry", () => {
+  assert.deepEqual(step({ key: "a", ack: null, seen: "a" }), { active: true, seen: "a", writeAck: false, bounce: false });
 });
-check("attentionStep: the acknowledged key is not active and keeps its ack", () => {
-  assert.deepEqual(W.attentionStep({ key: "a", ack: "a", seen: "a" }), { active: false, enter: false, ack: "a" });
-  assert.deepEqual(W.attentionStep({ key: "a", ack: "a", seen: undefined }), { active: false, enter: false, ack: "a" });
+check("attentionStep: the acknowledged key is not active and does not bounce", () => {
+  assert.deepEqual(step({ key: "a", ack: "a", seen: "a" }), { active: false, seen: "a", writeAck: false, bounce: false });
+  assert.deepEqual(step({ key: "a", ack: "a", seen: undefined }), { active: false, seen: "a", writeAck: false, bounce: false });
 });
 check("attentionStep: no key ends attention and clears the ack, so the same key alerts again", () => {
   for (const key of [undefined, ""]) {
-    assert.deepEqual(W.attentionStep({ key, ack: "a", seen: "a" }), { active: false, enter: false, ack: null });
+    assert.deepEqual(step({ key, ack: "a", seen: "a" }), { active: false, seen: "", writeAck: true, bounce: false });
   }
-  assert.deepEqual(W.attentionStep({ key: "a", ack: null, seen: "" }), { active: true, enter: true, ack: null });
+  assert.deepEqual(step({ key: undefined, ack: null, seen: "a" }), { active: false, seen: "", writeAck: false, bounce: false });
+  assert.deepEqual(step({ key: "a", ack: null, seen: "" }), { active: true, seen: "a", writeAck: false, bounce: true });
+});
+check("attentionStep: no widget (error, idle) keeps ack and seen and signals nothing", () => {
+  for (const key of [undefined, "", "b"]) {
+    assert.deepEqual(W.attentionStep({ key, ack: "a", seen: "a", hasWidget: false }), { active: false, seen: "a", writeAck: false, bounce: false });
+  }
+  assert.deepEqual(W.attentionStep({ key: undefined, ack: "a", seen: undefined, hasWidget: false }), { active: false, seen: "", writeAck: false, bounce: false });
+});
+check("attentionStep: a running rerun with the old widget does not enter again", () => {
+  // The old widget (key "a") stays on the card while the plugin runs.
+  const first = step({ key: "a", ack: null, seen: undefined });
+  assert.equal(first.bounce, true);
+  assert.deepEqual(step({ key: "a", ack: null, seen: first.seen }), { active: true, seen: "a", writeAck: false, bounce: false });
 });
 check("ackKey stays out of the Settings `widget:` toggle namespace", () => {
-  assert.equal(W.ackKey("ci"), "widgetAck:ci");
   assert.equal(W.ackKey("ci").startsWith("widget:"), false);
+  assert.equal(W.ackKey("ci", "/p/a").startsWith("widget:"), false);
+});
+check("ackKey: global plugin per id; tab plugin per id and project, bounded and stable", () => {
+  assert.equal(W.ackKey("ci"), "widgetAck:ci");
+  assert.equal(W.ackKey("ci", "/p/a"), W.ackKey("ci", "/p/a"));
+  assert.notEqual(W.ackKey("ci", "/p/a"), W.ackKey("ci", "/p/b"));
+  assert.notEqual(W.ackKey("ci", "/p/a"), W.ackKey("lint", "/p/a"));
+  assert.notEqual(W.ackKey("ci", "/p/a"), W.ackKey("ci"));
+  assert.equal(W.ackKey("ci", "x".repeat(100000)).length, "widgetAck:ci:".length + 16);
+});
+check("a tab without a key does not clear another tab's ack", () => {
+  const store = {};
+  const run = (project, key) => {
+    const k = W.ackKey("ci", project);
+    const s = step({ key, ack: store[k] ?? null, seen: undefined });
+    if (s.writeAck) store[k] = null;
+    return s;
+  };
+  store[W.ackKey("ci", "/p/a")] = "a";
+  run("/p/b", undefined);
+  assert.equal(store[W.ackKey("ci", "/p/a")], "a");
+  assert.equal(run("/p/a", "a").active, false);
 });
 
 console.log(`test-widgets: ${passed} checks passed`);

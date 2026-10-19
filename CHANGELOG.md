@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- Rail widgets: a plugin can ask for notice with a top-level `"attention": "<key>"`. Until you click the card, its border and title dot pulse in the status colour (static with reduced motion), and when it turns up while the window is in the background the dock icon bounces once. The acknowledged key is remembered across restarts; see `docs/widgets.md`.
+- Rail widgets: a plugin can ask for notice with a top-level `"attention": "<key>"`. Until you click the card, its border and title dot pulse in the status colour (static with reduced motion), and when it turns up while the window is visible but not focused the dock icon bounces once (widgets pause while the window is hidden or minimized, so nothing bounces then). The card head gets an "Acknowledge" button for keyboard and screen reader users. The acknowledged key is remembered across restarts, per project for a tab plugin; see `docs/widgets.md`.
 
 ## [0.11.0] - 2026-10-17
 

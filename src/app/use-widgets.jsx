@@ -25,8 +25,9 @@ function _uwVisible() {
 /** `activeSessionId` must be the tab the app renders (`activeProject.id`,
  *  "" when none) — never a closed tab's id. `railVisible`: the rail is on
  *  screen (layout not focus, conversation tree closed); hidden = nothing runs.
- *  `setTweak` stores the acknowledged attention key per plugin id. */
-function useWidgets({ bridge, activeSessionId, railVisible, tweaks, setTweak }) {
+ *  `setTweak` stores the acknowledged attention key (per plugin id and, for a
+ *  tab plugin, per `activeProjectPath`). */
+function useWidgets({ bridge, activeSessionId, activeProjectPath, railVisible, tweaks, setTweak }) {
   const [config, setConfig] = React.useState(_UW_EMPTY_CONFIG);
   // sessionId ("" for none) → plugin ids applicable to it, latest per
   // session, so a late payload for another tab never blanks this one.
@@ -122,36 +123,39 @@ function useWidgets({ bridge, activeSessionId, railVisible, tweaks, setTweak }) 
       const k = _UW.runKey(key, id);
       const run = runsRef.current.get(k);
       const parsed = _UW.parsedLast(parseCacheRef.current, k, run?.last);
-      out.push({ id, title: p.title, resetKey: `${k}:${run?.seq ?? 0}`, run: _UW.cardRun(run, parsed) });
+      // A tab plugin's ack follows the project, not the tab (tab ids change
+      // every launch); a tab without a path falls back to its own id.
+      const ackKey = _UW.ackKey(id, p.scope === "global" ? null : (activeProjectPath || `tab:${sessionId}`));
+      out.push({ id, ackKey, title: p.title, resetKey: `${k}:${run?.seq ?? 0}`, run: _UW.cardRun(run, parsed) });
     }
     return out;
-  }, [config.plugins, activeIds, hiddenIds, sessionId, runsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [config.plugins, activeIds, hiddenIds, sessionId, activeProjectPath, runsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Attention (docs/widgets.md#attention): the acknowledged key is stored per
-  // plugin id, not per tab — tabs get new ids every launch, so a per-tab key
-  // could never survive a restart. `attentionStep` decides; the effect only
-  // stores the cleared ack and asks the OS once per new key.
+  // Attention (docs/widgets.md#attention): `attentionStep` holds every rule;
+  // the effect only remembers `seen`, stores a cleared ack and asks the OS to
+  // bounce the dock once per new key.
   const seenRef = React.useRef(new Map());
   const shown = React.useMemo(() => cards.map(c => {
-    const step = _UW.attentionStep({ key: c.run.widget?.attention, ack: tweaks?.[_UW.ackKey(c.id)], seen: seenRef.current.get(c.id) });
+    const step = _UW.attentionStep({
+      key: c.run.widget?.attention, ack: tweaks?.[c.ackKey], seen: seenRef.current.get(c.ackKey), hasWidget: !!c.run.widget,
+    });
     return { ...c, attention: step.active, step };
   }), [cards, tweaks]); // eslint-disable-line react-hooks/exhaustive-deps
   React.useEffect(() => {
     for (const c of shown) {
-      // No widget (idle, error): nothing was said about attention either way.
-      if (!c.run.widget) continue;
-      seenRef.current.set(c.id, c.run.widget.attention ?? "");
-      if (c.step.ack !== (tweaks?.[_UW.ackKey(c.id)] ?? null)) setTweak?.(_UW.ackKey(c.id), c.step.ack);
-      if (c.step.enter && !document.hasFocus()) _uwRequestAttention();
+      seenRef.current.set(c.ackKey, c.step.seen);
+      if (c.step.writeAck) setTweak?.(c.ackKey, null);
+      if (c.step.bounce && !document.hasFocus()) _uwRequestAttention();
     }
   }, [shown]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Click on a card: remember the key it shows as seen.
+  // Click on a card or its acknowledge button: store the key it shows as acknowledged.
   const shownRef = React.useRef(shown);
   shownRef.current = shown;
   const acknowledge = React.useCallback((pluginId) => {
-    const key = shownRef.current.find(c => c.id === pluginId)?.run.widget?.attention;
-    if (key) setTweak?.(_UW.ackKey(pluginId), key);
+    const c = shownRef.current.find(x => x.id === pluginId);
+    const key = c?.run.widget?.attention;
+    if (key) setTweak?.(c.ackKey, key);
   }, [setTweak]);
 
   // Approval is per plugin, not per tab: shown whatever the active project.
