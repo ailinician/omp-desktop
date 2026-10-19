@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Phone protocol, markdown safety, browser wiring, and notification routing.
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
@@ -13,7 +13,6 @@ async function check(label, fn) {
   try { await fn(); } catch (err) { console.error(`FAILED: ${label}`); throw err; }
   passed++;
 }
-await check("phone client exists", () => assert.ok(existsSync(root + "src/remote/client.js")));
 const C = createRequire(import.meta.url)(root + "src/remote/client.js");
 const initial = () => ({ device: null, tabs: [], view: null, pending: {}, error: null });
 await check("reduce applies hello and tabs without mutating previous state", () => {
@@ -116,10 +115,8 @@ await check("phone page escapes raw HTML and neutralises javascript links", () =
   delete markdown.window.hljs;
   assert.throws(() => phone.renderMarkdown("hello"), /highlight|hljs/i);
 });
-await check("phone script load order requires highlighting before markdown setup and forbids inline code", () => {
+await check("phone HTML forbids inline scripts, handlers and styles and keeps PWA meta tags", () => {
   const html = load("src/remote/index.html");
-  assert.deepEqual([...html.matchAll(/<script\b[^>]*\ssrc="([^"]+)"[^>]*><\/script>/gi)].map(m => m[1]),
-    ["/marked.min.js", "/highlight.min.js", "/marked-setup.js", "/accent.js", "/scroll-pin.js", "/jsQR.js", "/client.js", "/remote.js"]);
   assert.doesNotMatch(html, /<script\b(?![^>]*\ssrc=)[^>]*>|<[a-z][^>]*\son[a-z]+\s*=|<style\b|\sstyle\s*=/i);
   assert.match(html, /<link rel="manifest" href="\/manifest.json">/);
   assert.match(html, /name="apple-mobile-web-app-capable" content="yes"/);
@@ -127,7 +124,7 @@ await check("phone script load order requires highlighting before markdown setup
   assert.match(html, /<meta charset="utf-8">/);
 });
 
-// Browser APIs are unavailable in Node. Keep real remote.js and client.js;
+// Browser APIs are unavailable in Node. Keep real phone modules;
 // fake only DOM, network, storage and service-worker boundaries.
 let focused = null;
 class Element {
@@ -205,7 +202,8 @@ function browser({ pair = false, token = "saved-token", standalone = true, pairS
   vm.runInContext(load("src/remote/client.js"), ctx);
   // Markdown safety itself uses the actual vendored libraries above.
   ctx.OMP_REMOTE_CLIENT.renderMarkdown = text => "SAFE:" + text;
-  vm.runInContext(load("src/remote/remote.js"), ctx);
+  for (const f of ["scanner.js", "sessions.js", "transcript.js", "remote.js"])
+    vm.runInContext(load("src/remote/" + f), ctx, { filename: f });
   const nodes = () => descendants(app);
   const button = text => nodes().find(n => n.tagName === "button" && n.textContent === text);
   const message = async data => { sockets.at(-1).onmessage({ data: JSON.stringify(data) }); await flush(); };

@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - Remote access always uses HTTPS. The plain-HTTP switch has been removed, and an old `allowHttp` setting is ignored rather than exposing pairing codes and device tokens without encryption.
+- Remote access internals are split by responsibility into smaller phone UI, Settings row and Rust modules, with the existing protocol and settings unchanged.
 
 ### Fixed
 

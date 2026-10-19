@@ -619,9 +619,11 @@ function remoteRows() {
     useCallback: fn => fn,
   };
   const window = { Icon: {} };
-  const { code } = Babel.transform(source("src/design/settings/rows-remote.jsx"), { presets: ["react"] });
   const scope = { window, React };
-  runInNewContext(code, scope);
+  for (const file of ["rows-remote-shared.jsx", "rows-remote-server.jsx", "rows-remote-phones.jsx"]) {
+    const { code } = Babel.transform(source(`src/design/settings/${file}`), { presets: ["react"] });
+    runInNewContext(code, scope);
+  }
   return { window, scope, reset: () => { i = 0; } };
 }
 

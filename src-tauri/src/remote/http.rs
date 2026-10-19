@@ -1,17 +1,16 @@
 //! Minimal HTTP/1.1 plumbing for the remote server: bounded request-head
 //! parsing, `Host`/`Origin` checks and response writing.
 
-use std::borrow::Cow;
-use std::io::{self, Read, Write};
-use std::net::Ipv4Addr;
+use std::io::{self, Read};
 use std::time::{Duration, Instant};
+
+pub mod admission;
+pub mod response;
 
 /// Largest request head (request line + headers + blank line) accepted.
 pub const MAX_HEAD: usize = 16 * 1024;
 /// Absolute time a client gets to deliver head and body.
 pub const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
-
-pub const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum HttpError {
@@ -174,125 +173,6 @@ fn parse_head(raw: &[u8]) -> Result<Head, HttpError> {
         path: path.to_owned(),
         headers,
     })
-}
-
-/// The port a `Host` or `Origin` without one stands for.
-const HTTPS_PORT: u16 = 443;
-
-/// Which `Host` and `Origin` values belong to this server.
-pub struct Allowed {
-    pub ip: Ipv4Addr,
-    pub port: u16,
-    pub host_name: Option<String>,
-}
-
-impl Allowed {
-    fn authority_matches(&self, candidate: &str) -> bool {
-        let (host, port) =
-            candidate
-                .rsplit_once(':')
-                .map_or((candidate, Some(HTTPS_PORT)), |(host, port)| {
-                    let digits = port.bytes().all(|byte| byte.is_ascii_digit());
-                    (host, digits.then(|| port.parse::<u16>().ok()).flatten())
-                });
-        port == Some(self.port)
-            && (host.eq_ignore_ascii_case(&self.ip.to_string())
-                || self
-                    .host_name
-                    .as_deref()
-                    .is_some_and(|name| host.eq_ignore_ascii_case(name)))
-    }
-
-    /// `Host` must name this server (defeats DNS rebinding).
-    pub fn host_ok(&self, head: &Head) -> bool {
-        head.header("host")
-            .is_some_and(|host| self.authority_matches(host))
-    }
-
-    /// `Origin` must be the same origin as this server. A missing header is
-    /// refused: every browser sends one on a WebSocket upgrade.
-    pub fn origin_ok(&self, head: &Head) -> bool {
-        let scheme = "https://";
-        head.header("origin").is_some_and(|origin| {
-            origin
-                .get(..scheme.len())
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
-                && self.authority_matches(&origin[scheme.len()..])
-        })
-    }
-}
-
-pub struct Response {
-    pub status: u16,
-    pub content_type: &'static str,
-    pub body: Cow<'static, [u8]>,
-    pub extra: &'static [(&'static str, &'static str)],
-}
-
-impl Response {
-    /// Empty-ish plain-text reply carrying just the status phrase.
-    pub const fn status(status: u16) -> Self {
-        Self {
-            status,
-            content_type: "text/plain; charset=utf-8",
-            body: Cow::Borrowed(reason(status).as_bytes()),
-            extra: &[],
-        }
-    }
-
-    pub const fn json(status: u16, body: Vec<u8>) -> Self {
-        Self {
-            status,
-            content_type: "application/json",
-            body: Cow::Owned(body),
-            extra: &[],
-        }
-    }
-
-    pub const fn with_extra(mut self, extra: &'static [(&'static str, &'static str)]) -> Self {
-        self.extra = extra;
-        self
-    }
-}
-
-pub const fn reason(status: u16) -> &'static str {
-    match status {
-        200 => "OK",
-        400 => "Bad Request",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        408 => "Request Timeout",
-        410 => "Gone",
-        411 => "Length Required",
-        413 => "Payload Too Large",
-        429 => "Too Many Requests",
-        431 => "Request Header Fields Too Large",
-        501 => "Not Implemented",
-        503 => "Service Unavailable",
-        _ => "Internal Server Error",
-    }
-}
-
-/// Every response is uncacheable, sniff-proof and carries the CSP.
-pub fn write_response<W: Write>(out: &mut W, response: &Response) -> io::Result<()> {
-    let mut head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: {CSP}\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n",
-        response.status,
-        reason(response.status),
-        response.content_type,
-        response.body.len(),
-    );
-    for (name, value) in response.extra {
-        head.push_str(name);
-        head.push_str(": ");
-        head.push_str(value);
-        head.push_str("\r\n");
-    }
-    head.push_str("\r\n");
-    out.write_all(head.as_bytes())?;
-    out.write_all(&response.body)?;
-    out.flush()
 }
 
 #[cfg(test)]

@@ -1,11 +1,16 @@
+use super::routes::{pair, pair_status};
 use super::*;
 use crate::remote::emit::{Action, RemoteEmit, Status};
-use crate::remote::http::{read_head, CSP, REQUEST_DEADLINE};
+use crate::remote::http::admission::Allowed;
+use crate::remote::http::response::CSP;
+use crate::remote::http::{read_head, HttpError, REQUEST_DEADLINE};
 use crate::remote::hub::{Hub, PublishPayload, TabMeta};
+use crate::remote::pairing::PairError;
 use crate::remote::tls::{load_or_generate, CertSource};
 use rustls::pki_types::ServerName;
 use serde_json::Value;
 use std::io::{self, Read, Write};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -321,6 +326,9 @@ fn static_assets_are_served_with_csp_and_no_store() {
         ("/index.html", "text/html; charset=utf-8"),
         ("/remote.js", "text/javascript; charset=utf-8"),
         ("/client.js", "text/javascript; charset=utf-8"),
+        ("/scanner.js", "text/javascript; charset=utf-8"),
+        ("/sessions.js", "text/javascript; charset=utf-8"),
+        ("/transcript.js", "text/javascript; charset=utf-8"),
         ("/jsQR.js", "text/javascript; charset=utf-8"),
         ("/sw.js", "text/javascript; charset=utf-8"),
         ("/remote.css", "text/css; charset=utf-8"),

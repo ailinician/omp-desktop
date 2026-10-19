@@ -1,4 +1,4 @@
-use super::*;
+use super::response::{reason, write_response, Response};
 
 #[test]
 fn a_stale_server_pairing_reply_says_service_unavailable() {

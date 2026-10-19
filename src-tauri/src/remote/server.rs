@@ -1,25 +1,25 @@
 //! HTTPS server: static phone page,
 //! `POST /pair`, and the WebSocket upgrade hook.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use rustls::{ServerConnection, StreamOwned};
-use serde::Deserialize;
 
+pub mod routes;
 mod transport;
-use super::assets;
-use super::devices::{normalize_device_name, DeviceStore};
-use super::http::{read_body, read_head, write_response, Allowed, Head, HttpError, Response};
-use super::pairing::{PairError, Pairing};
+use super::devices::DeviceStore;
+use super::http::admission::Allowed;
+use super::http::response::write_response;
+use super::http::Head;
+use super::pairing::Pairing;
+use routes::{serve, Outcome};
 use transport::InFlight;
 pub use transport::{Conn, DeadlineSock, Slot, Transport};
 
-/// `POST /pair` bodies are tiny JSON; anything bigger is refused.
-const MAX_PAIR_BODY: usize = 4096;
 /// Live connections, all peers together, from accept to the end of the
 /// connection thread (an upgraded WebSocket included): each holds a thread
 /// and two descriptors, and macOS defaults to 256 descriptors per process.
@@ -51,10 +51,10 @@ pub struct Listen {
     pub request_deadline: Duration,
 }
 
-struct Context {
-    allowed: Allowed,
+pub(super) struct Context {
+    pub allowed: Allowed,
     tls: Arc<rustls::ServerConfig>,
-    shared: Shared,
+    pub shared: Shared,
     on_upgrade: UpgradeFn,
     in_flight: Arc<InFlight>,
     request_deadline: Duration,
@@ -147,12 +147,6 @@ fn accept_loop(listener: &TcpListener, stop: &AtomicBool, context: &Arc<Context>
     }
 }
 
-enum Outcome {
-    Reply(Response),
-    Upgrade(Head),
-    Drop,
-}
-
 fn handle(context: &Context, tcp: TcpStream, slot: Slot) {
     let Ok(peer) = tcp.peer_addr() else { return };
     let Ok(socket) = tcp.try_clone() else { return };
@@ -190,120 +184,6 @@ fn handle(context: &Context, tcp: TcpStream, slot: Slot) {
             (context.on_upgrade)(conn, head);
         }
         Outcome::Drop => {}
-    }
-}
-
-const fn error_outcome(error: &HttpError) -> Outcome {
-    match error {
-        HttpError::TooLarge => Outcome::Reply(Response::status(431)),
-        HttpError::Malformed => Outcome::Reply(Response::status(400)),
-        HttpError::Timeout => Outcome::Reply(Response::status(408)),
-        HttpError::Closed | HttpError::Io => Outcome::Drop,
-    }
-}
-
-fn serve(context: &Context, conn: &mut Conn, peer: IpAddr, deadline: Instant) -> Outcome {
-    let socket = &conn.tcp;
-    let arm = |remaining: Duration| socket.set_read_timeout(Some(remaining));
-    let (head, rest) = match read_head(&mut conn.stream, &arm, deadline) {
-        Ok(parsed) => parsed,
-        // A stalled or failed handshake gets no HTTP answer.
-        Err(_) if conn.stream.is_handshaking() => return Outcome::Drop,
-        Err(error) => return error_outcome(&error),
-    };
-    if !context.allowed.host_ok(&head) {
-        return Outcome::Reply(Response::status(403));
-    }
-    if head.is_websocket_upgrade() {
-        if head.method != "GET" || head.path != "/ws" {
-            return Outcome::Reply(Response::status(404));
-        }
-        if !context.allowed.origin_ok(&head) {
-            return Outcome::Reply(Response::status(403));
-        }
-        return Outcome::Upgrade(head);
-    }
-    match (head.method.as_str(), head.path.as_str()) {
-        ("GET", path) => Outcome::Reply(static_asset(path)),
-        ("POST", "/pair") => {
-            // A browser POST from another site carries its own Origin.
-            if head.header("origin").is_some() && !context.allowed.origin_ok(&head) {
-                return Outcome::Reply(Response::status(403));
-            }
-            let length = match head.content_length() {
-                Ok(Some(length)) if length <= MAX_PAIR_BODY => length,
-                Ok(Some(_)) => return Outcome::Reply(Response::status(413)),
-                Ok(None) => return Outcome::Reply(Response::status(411)),
-                Err(error) => return error_outcome(&error),
-            };
-            match read_body(&mut conn.stream, &arm, deadline, rest, length) {
-                Ok(body) => Outcome::Reply(pair(&context.shared, &body, peer)),
-                Err(error) => error_outcome(&error),
-            }
-        }
-        _ => Outcome::Reply(Response::status(405)),
-    }
-}
-
-fn static_asset(path: &str) -> Response {
-    assets::lookup(path).map_or_else(
-        || Response::status(404),
-        |asset| Response {
-            status: 200,
-            content_type: asset.content_type,
-            body: std::borrow::Cow::Borrowed(asset.body),
-            extra: &[],
-        },
-    )
-}
-
-#[derive(Deserialize)]
-struct PairRequest {
-    code: String,
-    name: String,
-}
-
-/// HTTP status for a refused pairing code.
-pub const fn pair_status(error: &PairError) -> u16 {
-    match error {
-        PairError::Invalid => 403,
-        PairError::Expired => 410,
-        PairError::RateLimited => 429,
-    }
-}
-
-fn pair(shared: &Shared, body: &[u8], peer: IpAddr) -> Response {
-    let Ok(request) = serde_json::from_slice::<PairRequest>(body) else {
-        return Response::status(400);
-    };
-    let Ok(name) = normalize_device_name(&request.name) else {
-        return Response::status(400);
-    };
-    if !(shared.is_current)() {
-        return Response::status(503);
-    }
-    if let Err(error) = shared.pairing.redeem(&request.code, peer, Instant::now()) {
-        let response = Response::status(pair_status(&error));
-        return if error == PairError::RateLimited {
-            response.with_extra(&[("Retry-After", "60")])
-        } else {
-            response
-        };
-    }
-    match shared.devices.add(&name) {
-        Ok((device, token)) => {
-            (shared.on_paired)();
-            Response::json(
-                200,
-                serde_json::json!({ "token": token, "deviceId": device.id })
-                    .to_string()
-                    .into_bytes(),
-            )
-        }
-        Err(error) => {
-            eprintln!("[omp-desktop] could not save paired device: {error}");
-            Response::status(500)
-        }
     }
 }
 

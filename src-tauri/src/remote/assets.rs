@@ -16,6 +16,9 @@ pub fn lookup(path: &str) -> Option<Asset> {
         ),
         "/remote.js" => (JS, include_bytes!("../../../src/remote/remote.js")),
         "/client.js" => (JS, include_bytes!("../../../src/remote/client.js")),
+        "/scanner.js" => (JS, include_bytes!("../../../src/remote/scanner.js")),
+        "/sessions.js" => (JS, include_bytes!("../../../src/remote/sessions.js")),
+        "/transcript.js" => (JS, include_bytes!("../../../src/remote/transcript.js")),
         "/jsQR.js" => (JS, include_bytes!("../../../src/remote/jsQR.js")),
         "/sw.js" => (JS, include_bytes!("../../../src/remote/sw.js")),
         "/remote.css" => (
