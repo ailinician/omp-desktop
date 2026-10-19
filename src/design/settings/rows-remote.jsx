@@ -53,6 +53,16 @@ function _SRR_useRemote(bridge) {
   return { status, error, apply, run, setError };
 }
 
+function _SRR_useAsync(load, fallback, deps) {
+  const [value, setValue] = React.useState(fallback);
+  React.useEffect(() => {
+    let live = true;
+    Promise.resolve(load()).then(v => { if (live && v) setValue(v); });
+    return () => { live = false; };
+  }, deps);
+  return value;
+}
+
 /** Text field committed on blur or Enter; re-syncs when the saved value changes. */
 function _SRR_Field({ value, onCommit, label, placeholder, width, disabled, mono = true }) {
   const [text, setText] = React.useState(value);
@@ -62,7 +72,10 @@ function _SRR_Field({ value, onCommit, label, placeholder, width, disabled, mono
     <input className="st-rem-input" type="text" value={text} aria-label={label} placeholder={placeholder}
       disabled={disabled} spellCheck={false} style={{ width, fontFamily: mono ? undefined : "inherit" }}
       onChange={e => setText(e.target.value)} onBlur={commit}
-      onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }} />
+      onKeyDown={e => {
+        if (e.key !== "Enter" || e.nativeEvent?.isComposing || e.keyCode === 229) return;
+        e.currentTarget.blur();
+      }} />
   );
 }
 
@@ -80,12 +93,7 @@ function _SRR_statusText(status) {
 function _SRR_Server({ row, ctx, query }) {
   const Row = window.SettingsRow, Toggle = window.SettingsToggle;
   const { status, error, apply, run } = _SRR_useRemote(ctx.bridge);
-  const [ifaces, setIfaces] = React.useState([]);
-  React.useEffect(() => {
-    let live = true;
-    Promise.resolve(ctx.bridge.remoteInterfaces()).then(v => { if (live && v) setIfaces(v); });
-    return () => { live = false; };
-  }, [ctx.bridge]);
+  const ifaces = _SRR_useAsync(() => ctx.bridge.remoteInterfaces(), [], [ctx.bridge]);
   const s = status?.settings;
   const known = ifaces.some(i => i.name === s?.interface);
   return (
@@ -275,12 +283,7 @@ function _SRR_Push({ row, ctx, query }) {
   const { status, error, apply, run } = _SRR_useRemote(ctx.bridge);
   const push = status?.settings?.push;
   // Prefill an empty contact once from git; the user still has to save it.
-  const [suggest, setSuggest] = React.useState("");
-  React.useEffect(() => {
-    let live = true;
-    Promise.resolve(ctx.bridge.remoteDefaultContact()).then(v => { if (live && v) setSuggest(v); });
-    return () => { live = false; };
-  }, [ctx.bridge]);
+  const suggest = _SRR_useAsync(() => ctx.bridge.remoteDefaultContact(), "", [ctx.bridge]);
   const contact = push?.contact || suggest;
   const set = (patch) => apply({ push: patch });
   const generated = status?.settings?.cert?.kind !== "files";

@@ -1217,6 +1217,7 @@ async fn app_update_install(
 /// (app exit, the updater relaunch); on Unix each tree sits in its own process
 /// group or session and would outlive us. Every step is idempotent.
 pub(crate) fn kill_child_processes(app: &AppHandle) {
+    remote::bridge::stop(app);
     app.state::<AgentBridge>().shutdown_all();
     if let Some(browser) = app.try_state::<browser::BrowserManager>() {
         browser.shutdown_all();
@@ -1589,10 +1590,7 @@ pub fn run() {
 /// Handle lifecycle and platform file-open events from the Tauri run loop.
 fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
     match &event {
-        tauri::RunEvent::Exit => {
-            remote::bridge::stop(app);
-            kill_child_processes(app);
-        }
+        tauri::RunEvent::Exit => kill_child_processes(app),
         // The OS close (title-bar menu, Alt+F4, taskbar) of a window the
         // [`CloseGuard`] holds: the webview confirms, then closes it itself.
         tauri::RunEvent::WindowEvent {

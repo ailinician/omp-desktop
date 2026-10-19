@@ -46,5 +46,17 @@
 
   const TOKEN_NAMES = ["--accent", "--accent-soft", "--accent-glow", "--accent-deep"];
 
-  window.OMP_ACCENT = { TOKEN_NAMES, accentTokens, sameColor };
+  function applyThemeTokens(root, themeId, accent) {
+    root.classList.remove("theme-aurora", "theme-phosphor", "theme-daylight");
+    root.classList.add(`theme-${themeId}`);
+    for (const name of TOKEN_NAMES) root.style.removeProperty(name);
+    const tokens = accent ? accentTokens(accent) : null;
+    if (tokens && !sameColor(getComputedStyle(root).getPropertyValue("--accent").trim(), accent)) {
+      for (const [name, value] of Object.entries(tokens)) root.style.setProperty(name, value);
+    } else if (accent && !tokens) {
+      root.style.setProperty("--accent", accent);
+    }
+  }
+
+  window.OMP_ACCENT = { TOKEN_NAMES, accentTokens, sameColor, applyThemeTokens };
 })();

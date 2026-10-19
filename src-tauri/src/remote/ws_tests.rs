@@ -1,10 +1,11 @@
 use super::*;
+use crate::remote::ws::is_idle;
 use base64::Engine;
 use std::time::Duration;
 use tungstenite::protocol::Role;
 use tungstenite::Message;
 
-trait Rw: Read + Write {}
+pub(super) trait Rw: Read + Write {}
 impl<T: Read + Write> Rw for T {}
 
 struct Client {
@@ -29,23 +30,12 @@ fn payload(ids: &[&str]) -> PublishPayload {
 
 impl TestServer {
     fn tcp(&self) -> TcpStream {
-        let tcp = TcpStream::connect(self.server.local_addr()).unwrap();
-        tcp.set_read_timeout(Some(Duration::from_millis(100)))
-            .unwrap();
-        tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-        tcp
+        self.tcp_with(Duration::from_millis(100))
     }
 
     /// Completed upgrade with a same-origin request, not yet authenticated.
     fn ws_connect(&self) -> Client {
-        let tcp = self.tcp();
-        let mut stream: Box<dyn Rw> = if self.tls {
-            let name = ServerName::try_from("127.0.0.1").unwrap();
-            let connection = rustls::ClientConnection::new(self.client_config(), name).unwrap();
-            Box::new(rustls::StreamOwned::new(connection, tcp))
-        } else {
-            Box::new(tcp)
-        };
+        let mut stream = self.connect(Duration::from_millis(100));
         let scheme = if self.tls { "https" } else { "http" };
         let request = format!(
             "GET /ws HTTP/1.1\r\nHost: {host}\r\nOrigin: {scheme}://{host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
@@ -99,13 +89,6 @@ impl TestServer {
         let token = self.pair_device();
         self.authed_with(&token)
     }
-}
-
-fn is_idle(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-    )
 }
 
 impl Client {
@@ -199,21 +182,73 @@ fn action_round_trip_and_timeout() {
     ws.send_text(r#"{"t":"action","reqId":"r1","tabId":"t1","kind":"prompt","text":"hi"}"#);
     let a = s.emit.next_action();
     assert_eq!((a.kind.as_str(), a.text.as_deref()), ("prompt", Some("hi")));
-    assert_eq!((a.req_id.as_str(), a.tab_id.as_str()), ("r1", "t1"));
-    s.hub.action_result("r1", true, None);
-    assert_eq!(ws.read_json_where(|m| m["t"] == "ack")["ok"], true);
-    ws.send_text(r#"{"t":"select","reqId":"r3","tabId":"t2"}"#);
-    assert_eq!(s.emit.next_action().kind, "select");
-    s.hub.action_result("r3", false, Some("no such tab"));
+    assert_eq!(a.tab_id.as_str(), "t1");
+    assert_ne!(a.req_id.as_str(), "r1", "hub uses its own correlation id");
+    s.hub.action_result(&a.req_id, true, None);
+    let ack = ws.read_json_where(|m| m["t"] == "ack");
     assert_eq!(
-        ws.read_json_where(|m| m["t"] == "ack")["error"],
-        "no such tab"
+        (ack["reqId"].as_str(), ack["ok"].as_bool()),
+        (Some("r1"), Some(true))
+    );
+    ws.send_text(r#"{"t":"select","reqId":"r3","tabId":"t2"}"#);
+    let select = s.emit.next_action();
+    assert_eq!(select.kind, "select");
+    s.hub
+        .action_result(&select.req_id, false, Some("no such tab"));
+    let ack = ws.read_json_where(|m| m["t"] == "ack");
+    assert_eq!(
+        (ack["reqId"].as_str(), ack["error"].as_str()),
+        (Some("r3"), Some("no such tab"))
     );
     ws.send_text(r#"{"t":"action","reqId":"r2","tabId":"t1","kind":"abort"}"#);
+    let abort = s.emit.next_action();
     let ack = ws.read_json_where_within(|m| m["t"] == "ack", Duration::from_secs(17));
-    assert_eq!(ack["ok"], false);
+    assert_eq!(
+        (ack["reqId"].as_str(), ack["ok"].as_bool()),
+        (Some("r2"), Some(false))
+    );
     assert_eq!(ack["error"], "desktop did not answer");
-    s.hub.action_result("r2", true, None); // late answer is ignored
+    s.hub.action_result(&abort.req_id, true, None); // late answer is ignored
+}
+
+#[test]
+fn same_req_id_from_two_connections_is_forwarded_independently_and_duplicate_on_one_is_refused() {
+    let s = test_server("ws-reqid-collision");
+    let mut first = s.authed_socket();
+    let mut second = s.authed_socket();
+    first.send_text(r#"{"t":"action","reqId":"same","tabId":"t1","kind":"abort"}"#);
+    second.send_text(r#"{"t":"action","reqId":"same","tabId":"t2","kind":"abort"}"#);
+    let a1 = s.emit.next_action();
+    let a2 = s.emit.next_action();
+    assert_ne!(a1.req_id, a2.req_id);
+    // A duplicate reqId on the same connection is still refused.
+    first.send_text(r#"{"t":"action","reqId":"same","tabId":"t1","kind":"abort"}"#);
+    let dup = first.read_json_where(|m| m["t"] == "ack");
+    assert_eq!(
+        (
+            dup["reqId"].as_str(),
+            dup["ok"].as_bool(),
+            dup["error"].as_str()
+        ),
+        (Some("same"), Some(false), Some("duplicate reqId"))
+    );
+    s.hub.action_result(&a1.req_id, true, None);
+    s.hub
+        .action_result(&a2.req_id, false, Some("tab not available"));
+    let ack1 = first.read_json_where(|m| m["t"] == "ack");
+    let ack2 = second.read_json_where(|m| m["t"] == "ack");
+    assert_eq!(
+        (ack1["reqId"].as_str(), ack1["ok"].as_bool()),
+        (Some("same"), Some(true))
+    );
+    assert_eq!(
+        (
+            ack2["reqId"].as_str(),
+            ack2["ok"].as_bool(),
+            ack2["error"].as_str()
+        ),
+        (Some("same"), Some(false), Some("tab not available"))
+    );
 }
 
 #[test]
@@ -246,8 +281,8 @@ fn bad_actions_are_refused_without_reaching_the_webview() {
     ws.send_text(r#"{"t":"action","reqId":"","tabId":"t1","kind":"abort"}"#);
     ws.send_text(r#"{"t":"action","reqId":"b3","tabId":"t1","kind":"abort"}"#);
     assert_eq!(
-        s.emit.next_action().req_id,
-        "b3",
+        s.emit.next_action().tab_id,
+        "t1",
         "nothing else was forwarded"
     );
 }
@@ -374,11 +409,10 @@ fn push_subscriptions_are_stored_capped_and_acked() {
 /// Bytes trickled to a socket that never authenticates: the server must cut
 /// it at the auth deadline (plus the close grace), not keep reading while
 /// bytes keep coming. The write failing is how the client sees that.
-fn trickle_is_cut(s: &TestServer) -> bool {
-    let mut client = s.ws_connect();
+fn trickle_frame_is_cut(client: &mut Client, delay: Duration) -> bool {
     let start = Instant::now();
-    // A masked 4000-byte text frame, one byte per 10 ms: the socket is never
-    // idle long enough for a read timeout to end a poll.
+    // A masked 4000-byte text frame: the socket is never idle long enough for
+    // a read timeout to end a poll.
     let mut bytes = vec![0x81, 0xFE, 0x0F, 0xA0];
     bytes.extend(std::iter::repeat_n(0_u8, 4004));
     for byte in bytes {
@@ -389,9 +423,14 @@ fn trickle_is_cut(s: &TestServer) -> bool {
         if raw.write_all(&[byte]).and_then(|()| raw.flush()).is_err() {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(delay);
     }
     false
+}
+
+fn trickle_is_cut(s: &TestServer) -> bool {
+    let mut client = s.ws_connect();
+    trickle_frame_is_cut(&mut client, Duration::from_millis(10))
 }
 
 #[test]
@@ -544,22 +583,11 @@ fn revoking_an_authenticated_socket_cuts_tcp_immediately() {
 fn authenticated_trickle_is_cut(tls: bool, delay: Duration, name: &str) {
     let s = test_server_with(tls, name);
     let mut client = s.authed_socket();
-    let started = Instant::now();
-    let mut frame = vec![0x81, 0xfe, 0x0f, 0xa0];
-    frame.extend(std::iter::repeat_n(0, 4004));
-    for byte in frame {
-        assert!(
-            started.elapsed() < Duration::from_secs(7),
-            "authenticated trickled frame kept TCP open"
-        );
-        let raw = client.ws.get_mut();
-        if raw.write_all(&[byte]).and_then(|()| raw.flush()).is_err() {
-            assert_eq!(s.hub.connected_devices(), Vec::<String>::new());
-            return;
-        }
-        std::thread::sleep(delay);
-    }
-    panic!("trickled frame was not cut");
+    assert!(
+        trickle_frame_is_cut(&mut client, delay),
+        "trickled frame was not cut"
+    );
+    assert_eq!(s.hub.connected_devices(), Vec::<String>::new());
 }
 
 #[test]

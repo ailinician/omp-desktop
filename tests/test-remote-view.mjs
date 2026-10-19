@@ -596,7 +596,7 @@ test("live bridge senders resolve to false when nothing can be handed off", asyn
 
 // ---- settings: delayed push toggles merge against the newest settings -------
 test("two delayed push toggles both survive: nested push merges inside the queue", async () => {
-  const Babel = createRequire(import.meta.url)(new URL("../src/babel.min.js", import.meta.url).pathname);
+  const Babel = createRequire(import.meta.url)("../src/babel.min.js");
   const slots = []; let i = 0;
   const changed = (a, b) => !a || !b || a.length !== b.length || a.some((v, k) => !Object.is(v, b[k]));
   const React = {

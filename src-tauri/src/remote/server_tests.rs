@@ -86,6 +86,8 @@ impl RemoteEmit for FakeEmit {
 #[path = "ws_tests.rs"]
 mod ws_tests;
 
+use ws_tests::Rw;
+
 /// Test-only constructor: binds 127.0.0.1 on a free port, no interface lookup.
 fn test_server_with(tls: bool, name: &str) -> TestServer {
     test_server_deadline(tls, name, REQUEST_DEADLINE)
@@ -161,23 +163,30 @@ impl TestServer {
         )
     }
 
-    /// Send `raw` and read the whole reply until the server closes.
-    fn raw(&self, raw: &[u8]) -> Reply {
+    fn tcp_with(&self, read_timeout: Duration) -> TcpStream {
         let tcp = TcpStream::connect(self.server.local_addr()).unwrap();
-        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        tcp.set_read_timeout(Some(read_timeout)).unwrap();
         tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-        let mut bytes = Vec::new();
+        tcp
+    }
+
+    fn connect(&self, read_timeout: Duration) -> Box<dyn Rw> {
+        let tcp = self.tcp_with(read_timeout);
         if self.tls {
             let name = ServerName::try_from("127.0.0.1").unwrap();
             let connection = rustls::ClientConnection::new(self.client_config(), name).unwrap();
-            let mut stream = rustls::StreamOwned::new(connection, tcp);
-            stream.write_all(raw).unwrap();
-            read_all(&mut stream, &mut bytes);
+            Box::new(rustls::StreamOwned::new(connection, tcp))
         } else {
-            let mut stream = tcp;
-            stream.write_all(raw).unwrap();
-            read_all(&mut stream, &mut bytes);
+            Box::new(tcp)
         }
+    }
+
+    /// Send `raw` and read the whole reply until the server closes.
+    fn raw(&self, raw: &[u8]) -> Reply {
+        let mut stream = self.connect(Duration::from_secs(5));
+        let mut bytes = Vec::new();
+        stream.write_all(raw).unwrap();
+        read_all(&mut stream, &mut bytes);
         parse_reply(&bytes)
     }
 

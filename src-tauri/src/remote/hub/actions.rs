@@ -10,6 +10,7 @@ use crate::remote::emit::Action;
 
 pub(super) struct Pending {
     pub conn: u64,
+    req_id: String,
     deadline: Instant,
 }
 
@@ -22,12 +23,16 @@ impl Hub {
     /// Requests of a connection the hub no longer knows (revoked, closed)
     /// are dropped. `action.req_id` is non-empty (the socket layer checks).
     pub fn action(&self, conn: u64, action: &Action) {
-        let forward = self.with_state(|state| {
+        let forwarded = self.with_state(|state| {
             if !state.conns.contains_key(&conn) {
-                return false;
+                return None;
             }
+            let duplicate = state
+                .pending
+                .values()
+                .any(|p| p.conn == conn && p.req_id == action.req_id);
             let mine = state.pending.values().filter(|p| p.conn == conn).count();
-            let refusal = if state.pending.contains_key(&action.req_id) {
+            let refusal = if duplicate {
                 Some("duplicate reqId")
             } else if mine >= MAX_PENDING_PER_CONN {
                 Some("too many pending requests")
@@ -36,19 +41,24 @@ impl Hub {
             };
             if let Some(error) = refusal {
                 state.send(conn, ack(&action.req_id, false, Some(error)));
-                return false;
+                return None;
             }
+            state.next_action += 1;
+            let id = format!("act-{}", state.next_action);
+            let mut forwarded = action.clone(); // the webview gets its own hub correlation id
+            forwarded.req_id.clone_from(&id);
             state.pending.insert(
-                action.req_id.clone(), // keyed for action_result / expire
+                id,
                 Pending {
                     conn,
+                    req_id: action.req_id.clone(), // kept for the phone ack / timeout
                     deadline: Instant::now() + ACTION_TIMEOUT,
                 },
             );
-            true
+            Some(forwarded)
         });
-        if forward {
-            self.emit.action(action);
+        if let Some(forwarded) = forwarded {
+            self.emit.action(&forwarded);
         }
     }
 
@@ -56,7 +66,7 @@ impl Hub {
     pub fn action_result(&self, req_id: &str, ok: bool, error: Option<&str>) {
         self.with_state(|state| {
             if let Some(pending) = state.pending.remove(req_id) {
-                state.send(pending.conn, ack(req_id, ok, error));
+                state.send(pending.conn, ack(&pending.req_id, ok, error));
             }
         });
     }
@@ -87,8 +97,12 @@ impl Hub {
                 .map(|(id, _)| id.clone()) // removed from the map below
                 .collect();
             for id in late {
-                state.pending.remove(&id);
-                state.send(conn, ack(&id, false, Some("desktop did not answer")));
+                if let Some(pending) = state.pending.remove(&id) {
+                    state.send(
+                        conn,
+                        ack(&pending.req_id, false, Some("desktop did not answer")),
+                    );
+                }
             }
         });
     }

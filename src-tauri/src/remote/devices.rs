@@ -12,6 +12,17 @@ use super::tls::write_private;
 use crate::json_store;
 
 const LAST_SEEN_INTERVAL: Duration = Duration::from_secs(60);
+/// The phone sends the first 120 characters of its user agent; longer names
+/// are cut, not refused, and empty names are rejected.
+pub const MAX_DEVICE_NAME_CHARS: usize = 64;
+
+pub fn normalize_device_name(name: &str) -> Result<String, String> {
+    let name: String = name.trim().chars().take(MAX_DEVICE_NAME_CHARS).collect();
+    if name.is_empty() {
+        return Err("device name is empty".to_owned());
+    }
+    Ok(name)
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -57,12 +68,13 @@ impl DeviceStore {
     }
 
     pub fn add(&self, name: &str) -> Result<(Device, String), String> {
+        let name = normalize_device_name(name)?;
         let id = random_b64(9)?;
         let token = random_b64(32)?;
         let now = unix_seconds();
         let device = Device {
             id,
-            name: name.to_owned(),
+            name,
             token_hash: json_store::hex_sha256(token.as_bytes()),
             paired_at: now,
             last_seen: now,
@@ -112,15 +124,20 @@ impl DeviceStore {
         Some(device)
     }
 
-    pub fn rename(&self, id: &str, name: &str) -> Result<(), String> {
+    fn update_device(&self, id: &str, modify: impl FnOnce(&mut Device)) -> Result<(), String> {
         self.update(&mut self.devices(), Instant::now(), |devices| {
             let device = devices
                 .iter_mut()
                 .find(|device| device.id == id)
                 .ok_or_else(|| "remote device not found".to_string())?;
-            name.clone_into(&mut device.name);
+            modify(device);
             Ok(())
         })
+    }
+
+    pub fn rename(&self, id: &str, name: &str) -> Result<(), String> {
+        let name = normalize_device_name(name)?;
+        self.update_device(id, |device| device.name = name)
     }
 
     /// False means no durable revocation occurred (unknown id or write error).
@@ -137,14 +154,7 @@ impl DeviceStore {
     }
 
     pub fn set_push(&self, id: &str, subs: Vec<PushSubscription>) -> Result<(), String> {
-        self.update(&mut self.devices(), Instant::now(), |devices| {
-            let device = devices
-                .iter_mut()
-                .find(|device| device.id == id)
-                .ok_or_else(|| "remote device not found".to_string())?;
-            device.push = subs;
-            Ok(())
-        })
+        self.update_device(id, |device| device.push = subs)
     }
 
     /// Drop one subscription inside the locked update; a missing device is
@@ -206,7 +216,7 @@ impl DeviceStore {
     }
 }
 
-fn unix_seconds() -> u64 {
+pub(super) fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

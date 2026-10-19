@@ -184,6 +184,7 @@ function browser({ pair = false, token = "saved-token", standalone = true } = {}
   const ctx = vm.createContext({ console, URL, URLSearchParams, Uint8Array, atob, navigator, location, WebSocket, ResizeObserver,
     PushManager: class {}, Notification: { requestPermission: async () => "granted" },
     matchMedia: () => ({ matches: standalone }),
+    getComputedStyle: () => ({ getPropertyValue: () => "" }),
     document: {
       hidden: false, addEventListener(name, fn) { (docHandlers[name] ??= []).push(fn); },
       get activeElement() { return focused; },
@@ -199,6 +200,7 @@ function browser({ pair = false, token = "saved-token", standalone = true } = {}
     setInterval: () => 1, clearInterval() {},
   });
   ctx.window = ctx;
+  vm.runInContext(load("src/app/accent.js"), ctx);
   vm.runInContext(load("src/app/scroll-pin.js"), ctx);
   vm.runInContext(load("src/remote/client.js"), ctx);
   // Markdown safety itself uses the actual vendored libraries above.

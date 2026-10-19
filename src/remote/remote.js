@@ -268,19 +268,7 @@
 
   function applyTheme(theme) {
     if (!theme) return;
-    const root = document.documentElement;
-    root.classList.remove("theme-aurora", "theme-phosphor", "theme-daylight");
-    root.classList.add(`theme-${theme.id}`);
-    const A = window.OMP_ACCENT;
-    for (const name of A?.TOKEN_NAMES || []) root.style.removeProperty(name);
-    if (A && theme.accent) {
-      const tokens = A.accentTokens(theme.accent);
-      if (tokens && !A.sameColor(getComputedStyle(root).getPropertyValue("--accent").trim(), theme.accent)) {
-        for (const [name, value] of Object.entries(tokens)) root.style.setProperty(name, value);
-      } else if (!tokens) {
-        root.style.setProperty("--accent", theme.accent);
-      }
-    }
+    window.OMP_ACCENT?.applyThemeTokens(document.documentElement, theme.id, theme.accent);
   }
   applyTheme({ id: "aurora", tone: "dark", accent: "#8AF0C8" });
 
@@ -434,6 +422,16 @@
     for (const key of askDrafts.keys()) if (!liveDrafts.has(key)) askDrafts.delete(key);
   }
 
+  function railRow(tag, cls, glyphClass, symbol, content) {
+    const row = node(tag, undefined, cls);
+    const rail = node("div", undefined, "ass-rail");
+    const glyph = node("div", undefined, glyphClass);
+    if (symbol) glyph.append(node("span", symbol));
+    rail.append(glyph, node("div", undefined, "ass-thread"));
+    row.append(rail, content);
+    return row;
+  }
+
   function renderUser(message) {
     const row = node("div", undefined, `row user${fade(C.messageKey(message))}`);
     const bubble = node("div", undefined, "user-bubble");
@@ -444,39 +442,24 @@
   }
 
   function renderAssistant(message) {
-    const row = node("div", undefined, `row assistant${fade(C.messageKey(message))}`);
-    const rail = node("div", undefined, "ass-rail");
-    const glyph = node("div", undefined, "ass-glyph");
-    glyph.append(node("span", "✦")); // keeps the glyph from collapsing
-    rail.append(glyph, node("div", undefined, "ass-thread"));
     const body = node("div", undefined, "ass-body");
     const text = node("div", undefined, "ass-text selectable md-content");
     try { text.innerHTML = C.renderMarkdown(message.text || ""); }
     catch (err) { state = { ...state, error: err.message }; text.textContent = message.text || ""; }
     body.append(text);
-    row.append(rail, body);
-    return row;
+    return railRow("div", `row assistant${fade(C.messageKey(message))}`, "ass-glyph", "✦", body);
   }
 
   function renderNotice(message) {
-    const row = node("div", undefined, `row assistant${fade(C.messageKey(message))}`);
-    const rail = node("div", undefined, "ass-rail");
-    rail.append(node("div", undefined, "ass-glyph"), node("div", undefined, "ass-thread"));
     const body = node("div", undefined, "ass-body");
     const text = node("div", message.text || "", "ass-text selectable");
     text.style.color = "var(--fg-3)";
     body.append(text);
-    row.append(rail, body);
-    return row;
+    return railRow("div", `row assistant${fade(C.messageKey(message))}`, "ass-glyph", "", body);
   }
 
   function renderTool(message) {
     const tool = message.tool || {};
-    const row = node("div", undefined, `row tool${fade(C.messageKey(message))}`);
-    const rail = node("div", undefined, "ass-rail");
-    const glyph = node("div", undefined, "tool-glyph");
-    glyph.append(node("span", "⚙"));
-    rail.append(glyph, node("div", undefined, "ass-thread"));
     const card = node("details", undefined, "tool-card");
     card.open = openTools.has(message.id);
     card.addEventListener("toggle", () => { if (card.open) openTools.add(message.id); else openTools.delete(message.id); });
@@ -488,18 +471,12 @@
     const body = node("div", undefined, "tool-bash mono selectable");
     body.append(node("pre", tool.output || message.text || ""));
     card.append(head, body);
-    row.append(rail, card);
-    return row;
+    return railRow("div", `row tool${fade(C.messageKey(message))}`, "tool-glyph", "⚙", card);
   }
 
   function renderAsk(ask, key) {
-    const row = node("article", undefined, `row ask${fade(`ask:${ask.id}`)}`);
-    const rail = node("div", undefined, "ass-rail");
-    const glyph = node("div", undefined, "ass-glyph ask-glyph");
-    glyph.append(node("span", "?"));
-    rail.append(glyph, node("div", undefined, "ass-thread"));
     const card = node("div", undefined, "ass-body");
-    row.append(rail, card);
+    const row = railRow("article", `row ask${fade(`ask:${ask.id}`)}`, "ass-glyph ask-glyph", "?", card);
     card.append(node("div", ask.title || "Question", "ask-question"));
     if (ask.message) card.append(node("div", ask.message, "ask-confirm-message selectable"));
     if (ask.kind === "dialog") {

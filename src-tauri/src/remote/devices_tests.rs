@@ -57,6 +57,11 @@ fn rename_and_push_survive_reload_and_unknown_ids_fail() {
     assert_eq!(token.len(), 43);
     assert_eq!(dev.token_hash.len(), 64);
     assert!(dev.paired_at > 0);
+    store
+        .rename(&dev.id, &format!("  Phone{}  ", "x".repeat(70)))
+        .unwrap();
+    assert!(store.rename(&dev.id, "   ").is_err());
+    assert_eq!(store.list()[0].name.chars().count(), MAX_DEVICE_NAME_CHARS);
     store.rename(&dev.id, "Phone").unwrap();
     store
         .set_push(

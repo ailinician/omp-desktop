@@ -13,15 +13,12 @@ use rustls::{ServerConnection, StreamOwned};
 use serde::Deserialize;
 
 use super::assets;
-use super::devices::DeviceStore;
+use super::devices::{normalize_device_name, DeviceStore};
 use super::http::{read_body, read_head, write_response, Allowed, Head, HttpError, Response};
 use super::pairing::{PairError, Pairing};
 
 /// `POST /pair` bodies are tiny JSON; anything bigger is refused.
 const MAX_PAIR_BODY: usize = 4096;
-/// The phone sends the first 120 characters of its user agent; longer names
-/// are cut, not refused.
-const MAX_DEVICE_NAME_CHARS: usize = 64;
 /// Live connections, all peers together, from accept to the end of the
 /// connection thread (an upgraded WebSocket included): each holds a thread
 /// and two descriptors, and macOS defaults to 256 descriptors per process.
@@ -496,15 +493,9 @@ fn pair(shared: &Shared, body: &[u8], peer: IpAddr) -> Response {
     let Ok(request) = serde_json::from_slice::<PairRequest>(body) else {
         return Response::status(400);
     };
-    let name: String = request
-        .name
-        .trim()
-        .chars()
-        .take(MAX_DEVICE_NAME_CHARS)
-        .collect();
-    if name.is_empty() {
+    let Ok(name) = normalize_device_name(&request.name) else {
         return Response::status(400);
-    }
+    };
     if !(shared.is_current)() {
         return Response::status(503);
     }

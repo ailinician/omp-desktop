@@ -124,7 +124,7 @@ fn drain(tcp: &std::net::TcpStream) {
     }
 }
 
-fn is_idle(error: &io::Error) -> bool {
+pub(super) fn is_idle(error: &io::Error) -> bool {
     matches!(
         error.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
@@ -270,9 +270,6 @@ fn read_step(
     ws.get_mut().set_deadline(Some(deadline));
     let read = read_text(ws);
     ws.get_mut().set_deadline(None);
-    if Instant::now() >= deadline {
-        return Step::Close(CLOSE_OVERLOAD);
-    }
     match read {
         Ok(Frame::Text(text)) => {
             *frame_since = None;

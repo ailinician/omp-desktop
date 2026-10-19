@@ -6,12 +6,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 use super::bridge::FanOut;
-use super::devices::DeviceStore;
+use super::devices::{unix_seconds, DeviceStore};
 use super::emit::{Action, DeviceStatus, RemoteEmit, Status};
 use super::hub::{Hub, CLOSE_NOT_READY};
 use super::net::{self, Iface};
@@ -50,6 +50,12 @@ impl Running {
 struct Monitor {
     stop: Arc<AtomicBool>,
     _wake: Sender<()>,
+}
+
+impl Drop for Monitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
 }
 
 struct State {
@@ -117,13 +123,6 @@ pub struct RemoteManager {
     fan_out: Option<Arc<FanOut>>,
 }
 
-fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 /// Whether the running server already matches `new` (what is not a server
 /// property, like the push options, is ignored).
 fn same_server(old: &RemoteSettings, new: &RemoteSettings) -> bool {
@@ -154,6 +153,15 @@ impl Core {
         let status = self.status_with(&self.hub.connected_devices());
         self.emit.status(&status);
         status
+    }
+
+    fn emit_status_fn(core: &Weak<Self>) -> Arc<dyn Fn() + Send + Sync> {
+        let core = Weak::clone(core);
+        Arc::new(move || {
+            if let Some(core) = core.upgrade() {
+                core.emit_status();
+            }
+        })
     }
 
     fn status_with(&self, connected: &[String]) -> Status {
@@ -220,14 +228,7 @@ impl Core {
                     let hub = Arc::clone(&self.hub);
                     Arc::new(move || hub.generation() == generation)
                 },
-                on_paired: {
-                    let core = Weak::clone(&self.me);
-                    Arc::new(move || {
-                        if let Some(core) = core.upgrade() {
-                            core.emit_status();
-                        }
-                    })
-                },
+                on_paired: Self::emit_status_fn(&self.me),
             },
             ws::upgrade_fn(Arc::clone(&self.hub), Arc::clone(&self.devices), generation),
         )?;
@@ -356,14 +357,7 @@ impl RemoteManager {
                     let hub = Arc::clone(&hub);
                     Arc::new(move |tab| hub.tab_title(tab))
                 },
-                {
-                    let core = Weak::clone(core);
-                    Arc::new(move || {
-                        if let Some(core) = core.upgrade() {
-                            core.emit_status();
-                        }
-                    })
-                },
+                Core::emit_status_fn(core),
             );
             Core {
                 hub,
@@ -454,9 +448,6 @@ impl RemoteManager {
             };
             // Only e.g. the push options changed: sockets stay connected.
             if !keep {
-                if let Some(old) = &old {
-                    old.stop.store(true, Ordering::SeqCst);
-                }
                 drop(old);
                 core.rebind(&settings);
                 if settings.enabled {
@@ -476,9 +467,6 @@ impl RemoteManager {
         let core = &self.core;
         let _serial = core.serial();
         let old = core.state().monitor.take();
-        if let Some(old) = &old {
-            old.stop.store(true, Ordering::SeqCst);
-        }
         let run = core.state().run.take();
         drop((old, run));
         // Also without a server: connections still in flight on a dropped one

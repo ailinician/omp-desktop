@@ -142,6 +142,10 @@ fn apply(
 }
 
 impl Tracker {
+    fn sessions(&self) -> Option<std::sync::MutexGuard<'_, HashMap<String, SessionState>>> {
+        self.inner.lock().ok()
+    }
+
     pub fn set_sink(&self, sink: Arc<dyn TrackerSink>) {
         let previous = {
             let Ok(mut slot) = self.sink.lock() else {
@@ -166,7 +170,7 @@ impl Tracker {
             return;
         };
         let outcome = {
-            let Ok(mut sessions) = self.inner.lock() else {
+            let Some(mut sessions) = self.sessions() else {
                 return;
             };
             // A reader retired under this id must not touch state a replacement
@@ -186,7 +190,7 @@ impl Tracker {
             return;
         }
         let changed = {
-            let Ok(mut sessions) = self.inner.lock() else {
+            let Some(mut sessions) = self.sessions() else {
                 return;
             };
             sessions
@@ -200,7 +204,7 @@ impl Tracker {
 
     pub fn on_exit(&self, sid: &str) {
         let removed = {
-            let Ok(mut sessions) = self.inner.lock() else {
+            let Some(mut sessions) = self.sessions() else {
                 return;
             };
             sessions.remove(sid)
@@ -211,7 +215,7 @@ impl Tracker {
     }
 
     pub fn snapshot(&self) -> HashMap<String, (bool, usize)> {
-        let Ok(sessions) = self.inner.lock() else {
+        let Some(sessions) = self.sessions() else {
             return HashMap::new();
         };
         sessions

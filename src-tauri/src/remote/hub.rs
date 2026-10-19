@@ -60,6 +60,7 @@ struct Entry {
 #[derive(Default)]
 struct State {
     next_conn: u64,
+    next_action: u64,
     ready: bool,
     /// Bumped by `close_all`: a connection of an older server generation is
     /// refused at `register`.
@@ -144,6 +145,13 @@ impl State {
     fn close(&mut self, conn: u64, code: u16) {
         self.send(conn, Out::Close(code));
         self.remove(conn);
+    }
+
+    fn close_all(&mut self, code: u16) {
+        let ids: Vec<u64> = self.conns.keys().copied().collect();
+        for id in ids {
+            self.close(id, code);
+        }
     }
 
     /// Broadcast the merged tab list if it differs from the last one sent.
@@ -232,10 +240,7 @@ impl Hub {
     pub fn set_ready(&self, ready: bool) {
         self.with_state(|state| {
             if std::mem::replace(&mut state.ready, ready) && !ready {
-                let ids: Vec<u64> = state.conns.keys().copied().collect();
-                for id in ids {
-                    state.close(id, CLOSE_NOT_READY);
-                }
+                state.close_all(CLOSE_NOT_READY);
             }
         });
     }
@@ -325,24 +330,21 @@ impl Hub {
             );
             let hello = json!({ "t": "hello", "deviceId": device.id, "name": device.name });
             state.send(conn, Out::Text(hello.to_string()));
-            if let Some(key) = state.push_key.clone() {
-                // The new socket's own copy of the key.
-                state.send(conn, Out::Text(push_key_message(&key)));
+            if let Some(text) = state.push_key.as_deref().map(push_key_message) {
+                state.send(conn, Out::Text(text));
             }
             let tabs = json!({ "t": "tabs", "tabs": state.merged_tabs() });
             state.send(conn, Out::Text(tabs.to_string()));
-            if let Some(view) = state.view.clone() {
-                // The new socket's own copy of the current view.
-                state.send(
-                    conn,
-                    Out::Text(json!({ "t": "view", "view": view }).to_string()),
-                );
-            }
-            if let Some(theme) = state.theme.clone() {
-                state.send(
-                    conn,
-                    Out::Text(json!({ "t": "theme", "theme": theme }).to_string()),
-                );
+            let view = state
+                .view
+                .as_ref()
+                .map(|view| json!({ "t": "view", "view": view }).to_string());
+            let theme = state
+                .theme
+                .as_ref()
+                .map(|theme| json!({ "t": "theme", "theme": theme }).to_string());
+            for text in [view, theme].into_iter().flatten() {
+                state.send(conn, Out::Text(text));
             }
             Ok(conn)
         })
@@ -406,10 +408,7 @@ impl Hub {
     pub fn close_all(&self, code: u16) {
         self.with_state(|state| {
             state.generation += 1;
-            let ids: Vec<u64> = state.conns.keys().copied().collect();
-            for id in ids {
-                state.close(id, code);
-            }
+            state.close_all(code);
         });
     }
 
