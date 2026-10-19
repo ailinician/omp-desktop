@@ -263,8 +263,16 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
     // A widget insert for a freshly opened tab (`sessionId`, insert target
     // new-tab) goes into that tab's own draft, appended like any widget insert.
     if (promptInsert.sessionId) {
-      updateDraft(promptInsert.sessionId, d => ({ ...d, text: window.OMP_WIDGETS.appendToDraft(d.text, promptInsert.text), historyNav: null }));
-      requestAnimationFrame(() => taRef.current?.focus());
+      // Guarded like the queue restore: a tab closed while omp started gets no draft back,
+      // and focus moves only if that tab is shown and the user is not typing elsewhere.
+      const target = promptInsert.sessionId;
+      updateOpenDraft(target, d => ({ ...d, text: window.OMP_WIDGETS.appendToDraft(d.text, promptInsert.text), historyNav: null }));
+      requestAnimationFrame(() => {
+        if (sessionIdRef.current !== target) return;
+        const el = document.activeElement;
+        if (el && window.OMP_KEYMAP?.isTypingTarget(el)) return;
+        taRef.current?.focus();
+      });
       return;
     }
     replaceDraft(promptInsert.append ? window.OMP_WIDGETS.appendToDraft(text, promptInsert.text) : promptInsert.text);

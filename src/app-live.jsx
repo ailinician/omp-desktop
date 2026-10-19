@@ -496,13 +496,19 @@ function App() {
   // `action` (OMP_WIDGETS.insertAction, from widgets.json only): "new-tab"
   // always opens a fresh tab on the project and fills that tab's draft (never
   // sent); a failed open is reported by openSession and inserts nothing.
+  const insertOpeningRef = React.useRef(false);
   const handleWidgetInsert = React.useCallback(async (text, action) => {
     if (action?.target === "new-tab" && bridge) {
+      // A double-click or key repeat must open one tab, not one per event.
+      if (insertOpeningRef.current) return;
+      insertOpeningRef.current = true;
       try {
         const id = await bridge.openSession(action.project);
         setPromptInsert({ text, append: true, sessionId: id, nonce: Date.now() });
       } catch (err) {
         console.error("[widgets] failed to open insert target tab:", err);
+      } finally {
+        insertOpeningRef.current = false;
       }
       return;
     }

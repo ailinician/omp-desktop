@@ -955,6 +955,40 @@ mod tests {
     }
 
     #[test]
+    fn insert_project_without_new_tab_warns_and_stays_draft() {
+        for insert in [
+            r#"{"target":"draft","project":"/p"}"#,
+            r#"{"project":"/p"}"#,
+        ] {
+            let c = load_body("insert-unused-project", insert_body(insert).as_bytes()).expect("ok");
+            assert_eq!(c.plugins[0].insert, InsertTarget::Draft, "{insert}");
+            assert_eq!(c.errors.len(), 1, "{insert}: {:?}", c.errors);
+            assert!(
+                c.errors[0].contains("insert.project is only used with insert.target \"new-tab\""),
+                "{insert}: {:?}",
+                c.errors
+            );
+        }
+    }
+
+    #[test]
+    fn insert_tilde_project_without_home_falls_back_to_draft() {
+        let mut warnings = Vec::new();
+        let insert = parse_insert(
+            Some(serde_json::json!({"target": "new-tab", "project": "~/work"})),
+            "plugin \"a\"",
+            None,
+            &mut warnings,
+        );
+        assert_eq!(insert, InsertTarget::Draft);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("cannot expand ~ in insert.project: no home directory"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
     fn insert_serialises_with_a_kebab_target() {
         assert_eq!(
             serde_json::to_value(InsertTarget::Draft).expect("serialize"),

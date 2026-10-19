@@ -539,6 +539,15 @@ check("insertAction: plugin output cannot carry a target (parseOutput drops it)"
   assert.equal(JSON.stringify(r).includes("/evil"), false);
   assert.equal("insert" in r.widget, false);
 });
+check("insertAction: derives the target only from its cfg argument", () => {
+  // Callers pass the config's `insert`; an item or output object carrying target/project
+  // fields next to it must change nothing.
+  const item = { label: "a", insert: "x", target: "new-tab", project: "/evil", insertTarget: NEW_TAB };
+  assert.equal(W.insertAction.length, 2, "only (cfg, altKey)");
+  assert.deepEqual(W.insertAction(undefined, false, item), { target: "draft" });
+  assert.deepEqual(W.insertAction({ target: "draft" }, false, item), { target: "draft" });
+  assert.deepEqual(W.insertAction(NEW_TAB, false, item), { target: "new-tab", project: NEW_TAB.project });
+});
 check("insertTitle: plain tooltip for draft, folder name and ⌥ hint for new-tab", () => {
   assert.equal(W.insertTitle(undefined), "insert into prompt");
   assert.equal(W.insertTitle({ target: "draft" }), "insert into prompt");

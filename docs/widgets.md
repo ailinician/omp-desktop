@@ -102,7 +102,7 @@ How the file is read:
 - At most 32 entries are read. Any beyond that are ignored, with one error card.
 - A malformed entry (bad `id`, duplicate `id`, empty or relative `command`, unknown `scope`) is skipped with an error card naming it. The other plugins still run.
 - An unknown key (a typo such as `"intervallMs"`), an unknown trigger name, or `"interval"` in `triggers` adds an error card naming the key or value. The entry itself stays valid.
-- A bad `insert` (not an object, unknown `target`, `new-tab` without `project`, a relative or missing `project`, a path that is not a directory) adds an error card naming the problem. The plugin still runs and inserts into the draft. An unknown key inside `insert` (`insert.send`) is reported like any other unknown key.
+- A bad `insert` (not an object, unknown `target`, `new-tab` without `project`, a relative or missing `project`, a path that is not a directory, a `~/` project without a home directory) adds an error card naming the problem. So does `project` combined with `target: "draft"` or no `target`, because `project` is only used with `new-tab`. The plugin still runs and inserts into the draft. An unknown key inside `insert` (`insert.send`) is reported like any other unknown key.
 - A missing `widgets.json` means no plugins and no error.
 - If the desktop cannot determine its config directory, the plugins row says so and nothing runs.
 

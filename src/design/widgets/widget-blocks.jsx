@@ -43,7 +43,7 @@ function WidgetItem({ item, now, onInsert, insertCfg }) {
       {(insert || url) && (
         <span className="wdg-item-actions">
           {insert && (
-            <button className="btn icon ghost" title={_wbInsertTitle(insertCfg)} aria-label="insert into prompt" onClick={(e) => onInsert?.(insert, _wbInsertAction(insertCfg, e.altKey))}>
+            <button className="btn icon ghost" title={_wbInsertTitle(insertCfg)} aria-label={_wbInsertTitle(insertCfg)} onClick={(e) => onInsert?.(insert, _wbInsertAction(insertCfg, e.altKey))}>
               <_WB_Icon name="plus" size={9} />
             </button>
           )}
@@ -122,7 +122,7 @@ function WidgetBlock({ block, onInsert, insertCfg }) {
         <div className="wdg-text-row">
           <div className={`wdg-text selectable${block.mono ? " mono" : ""}`}>{block.text}</div>
           {block.insert && (
-            <button className="btn icon ghost" title={_wbInsertTitle(insertCfg)} aria-label="insert into prompt" onClick={(e) => onInsert?.(block.insert, _wbInsertAction(insertCfg, e.altKey))}>
+            <button className="btn icon ghost" title={_wbInsertTitle(insertCfg)} aria-label={_wbInsertTitle(insertCfg)} onClick={(e) => onInsert?.(block.insert, _wbInsertAction(insertCfg, e.altKey))}>
               <_WB_Icon name="plus" size={9} />
             </button>
           )}
