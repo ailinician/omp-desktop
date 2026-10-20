@@ -173,7 +173,7 @@ impl AgentBridge {
         scope: RuleScope,
         stdin_of: impl FnOnce(&BridgeInner) -> Option<Arc<Mutex<W>>>,
     ) -> Result<Option<String>, String> {
-        let (stdin, open, tool, root) = self
+        let (stdin, open, alive, tool, root) = self
             .with_entry(session_id, |inner| {
                 let stdin = stdin_of(inner).ok_or_else(|| "agent not running".to_string())?;
                 let mut pending = inner
@@ -194,17 +194,24 @@ impl AgentBridge {
                 };
                 pending.remove(request_id);
                 drop(pending);
-                Ok::<_, String>((stdin, Arc::clone(&inner.approvals), tool, root))
+                Ok::<_, String>((
+                    stdin,
+                    Arc::clone(&inner.approvals),
+                    Arc::clone(&inner.alive),
+                    tool,
+                    root,
+                ))
             })?
             .ok_or_else(|| format!("session '{session_id}' not found"))??;
 
-        if let Err(err) = write_command(&stdin, &approve_answer(request_id), None) {
+        let answer = approve_answer(request_id);
+        if let Err(err) = write_command(&stdin, &answer, None) {
             if let Ok(mut pending) = open.lock() {
                 pending.track(request_id.to_owned(), tool);
             }
             return Err(err);
         }
-
+        crate::remote::tracker::tracker().on_answered(session_id, request_id, &alive);
         let ended = || format!("session '{session_id}' ended before the grant was saved");
         let granted = root.map_or_else(
             || {
@@ -224,7 +231,7 @@ impl AgentBridge {
 }
 
 /// The answer that approves omp's prompt `request_id`.
-fn approve_answer(request_id: &str) -> String {
+pub(super) fn approve_answer(request_id: &str) -> String {
     serde_json::json!({
         "type": "extension_ui_response", "id": request_id, "value": "Approve",
     })
@@ -568,5 +575,50 @@ mod tests {
         );
         assert_eq!(written(&pipe), approve_line("req-1"));
         assert!(book.is_granted("sess-a", None, "bash"));
+    }
+
+    #[test]
+    fn approval_grant_settles_tracker_only_after_a_successful_answer() {
+        let dir = TempDir::new("tracker", "approval-grant");
+        let book = RuleBook::new(dir.path().join("rules"));
+        let bridge = AgentBridge::new();
+        let sid = "tracker-approval-grant";
+        let frame = prompt("q", "bash");
+        let open = Mutex::new(PendingApprovals::new(None));
+        observe(&open, Some("extension_ui_request"), &frame);
+        bridge.sessions.lock().unwrap().insert(
+            sid.into(),
+            BridgeInner {
+                approvals: Arc::new(open),
+                ..idle_inner(Arc::new(AtomicBool::new(true)))
+            },
+        );
+        let tracker = crate::remote::tracker::tracker();
+        tracker.on_frame(
+            sid,
+            Some("extension_ui_request"),
+            Some(&frame),
+            std::time::Instant::now(),
+            &AtomicBool::new(true),
+        );
+        assert!(bridge
+            .approve_and_grant_via(&book, sid, "q", RuleScope::Session, |_| Some(Arc::new(
+                Mutex::new(Broken)
+            )),)
+            .is_err());
+        assert_eq!(tracker.snapshot()[sid], (false, 1));
+        assert_eq!(
+            approve(
+                &bridge,
+                &book,
+                sid,
+                "q",
+                RuleScope::Session,
+                &Pipe::default()
+            ),
+            Ok(None)
+        );
+        assert_eq!(tracker.snapshot()[sid], (false, 0));
+        tracker.on_exit(sid);
     }
 }

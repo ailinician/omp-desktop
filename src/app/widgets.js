@@ -2,6 +2,10 @@
 //   parseOutput(stdout)        plugin stdout → validated, capped widget v1 or error
 //   insertText(item) / safeUrl(url) / appendToDraft(draft, insert)
 //                              what a click may do
+//   attentionStep({key, ack, seen, hasWidget})
+//                              the attention signal: active / seen / writeAck / bounce
+//   insertAction(cfg, altKey) / insertTitle(cfg) / consumePromptInsert(...)
+//                              where an insert click goes (widgets.json `insert`)
 //   runKey / mergeRun / cardRun / parsedLast
 //                              the hook's run bookkeeping (events → card props)
 //   hiddenPluginIds(tweaks, ids) / argvDisplay(arg)
@@ -112,7 +116,10 @@
       const norm = raw && typeof raw === "object" && typeof raw.type === "string" && Object.hasOwn(BLOCKS, raw.type) ? BLOCKS[raw.type](raw) : null;
       if (norm) blocks.push(norm); else skipped++;
     }
-    return { ok: true, widget: { status: tone(doc.status), blocks, skipped } };
+    const attention = clip(doc.attention, LIMITS.short);
+    const widget = { status: tone(doc.status), blocks, skipped };
+    if (attention) widget.attention = attention;
+    return { ok: true, widget };
   }
 
   function insertText(it) {
@@ -120,6 +127,36 @@
     if (explicit) return explicit;
     return [clip(it?.label, LIMITS.short), safeUrl(it?.url)].filter(Boolean).join(" ").slice(0, LIMITS.long);
   }
+
+  // attentionStep: one card's attention for what it shows. `key` is the
+  // plugin's `attention` string ("" = none), `ack` the key the user last
+  // acknowledged, `seen` the key this card showed on its previous step,
+  // `hasWidget` whether the card shows a widget at all (a running rerun keeps
+  // the old one; idle and error show none).
+  // active: a key the user has not acknowledged. Returns `seen` to remember,
+  // `writeAck` (true: store null, the key is gone so the same key alerts
+  // again when it returns) and `bounce` (active and new since `seen`: a rerun
+  // with the same key does not bounce twice). Without a widget nothing was
+  // said about attention either way: no signal, `seen` and the ack stay.
+  function attentionStep({ key, ack, seen, hasWidget }) {
+    if (!hasWidget) return { active: false, seen: seen ?? "", writeAck: false, bounce: false };
+    const k = key || "";
+    const active = k !== "" && k !== (ack ?? null);
+    return { active, seen: k, writeAck: k === "" && (ack ?? null) !== null, bounce: active && k !== (seen || "") };
+  }
+
+  // The acknowledged key lives in the tweak store under its own prefix, not
+  // `widget:`: Settings → Rail treats every `widget:` key as a toggle. A tab
+  // plugin's ack is per plugin id and project (`scopeId`: the project path),
+  // so another tab never overwrites it; the path is hashed (two 32-bit FNV-1a
+  // runs, 16 hex chars) to bound the key. A global plugin passes no scopeId.
+  const fnv = (str, seed) => {
+    let h = seed;
+    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return (h >>> 0).toString(16).padStart(8, "0");
+  };
+  const ackKey = (id, scopeId) =>
+    scopeId == null ? `widgetAck:${id}` : `widgetAck:${id}:${fnv(scopeId, 2166136261)}${fnv(scopeId, 0x9747b28c)}`;
 
   // appendToDraft: a widget insert goes after the draft (never in front of
   // it, never replacing it — a `/command` draft included), separated by one
@@ -131,6 +168,43 @@
     if (!text) return base;
     if (!base.trim()) return text + " ";
     return (/\s$/.test(base) ? base : base + " ") + text + " ";
+  }
+
+  // insertAction: where one insert click puts its text. `cfg` is the plugin's
+  // `insert` from widgets.json (Rust-validated: a `new-tab` always carries an
+  // existing project) — never from plugin output. Anything but a complete
+  // `new-tab`, or ⌥/Alt held, is the active tab's draft.
+  function insertAction(cfg, altKey) {
+    if (!altKey && cfg?.target === "new-tab" && typeof cfg.project === "string" && cfg.project) {
+      return { target: "new-tab", project: cfg.project };
+    }
+    return { target: "draft" };
+  }
+
+  // insertTitle: the insert button's tooltip. A new-tab plugin names the
+  // folder and the ⌥-click override.
+  function insertTitle(cfg) {
+    const a = insertAction(cfg, false);
+    if (a.target !== "new-tab") return "insert into prompt";
+    const folder = a.project.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || a.project;
+    return `Click: new tab in ${folder} · ⌥-click: insert here`;
+  }
+
+  // consumePromptInsert: whether `Composer` should apply `promptInsert` now,
+  // or wait (when a `new-tab` insert's `sessionId` is not in `sessionIds`
+  // yet because the await continuation set `promptInsert` before the bridge
+  // snapshot's render committed). Returns `{ kind: "none" }` (already seen,
+  // absent, or waiting on `sessionIds`), `{ kind: "targeted", nonce,
+  // sessionId }` or `{ kind: "active", nonce }`.
+  function consumePromptInsert(promptInsert, seenNonce, sessionIds) {
+    if (!promptInsert || promptInsert.nonce === seenNonce) return { kind: "none" };
+    if (promptInsert.sessionId) {
+      if (!Array.isArray(sessionIds) || !sessionIds.includes(promptInsert.sessionId)) {
+        return { kind: "none" };
+      }
+      return { kind: "targeted", nonce: promptInsert.nonce, sessionId: promptInsert.sessionId };
+    }
+    return { kind: "active", nonce: promptInsert.nonce };
   }
 
   // Namespaced per source so #52's extension widgets can use `widget:ext:<key>`.
@@ -214,7 +288,7 @@
   }
 
   window.OMP_WIDGETS = {
-    parseOutput, insertText, safeUrl, appendToDraft, tweakKey, hiddenPluginIds, argvDisplay, relativeTime,
-    runKey, mergeRun, parsedLast, cardRun,
+    parseOutput, insertText, safeUrl, appendToDraft, insertAction, insertTitle, consumePromptInsert, tweakKey, hiddenPluginIds, argvDisplay, relativeTime,
+    attentionStep, ackKey, runKey, mergeRun, parsedLast, cardRun,
   };
 })();

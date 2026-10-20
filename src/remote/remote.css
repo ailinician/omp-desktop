@@ -1,0 +1,74 @@
+/* Mobile layout overrides for the phone remote page. Desktop design tokens
+   and component styles come from the served desktop CSS files. */
+html, body { height: 100%; overflow: hidden; user-select: auto; }
+body { padding: 0; overscroll-behavior: none; }
+/* Column: fixed header, scrolling stage, fixed composer. --app-h follows the
+   visible viewport under the iOS keyboard (set in remote.js). */
+#app { display: flex; flex-direction: column; height: 100vh; height: var(--app-h, 100dvh); max-width: 56rem; margin: auto; font-size: 16px; }
+button { min-height: 44px; }
+.status { color: var(--fg-3); min-height: 1.5rem; }
+.error { color: var(--rose); white-space: pre-wrap; overflow-wrap: anywhere; }
+.project, .badge { display: block; color: var(--fg-3); font-size: .8rem; }
+
+/* Fixed header: the active tab; tapping it opens the session sheet. */
+.top { flex: none; display: flex; align-items: center; gap: .6rem; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--bg-app); color: var(--fg); padding: calc(.4rem + env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right)) .4rem calc(1rem + env(safe-area-inset-left)); }
+.top-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.top-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.top-project { color: var(--fg-3); font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.top-count { flex: none; min-width: 1.2rem; padding: 0 .35rem; border-radius: 999px; background: var(--amber); color: var(--bg-app); font-size: .75rem; font-weight: 700; text-align: center; line-height: 1.2rem; }
+.top-caret { flex: none; color: var(--fg-3); }
+.conn-dot { flex: none; width: .5rem; height: .5rem; border-radius: 50%; background: var(--amber); }
+.conn-dot.ok { background: var(--accent); }
+
+/* Desktop tab run dot (design/layout/chrome.css), larger for a thumb UI. */
+.tab-run-dot { flex: none; display: inline-flex; align-items: center; justify-content: center; width: .6rem; height: .6rem; border-radius: 50%; }
+.tab-run-dot.idle { background: transparent; }
+.tab-run-dot.running { background: var(--accent); box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 30%, transparent); animation: tab-run-pulse 1.6s ease-in-out infinite; }
+.tab-run-dot.waiting-user { background: var(--amber); }
+.tab-run-dot.question { width: 1rem; height: 1rem; color: var(--bg-app); font-size: .7rem; font-weight: 700; line-height: 1; }
+@keyframes tab-run-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+
+/* Scrolling area between header and composer; "↓ Newest" sits on its corner. */
+.stage { position: relative; flex: 1; min-height: 0; }
+.scroll { height: 100%; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 1rem calc(1rem + env(safe-area-inset-right)) 1rem calc(1rem + env(safe-area-inset-left)); }
+.jump-latest { position: absolute; right: 1rem; bottom: .75rem; z-index: 1; }
+
+.transcript { display: flex; flex-direction: column; gap: .75rem; }
+.asks { display: flex; flex-direction: column; gap: .75rem; margin: .75rem 0; }
+.ass-glyph, .tool-glyph { flex-shrink: 0; }
+.user-bubble, .ass-body, .tool-card { max-width: 100%; }
+.user-text, .ass-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-bash pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.copy-btn { display: none; }
+/* Messenger bar: one growing field and one round button. Empty height is
+   8 + 36 + 8 = 52px plus the bottom safe-area inset. */
+.remote-composer { flex: none; display: flex; align-items: flex-end; gap: .5rem; background: var(--bg-app); border-top: 1px solid var(--line); padding: .5rem calc(.75rem + env(safe-area-inset-right)) calc(.5rem + env(safe-area-inset-bottom)) calc(.75rem + env(safe-area-inset-left)); }
+.remote-composer .composer-field { flex: 1; min-width: 0; box-sizing: border-box; min-height: 36px; max-height: 7.75rem; resize: none; overflow-y: auto; margin: 0; background: var(--bg-input); border: 1px solid var(--line); border-radius: 18px; padding: 7px .9rem; color: var(--fg); font: inherit; font-size: 16px; line-height: 1.35; }
+.remote-composer .composer-btn { flex: none; width: 36px; height: 36px; min-height: 36px; padding: 0; border: 0; border-radius: 50%; background: var(--bg-active); color: var(--fg); font-size: 1.25rem; line-height: 1; }
+.remote-composer .composer-btn.steer { background: var(--accent); color: var(--bg-app); }
+.remote-composer .composer-btn.stop { background: var(--rose); color: var(--bg-app); }
+.remote-composer .composer-btn:disabled { opacity: .45; }
+#app input, #app textarea { font-size: 16px; }
+.ask-options { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .5rem; }
+.ask-other { margin-top: .5rem; }
+.ask-editor-actions { display: flex; gap: .5rem; margin-top: .5rem; }
+.ask-rows { display: flex; flex-direction: column; gap: .25rem; margin-top: .5rem; }
+.scan { display: flex; flex-direction: column; gap: .6rem; align-items: flex-start; }
+.scan video { width: 100%; max-width: 24rem; border-radius: .6rem; border: 1px solid var(--line); background: #000; }
+.scan-hint { color: var(--fg-3); min-height: 1.5rem; }
+
+/* Session sheet: backdrop plus a panel that slides up from the bottom. */
+.sheet-backdrop { position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, .5); }
+.sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 11; max-width: 56rem; margin: auto; max-height: 80vh; display: flex; flex-direction: column; background: var(--bg-surface); border: 1px solid var(--line); border-radius: 1rem 1rem 0 0; padding-bottom: env(safe-area-inset-bottom); animation: sheet-up 220ms var(--ease-out, ease-out); outline: none; }
+@keyframes sheet-up { from { transform: translateY(100%); } to { transform: none; } }
+.sheet-handle { flex: none; width: 100%; border: 0; background: transparent; padding: .5rem 0; touch-action: none; }
+.sheet-grip { display: block; width: 2.5rem; height: .3rem; margin: 0 auto; border-radius: 999px; background: var(--fg-4); }
+.sheet-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: .4rem; padding: 0 1rem .75rem; }
+.sheet-tab { display: flex; align-items: center; gap: .7rem; text-align: left; width: 100%; border: 1px solid var(--line); }
+.sheet-tab.active { border-color: var(--accent); background: var(--bg-hover); }
+.sheet-tab-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sheet-tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-foot { flex: none; display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .75rem 1rem; border-top: 1px solid var(--line); }
+.sheet-info { display: flex; flex-direction: column; min-width: 0; }
+.sheet-conn { color: var(--fg-3); font-size: .8rem; }
+[hidden] { display: none !important; }

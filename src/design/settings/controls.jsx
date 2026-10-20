@@ -109,8 +109,8 @@ function SettingsSlider({ value, min, max, step = 1, unit = "", onChange, label 
 
 function SettingsButton({ children, onClick, accent, disabled, title }) {
   return (
-    <button type="button" className={`st-btn${accent ? " ac" : ""}`} onClick={onClick} disabled={disabled} title={title}>
-      {children}
+    <button type="button" className={`st-btn${accent ? " ac" : ""}`} onClick={onClick} disabled={disabled} title={title ? _t(title) : title}>
+      {typeof children === "string" ? _t(children) : children}
     </button>
   );
 }

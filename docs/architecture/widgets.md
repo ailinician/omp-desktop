@@ -19,7 +19,7 @@ It never sends a path, a command, a trigger or a context to Rust: only plugin id
 
 | File | Purpose |
 |---|---|
-| `src-tauri/src/widgets/config.rs` | load/validate `widgets.json` → `WidgetConfig { plugins: Vec<PluginEntry>, errors }`; `PluginEntry::matches(project, remote)` (directory-prefix path match, backslash normalised, `/` root special case, remote substring), `PluginEntry::wants(Trigger)` (`Manual` always, `Interval` iff `interval_ms`, else `triggers`) |
+| `src-tauri/src/widgets/config.rs` | load/validate `widgets.json` → `WidgetConfig { plugins: Vec<PluginEntry>, errors }`; `PluginEntry::matches(project, remote)` (directory-prefix path match, backslash normalised, `/` root special case, remote substring), `PluginEntry::wants(Trigger)` (`Manual` always, `Interval` iff `interval_ms`, else `triggers`); `InsertTarget` (`Draft` \| `NewTab { project }`) from `parse_insert` (`project` canonicalised via `external_open::canonical_folder`): an unusable `insert` (not an object, unknown `target`, `new-tab` without a usable `project`, `project` without `new-tab`) is a warning in `errors` and leaves `Draft` (an explicit `null` counts as absent), an unknown inner key warns without invalidating an otherwise valid target |
 | `src-tauri/src/widgets/schedule.rs` | **pure** scheduler state machine: `Scheduler::handle(Event, now_ms) -> Vec<Action>`, `next_deadline()`; no threads, IO or clock |
 | `src-tauri/src/widgets/trust.rs` | `fingerprint(&PluginEntry)`, `is_fingerprint`, and `ApprovalStore` (`<app config>/widget-approvals.json`); the hashing steps `snapshot.rs` reuses |
 | `src-tauri/src/widgets/snapshot.rs` | `ScriptStore` (`<app cache>/widget-runs/`): `prepare(entry, approved)` → `Prepared::Ready(Run)` (`Run.argv` names verified copies in `store/<fingerprint>/`; owns a staging dir when they could not be stored) or `Prepared::Changed(fingerprint)`; `prune(approved)` |
@@ -27,7 +27,7 @@ It never sends a path, a command, a trigger or a context to Rust: only plugin id
 | `src-tauri/src/widgets/run.rs` | `run_plugin(entry, argv, ctx, on_spawn) -> Outcome`: spawn of the given argv, stdin context, timeout, stdout cap, process-tree kill |
 | `src-tauri/src/widgets/context.rs` | `session_ctx(project)` (branch, password-free default remote; one repo discovery) and the bounded `PluginContext` |
 | `src-tauri/src/widgets/redact.rs` | credential masking for error text, on top of the crate-level `redaction.rs` shared with `agent/reader.rs` |
-| `src/app/widgets.js` | pure: `parseOutput`, `insertText`, `safeUrl`, `tweakKey`, `relativeTime`, `appendToDraft`, and the run bookkeeping `runKey`, `mergeRun`, `parsedLast`, `cardRun` (`test-widgets.mjs`) |
+| `src/app/widgets.js` | pure: `parseOutput`, `insertText`, `safeUrl`, `tweakKey`, `relativeTime`, `appendToDraft`, `insertAction(cfg, altKey)` / `insertTitle(cfg)` / `consumePromptInsert(...)` (insert click target, tooltip and pending-session gate), `attentionStep`, `ackKey`, and the run bookkeeping `runKey`, `mergeRun`, `parsedLast`, `cardRun` (`test-widgets.mjs`) |
 | `src/app/use-widgets.jsx` | thin hook: snapshot + run map from events, sends view state, memoised parse per (key, `last.at`) |
 | `src/design/widgets/` | `WidgetCard`, `WidgetApprovalCard`, `WidgetErrorCard`, `WidgetBoundary`, block renderers |
 
@@ -153,7 +153,8 @@ WidgetsSnapshot = { configPath: string|null, fatal: string|null, errors: string[
                     active: { sessionId: string|null, applicable: string[] } }
 PluginView = { id, title, scope: "tab"|"global", enabled: boolean,
                approval: "approved"|"pending"|"changed",
-               command: string[], fingerprint: string }
+               command: string[], fingerprint: string,
+               insert: { target: "draft" } | { target: "new-tab", project: string } }
 RunView    = { key: string /* session id or "__global__" */, pluginId: string, seq: number,
                phase: "idle"|"waiting"|"running",
                last: null | { at: number, stdout: string|null, error: string|null, durationMs: number },
@@ -167,8 +168,10 @@ Frontend handling:
 
 - **Rail order:** `fatal` + config error cards, then all approval cards, then result cards; each group in config order.
 - **Approval cards** render for every enabled plugin whose approval is not `approved`, regardless of `match`, unless its `widget:plugin:<id>` tweak is off.
+- **Insert flow.** `use-widgets.jsx` copies the plugin's `insert` onto its card; `WidgetCard` → `WidgetBlocks` take it as `insertCfg` (stable, so the memo holds). A `+` click calls `onInsert(text, insertAction(insertCfg, e.altKey))`. In `app-live.jsx` `handleWidgetInsert`: a `draft` action sets `promptInsert { append: true }` for the active tab; a `new-tab` action awaits `bridge.openSession(project)` (always spawns, activates the new tab, reports failures itself), then sets `promptInsert { append: true, sessionId }`, which `composer.jsx` keeps pending until `sessionIds` includes `sessionId` and then appends to that session's own draft and focuses. It never sends. ⌥/Alt-click yields a `draft` action. The target is read from `widgets.json` (Rust) only; plugin output has no path to it. Extension widgets (no `insertCfg`) always insert into the draft.
 - **Result cards** render per id in `active.applicable` (idle until the first run). The run shown is the one keyed by the active session id, or `__global__` for global plugins.
 - **Event ordering.** `use-widgets.jsx` fetches `widgets_state` on mount and merges events by `seq`, so a `widgets://run` that arrives before the fetch resolves is not lost.
+- **Attention.** `parseOutput` keeps a clipped `attention` string on the widget. `OMP_WIDGETS.attentionStep({key, ack, seen, hasWidget})` (pure) decides `active` (`hasWidget`, key non-empty and ≠ the stored ack), `seen` (the key to remember in a ref in `use-widgets.jsx`), `writeAck` (true once a successful run has no key, to clear a stored ack to `null`) and `bounce` (`active` and ≠ `seen`). `OMP_WIDGETS.ackKey(id, scopeId)` builds the tweak key (`widgetAck:<id>` for global plugins, `widgetAck:<id>:<hash of project path>` for tab plugins — not `widget:`, which Settings → Rail treats as a toggle) so acks survive restarts; click → `acknowledge(id)` stores the shown key. On `bounce` with `_uwVisible()` and `!document.hasFocus()`, `_uwRequestAttention` calls the Tauri window API `requestUserAttention(Informational)` (capability `core:window:allow-request-user-attention`); errors are swallowed. Without a widget (idle, error) `hasWidget` is false and the step leaves the ack and `seen` alone.
 - **`live.js` exposes** `widgetsState`, `widgetsReload`, `widgetsApprove`, `widgetsSetView`, `widgetsRefresh` and `onWidgetsEvent`. In browser mode (no `__TAURI__`) the snapshot calls return `{}`; `applySnapshot` defaults every missing field.
 
 ## Trust
@@ -190,7 +193,7 @@ Frontend handling:
 
 - **Compromised webview.** It could approve a plugin, but it can already send prompts and answer tool approvals, so this adds no new power.
 - **What approval defends against.** Changes to a plugin's `command` or script made outside the desktop UI, e.g. the agent writing `widgets.json` or a widget script under write-mode approval.
-- **What it does not defend against.** `widget-approvals.json` is a user file like `approval-rules/`, and `<app cache>/widget-runs/` holds user files too. Anything with arbitrary user-file write access can edit them, as it can edit `~/.bashrc`; changing a copy, or adding a file beside it, between the check and the spawn is that level of access. The rest of an entry (`match`, `triggers`, `intervalMs`, `timeoutMs`, `scope`, `title`, `enabled`) is not fingerprinted and takes effect on reload without a new approval.
+- **What it does not defend against.** `widget-approvals.json` is a user file like `approval-rules/`, and `<app cache>/widget-runs/` holds user files too. Anything with arbitrary user-file write access can edit them, as it can edit `~/.bashrc`; changing a copy, or adding a file beside it, between the check and the spawn is that level of access. The rest of an entry (`match`, `triggers`, `intervalMs`, `timeoutMs`, `scope`, `insert`, `title`, `enabled`) is not fingerprinted and takes effect on reload without a new approval.
 
 ## Runner (`run.rs`)
 

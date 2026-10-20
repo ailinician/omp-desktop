@@ -3,30 +3,13 @@
 //! reads its `cdpUrl` from, and pruning what crashed earlier runs left
 //! behind.
 
-use std::io::{self, Write as _};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use super::reap;
-pub use crate::private_fs::remove_dir_retrying;
+pub use crate::private_fs::{create_private_file, remove_dir_retrying};
 use crate::private_fs::{pid_dirs, private_dirs};
 use crate::supervisor::pid_is_alive;
-
-/// Create `path` exclusively with `contents`, private to the user (unix
-/// `0600`). `O_EXCL` never follows a symlink nor reuses a file somebody else
-/// put there; a failed write removes the half-written file again.
-pub fn create_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(path)?;
-    let written = file.write_all(contents);
-    if written.is_err() {
-        drop(file);
-        let _ = std::fs::remove_file(path);
-    }
-    written
-}
 
 /// The settings overlay omp takes as `--config=<path>`: its browser tool
 /// attaches to the session's placeholder port. `relay: false` because omp

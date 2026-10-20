@@ -239,8 +239,31 @@
     "Updates": "版本更新",
     "Check for updates": "自动检查更新",
     "Version": "当前版本",
+    "Remote access": "远程访问",
+    "Read your sessions, answer questions and steer the agent from a phone on your network. Off by default; nothing listens until you enable it.": "在局域网或 VPN 下的手机上查看会话、回答问题并操控智能体。默认关闭，开启前不会监听任何端口。",
+    "Server": "服务端",
+    "The interface, port and name the phone connects to. The server only listens on the chosen interface.": "手机连接所用的网卡接口、端口与主机名。服务端仅在所选网卡上监听。",
+    "Certificate": "TLS 证书",
+    "A generated certificate is self-signed; your own files (for example for `omp.home.lan`) let the phone trust the page.": "自动生成的证书为自签名证书；也可指定自有证书文件（例如 `omp.home.lan`）以便手机直接信任页面。",
+    "Phones": "已配对手机",
+    "Pair a phone": "配对新手机",
+    "Shows a one-time QR code; scanning it links that phone.": "生成一次性配对二维码，使用手机扫码即可绑定。",
+    "Paired phones": "已绑定设备",
+    "Rename a phone or revoke its access.": "重命名已绑定的手机或撤销其访问权限。",
+    "Notifications": "消息推送",
+    "Push notifications": "Web Push 推送通知",
+    "Tell the phone when a question waits or a turn finished, even with the page closed.": "当有待回答问题或当前轮次完成时，向手机发送推送通知（即使网页已关闭）。",
+    "Pair a phone…": "配对新手机…",
+    "Enable remote access first": "请先开启远程访问",
+    "Regenerate": "重新生成证书",
+    "Use these files": "使用上述证书文件",
+    "generated": "自动生成",
+    "own files": "自有文件",
+    "Revoke": "撤销权限",
+    "Confirm revoke": "确认撤销",
+    "Keep": "保留",
+    "Send test notification": "发送测试通知",
     "Approvals": "权限审批",
-    "Approval mode": "审批模式",
     "Tool approval mode": "工具调用审批模式",
     "Standing rules": "常驻规则",
     "Always-allow rules": "始终允许规则",
@@ -544,7 +567,8 @@
    * @param {number}  [timeout]   Ms to wait before rejecting (0 = no timeout).
    */
   function _sendWithResponse(cmd, timeout = 120000) {
-    return new Promise((resolve, reject) => {
+    let handedOff = Promise.resolve(false);
+    const response = new Promise((resolve, reject) => {
       if (!window.__TAURI__ || !activeSessionId) {
         reject(new Error("Not connected"));
         return;
@@ -566,12 +590,15 @@
       // A failed hand-off (the tab's process is gone) never produces a
       // response; reject now instead of waiting out the timeout. Still
       // logged, since several callers swallow rejections.
-      _invokeSend({ ...cmd, id }).catch(e => {
+      handedOff = _invokeSend({ ...cmd, id }).then(() => true, e => {
         _logSendError(e);
         _pendingResponses.get(id)?.reject(e instanceof Error ? e : new Error(String(e)));
         _pendingResponses.delete(id);
+        return false;
       });
     });
+    response.handedOff = handedOff;
+    return response;
   }
 
   // ── Subscriber system ─────────────────────────────────────────────────────
@@ -850,7 +877,8 @@
   // replaced, {value}/{confirmed}/{cancelled} payload shapes preserved
   // per caller, and re-answer + unknown-id both send nothing).
   function _resolveAsk(id, patch, payload) {
-    if (_settleAsk(id, patch)) _send({ type: "extension_ui_response", id, ...payload });
+    if (!_settleAsk(id, patch)) return Promise.resolve(false);
+    return _send({ type: "extension_ui_response", id, ...payload });
   }
 
   // Append a synthetic assistant note (process exited, startup failed,
@@ -1169,8 +1197,13 @@
   // state after a newer switch already took over; guarded stale call detects
   // the generation mismatch and bails without touching shared state).
   let _switchGen = 0;
+  let _switchPromise = Promise.resolve();
   async function _switchToSession(id) {
     if (!window.__TAURI__) return;
+    let done;
+    const p = new Promise(resolve => { done = resolve; });
+    _switchPromise = p;
+    try {
     const myGen = ++_switchGen;
 
     // Snapshot current session so we can restore it when switching back
@@ -1342,6 +1375,9 @@
     // get_messages handler merges completed turns with the cached streaming bubble.
     _initFetch();
     notify();
+    } finally {
+      done();
+    }
   }
 
   // ── v2 lossless transport: rpc_chunk reassembly ──────────────────────────
@@ -3148,9 +3184,11 @@
   }
 
   // ── Send a command to the active session's omp ────────────────────────────
+  // Resolves to whether the IPC hand-off succeeded; fire-and-forget callers
+  // ignore it (failures are logged here either way).
   function _send(cmd) {
-    if (!window.__TAURI__ || !activeSessionId) return;
-    _invokeSend(cmd).catch(_logSendError);
+    if (!window.__TAURI__ || !activeSessionId) return Promise.resolve(false);
+    return _invokeSend(cmd).then(() => true, e => { _logSendError(e); return false; });
   }
 
   // The `send_command` hand-off to the active tab, shared by `_send` and
@@ -3432,13 +3470,16 @@
    *  shapes are pure and tested in test-message-queue.mjs. */
   function _sendQueued(kind, text, images, send) {
     const origin = activeSessionId;
-    if (!origin) return;
+    if (!origin) return Promise.resolve(false);
     const id = ++_queueSendSeq;
     _disarmAutoRename(text);
     _recordPrompt(text);
     state.queueSending = [...state.queueSending, QUEUE.sendingEntry(id, kind, text, images.length, state.queue, state.queueSending)];
     notify();
-    send().then(() => _dropSending(origin, id), e => {
+    // Resolves to whether the IPC hand-off succeeded; omp's RPC response is
+    // processed asynchronously so a tab switch never stalls remote callers.
+    const sent = send();
+    sent.then(() => { _dropSending(origin, id); return true; }, e => {
       if (!e?.timedOut) {
         const reason = e?.message ?? String(e);
         // Responses are only dispatched for the active tab, so a refusal
@@ -3447,7 +3488,9 @@
         else console.warn(`[live] ${kind} for '${origin}' not sent: ${reason}`);
       }
       _dropSending(origin, id);
+      return Boolean(e?.timedOut);
     });
+    return sent.handedOff ?? sent.then(() => true, () => false);
   }
 
   /** Remove a "sending" row from its tab, wherever that tab's state lives
@@ -3524,7 +3567,7 @@
     _disarmAutoRename(text);
     _recordPrompt(text);
     notify();
-    _send({ type: "prompt", message: text, images: images ?? [], ...(streamingBehavior ? { streamingBehavior } : {}) });
+    return _send({ type: "prompt", message: text, images: images ?? [], ...(streamingBehavior ? { streamingBehavior } : {}) });
   }
 
   /** A `goal` command's `{goal, state}` result applied to the active tab. */
@@ -3552,16 +3595,18 @@
   // ── OMP_BRIDGE public API ─────────────────────────────────────────────────
   window.OMP_BRIDGE = {
     get isConnected() { return !!window.__TAURI__ && !!activeSessionId; },
+    get activeSessionId() { return activeSessionId; },
+    waitForActivation() { return _switchPromise; },
 
     // ── Messaging ────────────────────────────────────────────────────────────
     // The bubble shows at once; omp's echo (`message_start`) ties it to the
     // persisted message. A command omp runs locally sends no echo, so its
     // bubble keeps no `ts` and the get_messages merge leaves it in place.
-    send(text, images) { _sendPrompt(text, images); },
+    send(text, images) { return _sendPrompt(text, images); },
     // No id on purpose: a pending-id match returns before the command
     // switch, and the abort response is what releases a cancelled
     // auto-rename. See `_releaseAutoRenameAfterAbort`.
-    abort()            { userAbortInFlight = true; _send({ type: "abort" }); },
+    abort()            { userAbortInFlight = true; return _send({ type: "abort" }); },
     /** Stops omp's automatic retries of the active tab's failed request.
      *  While omp waits between attempts `abort_retry` ends the run on the
      *  last failure and touches nothing else. An attempt already in flight
@@ -3592,12 +3637,12 @@
     followUp(text, images) {
       const imgs = images ?? [];
       const isCmd = isCommandInvocation(state.commands, text);
-      _sendQueued("followUp", text, imgs, () => _sendWithResponse(queuedFrame("followUp", text, imgs, isCmd)));
+      return _sendQueued("followUp", text, imgs, () => _sendWithResponse(queuedFrame("followUp", text, imgs, isCmd)));
     },
     steer(text, images) {
       const imgs = images ?? [];
       const isCmd = isCommandInvocation(state.commands, text);
-      _sendQueued("steering", text, imgs, () => _sendWithResponse(queuedFrame("steer", text, imgs, isCmd)));
+      return _sendQueued("steering", text, imgs, () => _sendWithResponse(queuedFrame("steer", text, imgs, isCmd)));
     },
     /** ✕ / ✎ on a queue-strip row (`queue`: "steering" | "followUp"):
      *  `true` once omp removed the message, `false` when it was no longer
@@ -3914,7 +3959,7 @@
      *                        input/editor prompt.
      */
     answerAsk(id, value) {
-      _resolveAsk(id, { answered: true, answer: value }, { value });
+      return _resolveAsk(id, { answered: true, answer: value }, { value });
     },
 
     /**
@@ -3926,7 +3971,7 @@
      * @param {Array<{id: string, selectedOptions: string[], customInput?: string}>} answers
      */
     answerAskDialog(id, answers) {
-      _resolveAsk(id, { answered: true, answers }, { answers });
+      return _resolveAsk(id, { answered: true, answers }, { answers });
     },
 
     /**
@@ -3941,7 +3986,7 @@
      * @param {boolean} confirmed
      */
     answerConfirm(id, confirmed) {
-      _resolveAsk(
+      return _resolveAsk(
         id,
         { answered: true, answer: confirmed ? "Confirm" : "Deny" },
         { confirmed },
@@ -3957,7 +4002,7 @@
      * @param {string} id
      */
     cancelAsk(id) {
-      _resolveAsk(id, { cancelled: true }, { cancelled: true });
+      return _resolveAsk(id, { cancelled: true }, { cancelled: true });
     },
 
     /**
@@ -4138,6 +4183,61 @@
         window.__TAURI__.event.listen(`widgets://${kind}`, ev => handler(kind, ev.payload))
           .catch(err => { console.error(`[live] widgets://${kind} listener failed:`, err); return null; })));
       return () => { for (const u of unlistens) u?.(); };
+    },
+
+    // ── Phone remote access ──────────────────────────────────────────────
+    // Quiet IPC: missing optional remote commands must not log per publish.
+    // Reads return data/null; mutations return {ok, value | error}.
+    async remoteStatus() {
+      const r = await _invokeResult("remote_status");
+      return r.ok ? r.value : null;
+    },
+    async remoteInterfaces() {
+      const r = await _invokeResult("remote_interfaces");
+      return r.ok ? r.value : null;
+    },
+    remoteApply(settings) {
+      return _invokeResult("remote_apply_settings", { settings });
+    },
+    remotePairStart() {
+      return _invokeResult("remote_pair_start");
+    },
+    remotePairCancel() {
+      return _invokeResult("remote_pair_cancel");
+    },
+    remoteDeviceRename(id, name) {
+      return _invokeResult("remote_device_rename", { id, name });
+    },
+    remoteDeviceRevoke(id) {
+      return _invokeResult("remote_device_revoke", { id });
+    },
+    remoteRegenerateCert() {
+      return _invokeResult("remote_regenerate_cert");
+    },
+    remotePushTest() {
+      return _invokeResult("remote_push_test");
+    },
+    async remoteDefaultContact() {
+      const r = await _invokeResult("remote_default_contact");
+      return r.ok ? r.value : null;
+    },
+    remotePublish(payload) {
+      return _invokeResult("remote_publish", { payload });
+    },
+    remoteActionResult(reqId, ok, error) {
+      return _invokeResult("remote_action_result", { reqId, ok, error });
+    },
+    remoteReady(ready) {
+      return _invokeResult("remote_ready", { ready });
+    },
+    /** Resolves to an unlisten; callbacks receive payloads only. */
+    async onRemoteEvent(kind, cb) {
+      if (!window.__TAURI__ || !["watch", "action", "status"].includes(kind)) return () => {};
+      try {
+        return await window.__TAURI__.event.listen(`remote://${kind}`, ev => cb(ev.payload));
+      } catch {
+        return () => {};
+      }
     },
 
     // ── Terminal (src-tauri/src/terminal/, one shell per tab) ────────────────
