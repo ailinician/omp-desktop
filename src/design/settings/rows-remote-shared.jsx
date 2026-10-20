@@ -127,5 +127,5 @@ function _SRR_Field({ value, onCommit, label, placeholder, width, disabled, mono
 }
 
 function _SRR_Line({ label, children }) {
-  return <div className="st-rem-line"><span className="st-rem-lbl">{label}</span>{children}</div>;
+  return <div className="st-rem-line"><span className="st-rem-lbl">{window._t ? window._t(label) : label}</span>{children}</div>;
 }
