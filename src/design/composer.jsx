@@ -2,7 +2,7 @@
    composer.jsx — input area + slash palette + ⌘K command bridge
    ═════════════════════════════════════════════════════════════════════ */
 
-const { Icon } = window;
+const { Icon, MarkdownContent, CopyButton } = window;
 const { parseMentionQuery, applyMention } = window.OMP_MENTIONS;
 const { prepareImage, carriesFiles, dropHoverAfter, imageFilesFromTransfer, imageFilesFromClipboardAsync, toDataUrl, MAX_ATTACHMENTS } = window.OMP_IMAGES;
 const { isDesktop, slashMenu, midPromptSlashToken, skillMenu, matchesQuery, insertText: slashInsertText } = window.OMP_SLASH;
@@ -37,7 +37,7 @@ function hintKeyFor(actionId, fallback) {
 // ── The composer (input + plan/steer modes + send) ────────────────────
 // `submitKey` ("enter" | "ctrl+enter") and `pasteCollapseLines` come from the
 // tweaks (Settings › Composer); the defaults match TWEAK_DEFAULTS.
-function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow, browserChips = [], onRemoveBrowserChip, onBrowserChipClick, submitKey = "enter", pasteCollapseLines = 5 }) {
+function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, btwOpen = false, btwRunning = false, btwCount = 0, onToggleBtw, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow, browserChips = [], onRemoveBrowserChip, onBrowserChipClick, submitKey = "enter", pasteCollapseLines = 5 }) {
   // Drafts are per tab (issue #28). The composer stays mounted across tab
   // switches and keeps one draft per session id (app/session-ui.js
   // DRAFT_IDLE): text, pending image attachments (sent alongside the next
@@ -750,6 +750,14 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
           <Icon name="goal" size={11} color={goalMode ? "var(--lilac)" : "var(--fg-3)"} />
           <span style={{ color: goalMode ? "var(--lilac)" : "var(--fg-2)" }}>{_t("goal")}</span>
         </button>
+        <button className={`composer-pill btw-pill${btwOpen || btwRunning ? " on" : ""}`} onClick={onToggleBtw}
+          title={_t("side question (/btw) — asks without touching the main context")}>
+          {btwRunning
+            ? <span className="dot live" />
+            : <Icon name="sparkle" size={11} color={btwOpen ? "var(--cyan)" : "var(--fg-3)"} />}
+          <span style={{ color: btwOpen || btwRunning ? "var(--cyan)" : "var(--fg-2)" }}>{_t("btw")}</span>
+          {btwCount > 0 && <span className="mono" style={{ color: "var(--fg-4)", fontSize: 10 }}>{btwCount}</span>}
+        </button>
         <div style={{ flex: 1 }} />
         {backgroundWork && (
           <span className="composer-bg-note" title={_t("omp reports background work (an async bash, task or eval job) whose result will wake the agent")}>
@@ -1016,4 +1024,228 @@ function CommandBridge({ open, onClose, onPick, onPickModel, currentModelId, pro
   );
 }
 
-Object.assign(window, { Composer, CommandBridge });
+// ── BTW Side-Question Popover (/btw) ──────────────────────────────────
+function _btwTurns(record) {
+  if (!record) return [];
+  const root = {
+    question: record.question,
+    answer: record.answer ?? "",
+    status: record.status,
+    error: record.error,
+    createdAt: record.createdAt,
+  };
+  return [root, ...(Array.isArray(record.followUps) ? record.followUps : [])];
+}
+
+function _btwLatestTurn(record) {
+  const turns = _btwTurns(record);
+  return turns[turns.length - 1] ?? null;
+}
+
+function BtwPopover({ open, records = [], initialQuestion = "", initialNonce = 0, submitKey = "enter", onClose, onInsert }) {
+  const [selectedId, setSelectedId] = React.useState(null);
+  const [draft, setDraft] = React.useState("");
+  const [error, setError] = React.useState(null);
+  const [sending, setSending] = React.useState(false);
+  const inputRef = React.useRef(null);
+  const scrollRef = React.useRef(null);
+  const lastNonceRef = React.useRef(0);
+
+  const runningRec = records.find(r => (_btwLatestTurn(r)?.status ?? r.status) === "running") ?? null;
+  const activeRec = selectedId === "__new__"
+    ? null
+    : (records.find(r => r.id === selectedId) ?? runningRec ?? records[0] ?? null);
+  const turns = _btwTurns(activeRec);
+  const latestTurn = turns[turns.length - 1] ?? null;
+  const isRunning = Boolean(runningRec) || sending;
+
+  React.useEffect(() => {
+    if (!open) return;
+    setError(null);
+    window.OMP_BRIDGE?.refreshBtwHistory?.();
+    setTimeout(() => inputRef.current?.focus(), 30);
+  }, [open]);
+
+  React.useEffect(() => {
+    if (!open || !initialNonce || initialNonce === lastNonceRef.current) return;
+    lastNonceRef.current = initialNonce;
+    const q = String(initialQuestion ?? "").trim();
+    if (!q) return;
+    setSelectedId("__new__");
+    setError(null);
+    setSending(true);
+    window.OMP_BRIDGE?.askBtw?.(q, null).then(res => {
+      setSending(false);
+      if (res?.ok && res.record?.id) {
+        setSelectedId(res.record.id);
+      } else if (res && !res.ok) {
+        setError(res.error);
+        setDraft(q);
+      }
+    });
+  }, [open, initialNonce, initialQuestion]);
+
+  React.useEffect(() => {
+    if (!open || !scrollRef.current) return;
+    const el = scrollRef.current;
+    el.scrollTop = el.scrollHeight;
+  }, [open, activeRec?.id, turns.length, latestTurn?.answer?.length, latestTurn?.status]);
+
+  const submit = async () => {
+    const q = draft.trim();
+    if (!q || isRunning) return;
+    const targetId = activeRec ? activeRec.id : null;
+    setDraft("");
+    setError(null);
+    setSending(true);
+    const res = await window.OMP_BRIDGE?.askBtw?.(q, targetId);
+    setSending(false);
+    if (res?.ok && res.record?.id) {
+      setSelectedId(res.record.id);
+    } else if (res && !res.ok) {
+      setError(res.error);
+      setDraft(q);
+    }
+    setTimeout(() => inputRef.current?.focus(), 20);
+  };
+
+  const cancel = () => {
+    window.OMP_BRIDGE?.cancelBtw?.(runningRec?.id);
+  };
+
+  const onKeyDown = (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (runningRec) cancel();
+      else onClose?.();
+      return;
+    }
+    if (isSubmitKey(e, submitKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      submit();
+    }
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="btw-pop slide-in" onClick={e => e.stopPropagation()}>
+      <div className="btw-head">
+        <span className="btw-badge mono">/btw</span>
+        <span className="btw-title">{_t("Side Questions (/btw)")}</span>
+        {runningRec && (
+          <span className="chip mono" style={{ color: "var(--cyan)", borderColor: "color-mix(in oklab, var(--cyan) 35%, var(--line))" }}>
+            <span className="dot live" /> {_t("Answering…")}
+          </span>
+        )}
+        <div style={{ flex: 1 }} />
+        <button className={`btn ghost${selectedId === "__new__" || !activeRec ? " active" : ""}`}
+          style={{ height: 22, padding: "0 8px", fontSize: "var(--d-text-xs)" }}
+          onClick={() => { setSelectedId("__new__"); setError(null); inputRef.current?.focus(); }}>
+          <Icon name="plus" size={10} /> {_t("New question")}
+        </button>
+        <button className="btn ghost icon" onClick={onClose} title={`${_t("close")} (Esc)`}>
+          <Icon name="close" size={11} />
+        </button>
+      </div>
+
+      {records.length > 0 && (
+        <div className="btw-topics">
+          {records.slice(0, 12).map(r => {
+            const st = _btwLatestTurn(r)?.status ?? r.status;
+            const isSel = activeRec?.id === r.id;
+            const count = 1 + (r.followUps?.length ?? 0);
+            return (
+              <button key={r.id}
+                className={`btw-topic-chip${isSel ? " active" : ""}${st === "running" ? " live" : ""}`}
+                onClick={() => { setSelectedId(r.id); setError(null); inputRef.current?.focus(); }}
+                title={r.question}>
+                {st === "running" && <span className="dot live" />}
+                <span className="btw-topic-text">{r.question}</span>
+                {count > 1 && <span className="mono" style={{ opacity: 0.6, fontSize: 10 }}>×{count}</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="btw-body" ref={scrollRef}>
+        {!activeRec ? (
+          <div className="btw-empty">
+            <div style={{ color: "var(--fg-2)", fontWeight: 500, marginBottom: 4 }}>
+              {_t("Ask a quick side question using the current context — never enters the main conversation.")}
+            </div>
+            <div style={{ color: "var(--fg-4)", fontSize: "var(--d-text-xs)" }}>
+              {_t("Type below to ask while the agent works, or anytime.")}
+            </div>
+          </div>
+        ) : (
+          turns.map((turn, idx) => (
+            <div key={idx} className="btw-turn">
+              <div className="btw-q selectable">
+                <span className="btw-q-mark mono">Q{turns.length > 1 ? idx + 1 : ""}</span>
+                <span className="btw-q-text">{turn.question}</span>
+              </div>
+              <div className="btw-a">
+                {turn.answer ? (
+                  <MarkdownContent text={turn.answer} streaming={turn.status === "running"} />
+                ) : turn.status === "running" ? (
+                  <div className="mono shimmer-text" style={{ fontSize: "var(--d-text-xs)", padding: "4px 0" }}>
+                    {_t("Answering…")}
+                  </div>
+                ) : null}
+                {turn.status === "error" && (
+                  <div className="btw-err mono">{turn.error || _t("Error")}</div>
+                )}
+                {turn.status === "cancelled" && (
+                  <div className="btw-status-tag mono">{_t("Cancelled")}</div>
+                )}
+                {turn.status === "interrupted" && (
+                  <div className="btw-status-tag mono">{_t("Interrupted")}</div>
+                )}
+                {turn.answer && turn.status !== "running" && (
+                  <div className="btw-actions">
+                    <CopyButton text={turn.answer} label={_t("Copy answer")} />
+                    <button className="btn ghost" style={{ height: 20, padding: "0 6px", fontSize: "var(--d-text-xs)" }}
+                      onClick={() => onInsert?.(`> ${turn.question}\n\n${turn.answer}`)}
+                      title={_t("Insert into composer")}>
+                      <Icon name="arrow" size={9} /> {_t("Insert into composer")}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      {error && <div className="btw-err-bar mono">{error}</div>}
+
+      <div className="btw-foot">
+        <textarea
+          ref={inputRef}
+          rows={1}
+          className="btw-input selectable"
+          placeholder={activeRec ? _t("Ask a follow-up in this topic…") : _t("Ask a new side question…")}
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onKeyDown={onKeyDown}
+        />
+        {runningRec ? (
+          <button className="btn danger" style={{ height: 26, padding: "0 10px" }} onClick={cancel}>
+            <Icon name="stop" size={10} /> {_t("Cancel")}
+          </button>
+        ) : (
+          <button className="btn primary" style={{ height: 26, padding: "0 10px" }}
+            disabled={!draft.trim() || isRunning} onClick={submit}>
+            {activeRec ? _t("Follow-up") : _t("ask")} <Icon name="arrow" size={10} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { Composer, CommandBridge, BtwPopover });

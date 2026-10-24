@@ -19,7 +19,7 @@
 
 const {
   Icon, ChatView, Composer, CommandBridge, WindowChrome, TabBar, SubagentPane, ProjectSidebar, EmptyWorkspace,
-  StatusBar, AmbientRail, ConversationTree, PlanKanban, HistoryModal, GitBrowser, FilePreview, ApprovalRulesPanel, UsageStatsPanel, PromptHistoryModal, UpdateModal, useTweaks,
+  StatusBar, AmbientRail, ConversationTree, PlanKanban, BtwPopover, HistoryModal, GitBrowser, FilePreview, ApprovalRulesPanel, UsageStatsPanel, PromptHistoryModal, UpdateModal, useTweaks,
   SettingsPage, ConfirmCloseDialog,
   useWidgets, WidgetCard, WidgetErrorCard, WidgetApprovalCard, WidgetBoundary,
   TWEAK_DEFAULTS, NULL_MODEL, EMPTY_PROJECT, DEFAULT_PROFILE_ID,
@@ -68,6 +68,8 @@ function App() {
   // live.js's pending "close a working tab / quit?" question, or null.
   const [closeConfirm, setCloseConfirm] = React.useState(null);
   const [planOpen,    setPlanOpen]    = React.useState(false);
+  const [btwOpen,     setBtwOpen]     = React.useState(false);
+  const [btwInit,     setBtwInit]     = React.useState({ q: "", nonce: 0 });
   // The column beside the chat, per tab (`side` below): the ambient rail,
   // the conversation tree (prompt-cache navigator; design/conversation-tree.jsx,
   // app/use-conversation-tree.jsx) or the browser panel — one at a time.
@@ -133,6 +135,7 @@ function App() {
   // Status lines and text widgets the active tab's omp extensions published
   // (app/extension-widgets.js, #52), drawn as rail cards.
   const [extWidgets,   setExtWidgets]   = React.useState(_EXT_EMPTY);
+  const [btwRecords,   setBtwRecords]   = React.useState([]);
 
   // ── Tab list — driven by bridge session registry ──────────────────────────
   // Each entry: { id, name, path, color, branch }
@@ -164,7 +167,7 @@ function App() {
     setModelState, setThinkingLevel,
     setSessions, setActiveSessionId, setProfiles, setStartupProfileId, setRecentProjects,
     setNoTabProfileId, setWorkspaceNotes, setApprovalModes, setCloseConfirm,
-    setPromptHistory, setSubagents, setSubagentTranscripts, setQueue, setQueueSending, setGoal, setExtWidgets,
+    setPromptHistory, setSubagents, setSubagentTranscripts, setQueue, setQueueSending, setGoal, setExtWidgets, setBtwRecords,
   });
   useRemote({ bridge });
   useThemeEffect(t);
@@ -592,6 +595,10 @@ function App() {
     // composer, budget still to pick; Enter starts it. Blocked (plan mode,
     // a goal already open), the text still comes back.
     else if (c.name === "goal")      { goalUi.enter(); if (args) setPromptInsert({ text: args, nonce: Date.now() }); }
+    else if (c.name === "btw")       {
+      setBtwOpen(true);
+      if (args.trim()) setBtwInit({ q: args.trim(), nonce: Date.now() });
+    }
     else if (c.name === "todo")      { setPlanOpen(true); }
     else if (c.name === "browser")   { handleBrowserCommand(args); }
     else if (c.name === "compact")   { bridge?.compact(); }
@@ -726,7 +733,7 @@ function App() {
     "app.interrupt":           () => {
       // Only abort when no overlay is open (overlays handle Escape themselves),
       // and never from the Settings page, which covers the chat.
-      if (stab.active || bridgeOpen || historyOpen || gitOpen || rulesOpen || statsOpen || promptHistoryOpen || planOpen || updater.open) return;
+      if (stab.active || bridgeOpen || historyOpen || gitOpen || rulesOpen || statsOpen || promptHistoryOpen || planOpen || btwOpen || updater.open) return;
       if (streaming) handleAbort();
     },
     "app.thinking.cycle":      cycleThinking,
@@ -959,6 +966,10 @@ function App() {
                     onToggleGoal={goalUi.toggle}
                     goalBlocked={goalUi.goalBlocked}
                     goalStrip={goalUi.strip}
+                    btwOpen={btwOpen}
+                    btwRunning={btwRecords.some(r => ((r.followUps?.length ? r.followUps[r.followUps.length - 1].status : r.status) === "running"))}
+                    btwCount={btwRecords.length}
+                    onToggleBtw={() => setBtwOpen(v => !v)}
                     onOpenCmd={() => openBridge("commands")}
                     onOpenModel={() => openBridge("models")}
                     currentModel={model}
@@ -986,6 +997,18 @@ function App() {
                     onBrowserChipClick={handleBrowserChipClick}
                     submitKey={t.submitKey}
                     pasteCollapseLines={t.pasteCollapseLines}
+                  />
+                  <BtwPopover
+                    open={btwOpen}
+                    records={btwRecords}
+                    initialQuestion={btwInit.q}
+                    initialNonce={btwInit.nonce}
+                    submitKey={t.submitKey}
+                    onClose={() => setBtwOpen(false)}
+                    onInsert={text => {
+                      setPromptInsert({ text, quote: true, nonce: Date.now() });
+                      setBtwOpen(false);
+                    }}
                   />
                   {selQuote && (
                     <button className="sel-quote-pop" style={{ left: selQuote.x, top: selQuote.y }}

@@ -283,3 +283,105 @@
   padding: 10px 14px;
   border-top: 1px solid var(--line);
 }
+
+/* ── BTW Side-Question Popover (/btw, design/panels.jsx) ─────────────── */
+.btw-pop {
+  position: absolute;
+  right: 16px;
+  bottom: 84px;
+  width: min(520px, calc(100% - 32px));
+  max-height: min(68vh, 540px);
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in oklab, var(--bg-elevated) 94%, black);
+  backdrop-filter: blur(18px) saturate(1.2);
+  border: 1px solid color-mix(in oklab, var(--cyan) 35%, var(--line-bright));
+  border-radius: var(--r-3, 12px);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  z-index: 32;
+  overflow: hidden;
+}
+.btw-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in oklab, var(--cyan) 6%, transparent);
+}
+.btw-badge {
+  padding: 1px 6px; border-radius: 5px;
+  background: color-mix(in oklab, var(--cyan) 16%, transparent);
+  border: 1px solid color-mix(in oklab, var(--cyan) 38%, var(--line));
+  color: var(--cyan); font-size: var(--d-text-xs); font-weight: 600;
+}
+.btw-title { font-size: var(--d-text-sm); font-weight: 600; color: var(--fg); }
+.btw-topics {
+  display: flex; align-items: center; gap: 5px;
+  padding: 6px 10px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line-soft);
+  background: color-mix(in oklab, var(--bg-window) 45%, transparent);
+}
+.btw-topic-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  max-width: 170px; padding: 3px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+  color: var(--fg-3); font-size: var(--d-text-xs);
+  cursor: pointer; flex: none;
+}
+.btw-topic-chip:hover { color: var(--fg); border-color: var(--line-bright); }
+.btw-topic-chip.active {
+  color: var(--cyan);
+  border-color: color-mix(in oklab, var(--cyan) 48%, var(--line));
+  background: color-mix(in oklab, var(--cyan) 12%, transparent);
+}
+.btw-topic-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btw-body {
+  flex: 1; min-height: 90px; max-height: 360px;
+  overflow-y: auto; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.btw-empty { padding: 18px 8px; text-align: center; font-size: var(--d-text-sm); }
+.btw-turn {
+  display: flex; flex-direction: column; gap: 6px;
+  padding-bottom: 10px; border-bottom: 1px dashed var(--line-soft);
+}
+.btw-turn:last-child { padding-bottom: 0; border-bottom: none; }
+.btw-q {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 5px 8px; border-radius: 7px;
+  background: color-mix(in oklab, var(--fg) 5%, transparent);
+  font-size: var(--d-text-sm); color: var(--fg); font-weight: 500;
+}
+.btw-q-mark { color: var(--cyan); font-size: var(--d-text-xs); flex: none; }
+.btw-q-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.btw-a { padding: 0 4px; font-size: var(--d-text-sm); color: var(--fg-2); }
+.btw-err, .btw-err-bar {
+  padding: 5px 8px; border-radius: 6px;
+  background: color-mix(in oklab, var(--rose) 12%, transparent);
+  color: var(--rose); font-size: var(--d-text-xs);
+}
+.btw-err-bar { margin: 0 10px 6px; }
+.btw-status-tag { color: var(--amber); font-size: var(--d-text-xs); margin-top: 4px; }
+.btw-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+  margin-top: 4px;
+}
+.btw-foot {
+  display: flex; align-items: flex-end; gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-input);
+}
+.btw-input {
+  flex: 1; min-height: 24px; max-height: 84px;
+  resize: none; border: none; background: transparent;
+  color: var(--fg); font: inherit; font-size: var(--d-text-sm);
+  line-height: 1.45; outline: none;
+}
+.btw-input::placeholder { color: var(--fg-4); }
+.composer-pill.btw-pill.on {
+  border-color: color-mix(in oklab, var(--cyan) 50%, var(--line));
+  background: color-mix(in oklab, var(--cyan) 12%, transparent);
+}

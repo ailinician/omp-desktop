@@ -32,6 +32,7 @@
     { name: "plan",      hint: "draft a plan before writing code",             icon: "◇", group: "Mode"    },
     { name: "goal",      hint: "start a goal the agent works on until done",   icon: "◎", group: "Mode"    },
     { name: "steer",     hint: "interrupt and redirect mid-tool",              icon: "↺", group: "Mode"    },
+    { name: "btw",       hint: "ask a side question without touching the main context", icon: "💬", group: "Session" },
     { name: "compact",   hint: "compact context window",                       icon: "▤", group: "Session" },
     { name: "new",       hint: "start a fresh session (history kept on disk)", icon: "↺", group: "Session" },
     { name: "history",   hint: "browse and resume saved sessions",             icon: "◷", group: "Session" },

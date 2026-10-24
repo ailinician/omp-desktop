@@ -135,6 +135,26 @@
     "comments": "条批注",
     "goal": "目标",
     "goal mode: your next message becomes a goal the agent works toward": "目标模式：你的下一条消息将作为智能体努力达成的目标",
+    "btw": "顺便一问",
+    "side question (/btw) — asks without touching the main context": "旁路提问 (/btw) — 共享当前上下文，不写入主对话历史",
+    "Side Questions (/btw)": "顺便一问 (/btw)",
+    "Ask a quick side question using the current context — never enters the main conversation.": "基于当前会话上下文快速提问 — 互不阻塞、绝不污染主对话历史。",
+    "New question": "新问题",
+    "Ask a new side question…": "输入新的旁路问题…",
+    "Ask a follow-up in this topic…": "在此话题下继续追问…",
+    "No side questions in this session yet.": "当前会话暂无旁路提问记录。",
+    "Type below to ask while the agent works, or anytime.": "在下方直接提问，即使主智能体正在忙碌也可随时秒问。",
+    "Insert into composer": "带回主输入框",
+    "Copy answer": "复制回答",
+    "Copied": "已复制",
+    "Topics": "历史话题",
+    "Follow-up": "追问",
+    "Cancel": "取消生成",
+    "Answering…": "正在回答…",
+    "Cancelled": "已取消",
+    "Interrupted": "已中断",
+    "Error": "出错",
+    "Done": "已完成",
     "omp reports background work (an async bash, task or eval job) whose result will wake the agent": "omp 正在后台运行异步任务 (bash/task/eval)，完成后将自动唤醒智能体",
     "background job running · the agent resumes when it finishes": "后台任务运行中 · 完成后智能体将自动继续",
     "newline": "换行",
@@ -410,6 +430,8 @@
     // #52). Not reset by `/new`, branch or fork (omp's TUI keeps them too);
     // gone with the process (`_endDeadProcessState`).
     extWidgets:     EXT.EMPTY,
+    // Side questions (/btw): newest-first BtwHistoryRecord[] for the active tab.
+    btwRecords:     [],
   };
 
   let streamingBubble = null;
@@ -687,6 +709,7 @@
       queueSending:    state.queueSending,
       goal:            state.goal,
       extWidgets:      state.extWidgets,
+      btwRecords:      state.btwRecords,
       // Tab list — derived from session registry, not per-session state.
       // runState: active tab reads live state; background tabs read their
       // cached snapshot (never activated yet = "idle" defaults).
@@ -1095,6 +1118,7 @@
       queueSending:  [],
       goal:          GOAL.UNKNOWN,
       extWidgets:    EXT.EMPTY,
+      btwRecords:    [],
     });
     streamingBubble = null;
     lastTurnOk  = true;
@@ -1144,6 +1168,7 @@
       queueSending:  state.queueSending,
       goal:          state.goal,
       extWidgets:    state.extWidgets,
+      btwRecords:    state.btwRecords,
       // volatile vars
       streamingBubble,
       activeToolCards: new Map(activeToolCards),
@@ -1184,6 +1209,7 @@
       queueSending:  snap.queueSending ?? [],
       goal:          snap.goal ?? GOAL.UNKNOWN,
       extWidgets:    snap.extWidgets ?? EXT.EMPTY,
+      btwRecords:    snap.btwRecords ?? [],
     });
     streamingBubble = snap.streamingBubble;
     activeToolCards = snap.activeToolCards;
@@ -2388,6 +2414,11 @@
       state.subagents = SUB.mergeSnapshots(state.subagents, data.subagents);
       notify();
 
+    } else if (command === "get_btw_history") {
+      if (Array.isArray(data?.records)) {
+        state.btwRecords = data.records;
+        notify();
+      }
     } else if (command === "get_session_stats") {
       // SessionStats — no display action needed
     }
@@ -2442,6 +2473,38 @@
       state.goal = next;
       if (row) state.messages = [...state.messages, { ...row, time }];
       notify();
+      return;
+    }
+    // Side questions (/btw): `btw_record` carries the full record at every
+    // lifecycle transition; `btw_delta` streams chunks into the latest turn
+    // (the last follow-up if any, else the root record itself).
+    if (type === "btw_record" && ev.record?.id) {
+      const rec = ev.record;
+      const idx = state.btwRecords.findIndex(r => r.id === rec.id);
+      state.btwRecords = idx === -1
+        ? [rec, ...state.btwRecords]
+        : state.btwRecords.map((r, i) => (i === idx ? rec : r));
+      notify();
+      return;
+    }
+    if (type === "btw_delta" && ev.recordId && typeof ev.delta === "string") {
+      const idx = state.btwRecords.findIndex(r => r.id === ev.recordId);
+      if (idx !== -1) {
+        const rec = state.btwRecords[idx];
+        let updated;
+        if (Array.isArray(rec.followUps) && rec.followUps.length > 0) {
+          const lastIdx = rec.followUps.length - 1;
+          const last = rec.followUps[lastIdx];
+          const nextFollowUps = rec.followUps.map((f, i) => (
+            i === lastIdx ? { ...f, answer: (f.answer ?? "") + ev.delta } : f
+          ));
+          updated = { ...rec, followUps: nextFollowUps };
+        } else {
+          updated = { ...rec, answer: (rec.answer ?? "") + ev.delta };
+        }
+        state.btwRecords = state.btwRecords.map((r, i) => (i === idx ? updated : r));
+        notify();
+      }
       return;
     }
 
@@ -3191,6 +3254,7 @@
         // respawned process starts at "off" — so (re)assert it every time.
         _send({ type: "set_subagent_subscription", level: SUB.subscriptionLevelFor({ inspecting: subagentInspecting }) });
         _send({ type: "get_subagents" });
+        _send({ type: "get_btw_history" });
       });
   }
 
@@ -3776,6 +3840,39 @@
      *  the setting omp reports afterwards. */
     setGoalContinuation(profile, enabled) {
       return _invokeResult("goal_continuation_set", { profile, enabled });
+    },
+    // ── Side questions (/btw) ────────────────────────────────────────────────
+    async askBtw(question, recordId) {
+      const q = String(question ?? "").trim();
+      if (!q) return { ok: false, error: "Enter a question first." };
+      const origin = activeSessionId;
+      try {
+        const data = await _sendWithResponse(
+          { type: "btw", question: q, ...(recordId ? { recordId } : {}) },
+          QUICK_CMD_TIMEOUT_MS,
+        );
+        if (origin === activeSessionId && data?.record?.id && !state.btwRecords.some(r => r.id === data.record.id)) {
+          state.btwRecords = [data.record, ...state.btwRecords];
+          notify();
+        }
+        return { ok: true, record: data?.record ?? null };
+      } catch (e) {
+        return { ok: false, error: String(e?.message ?? e) };
+      }
+    },
+    async cancelBtw(recordId) {
+      try {
+        const data = await _sendWithResponse(
+          { type: "btw_cancel", ...(recordId ? { recordId } : {}) },
+          QUICK_CMD_TIMEOUT_MS,
+        );
+        return { ok: true, cancelled: data?.cancelled === true };
+      } catch (e) {
+        return { ok: false, error: String(e?.message ?? e) };
+      }
+    },
+    refreshBtwHistory() {
+      return _send({ type: "get_btw_history" });
     },
     /** Manual rename from the tab bar or sidebar (#32): omp's own
      *  `/rename <title>` builtin, so the name is stored as user-set and

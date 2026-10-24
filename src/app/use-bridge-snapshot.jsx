@@ -30,6 +30,7 @@ function useBridgeSnapshot(bridge, setters) {
       setters.setQueueSending(snap.queueSending);
       setters.setGoal(snap.goal);
       setters.setExtWidgets(snap.extWidgets);
+      setters.setBtwRecords?.(snap.btwRecords ?? []);
       setters.setProfiles(snap.profiles ?? []);
       setters.setStartupProfileId(snap.startupProfileId ?? _UB_DEFAULT_PROFILE_ID);
       setters.setRecentProjects(snap.recentProjects ?? []);

@@ -112,6 +112,10 @@ const ALLOWED_COMMAND_TYPES: &[&str] = &[
     // open tab on change.
     "set_auto_compaction",
     "set_auto_retry",
+    // Side questions (/btw): ask, cancel, and history sidecar reads.
+    "btw",
+    "btw_cancel",
+    "get_btw_history",
 ];
 
 /// What one omp process is started with (`start_session` → `spawn_omp`).
