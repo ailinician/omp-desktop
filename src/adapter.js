@@ -121,18 +121,22 @@
   }
 
   // ── RPC state + cost + tps → design ctx object ────────────────────────────
-  function buildCtx(rpcState, sessionCost, tps) {
+  function buildCtx(rpcState, sessionCost, tps, tpsView) {
     const cu    = rpcState?.contextUsage;
     const used  = cu?.tokens ?? 0;
     const total = cu?.contextWindow ?? 200000;
     const pct   = cu?.percent ?? (used ? Math.round((used / total) * 100) : 0);
+    const activeTps = tpsView?.tps?.value ?? tps ?? 0;
     return {
       used,
       total,
       pct,
       label: `${formatTokens(used)} / ${formatTokens(total)}`,
       cost: sessionCost != null ? `$${sessionCost.toFixed(2)}` : "$0.00",
-      tokensPerSec: Math.round(tps ?? 0),
+      tokensPerSec: Math.round(activeTps),
+      ttft: tpsView?.ttft ?? { value: null, kind: "unknown" },
+      tpsReading: tpsView?.tps ?? { value: tps ? Number(tps) : null, kind: tps ? "settled" : "unknown" },
+      tpsPhase: tpsView?.phase ?? "idle",
     };
   }
 
@@ -595,6 +599,225 @@
     return `${m.provider}/${m.id}`;
   }
 
+  // ── TTFT & Live/Settled TPS tracker (oh-my-tps 4-phase state machine) ───
+  const _CJK_RE = /[\u3000-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uFF00-\uFFEF]/;
+  const _SPLIT_RE = /(\s+|[.,!?;(){}[\]<>:/\\|@#$%^&*+=`~_"-]+|[\u3001-\u303F\uFF01-\uFF65]+)/;
+
+  function estimateDeltaTokens(text) {
+    if (!text) return 0;
+    const parts = text.split(_SPLIT_RE);
+    let total = 0;
+    for (let i = 0; i < parts.length; i++) {
+      const seg = parts[i];
+      if (!seg) continue;
+      if (/^\s+$/.test(seg)) {
+        if (/\n\s/.test(seg)) total += 1;
+        continue;
+      }
+      if (_CJK_RE.test(seg)) {
+        total += Math.ceil(Array.from(seg).length / 1.25);
+      } else if (/^\d+$/.test(seg)) {
+        total += Math.ceil(seg.length / 3);
+      } else if (seg.length <= 3 || (seg.length <= 8 && /^[a-z]+$/.test(seg))) {
+        total += 1;
+      } else {
+        total += Math.ceil(seg.length / 6.5);
+      }
+    }
+    return total;
+  }
+
+  function _avgSample(arr) {
+    if (!arr || arr.length === 0) return null;
+    let sum = 0;
+    for (let i = 0; i < arr.length; i++) sum += arr[i];
+    return sum / arr.length;
+  }
+
+  function _pushSample(arr, val) {
+    arr.push(val);
+    if (arr.length > 5) arr.splice(0, arr.length - 5);
+  }
+
+  function createTpsTracker(onTick) {
+    let phase = "idle";
+    let requestStartedAt = null;
+    let firstContentDeltaAt = null;
+    let firstLiveDeltaAt = null;
+    let lockedTtft = null;
+    let liveQueue = [];
+    let currentLiveTps = null;
+    let lastValidLiveTps = null;
+    let lastLiveCalcAt = 0;
+    let lastSettledTps = null;
+    let recentTtftSamples = [];
+    let recentTpsSamples = [];
+    let waitingTimer = null;
+
+    function stopTimer() {
+      if (waitingTimer !== null) {
+        clearInterval(waitingTimer);
+        waitingTimer = null;
+      }
+    }
+
+    function resetTurn() {
+      requestStartedAt = null;
+      firstContentDeltaAt = null;
+      firstLiveDeltaAt = null;
+      lockedTtft = null;
+      liveQueue = [];
+      currentLiveTps = null;
+      lastValidLiveTps = null;
+      lastLiveCalcAt = 0;
+    }
+
+    return {
+      beginWaiting(nowMs = Date.now()) {
+        stopTimer();
+        resetTurn();
+        phase = "waiting";
+        requestStartedAt = nowMs;
+        if (typeof onTick === "function" && typeof setInterval === "function") {
+          waitingTimer = setInterval(() => {
+            if (phase === "waiting") onTick();
+          }, 200);
+          waitingTimer?.unref?.();
+        }
+      },
+      handleMessageUpdate(ev, nowMs = Date.now()) {
+        const ame = ev?.assistantMessageEvent;
+        const dtype = ame?.type;
+        const delta = ame?.delta;
+        if (typeof delta !== "string" || delta.length === 0) return false;
+        const isThink = dtype === "thinking_delta";
+        const isLive = dtype === "text_delta" || dtype === "toolcall_delta";
+        if (!isThink && !isLive) return false;
+        if (phase !== "waiting" && phase !== "streaming") return false;
+        let changed = false;
+        if (phase === "waiting" && requestStartedAt !== null) {
+          phase = "streaming";
+          stopTimer();
+          firstContentDeltaAt = nowMs;
+          lockedTtft = Math.max(0, (nowMs - requestStartedAt) / 1000);
+          _pushSample(recentTtftSamples, lockedTtft);
+          changed = true;
+        }
+        if (phase === "streaming" && isLive) {
+          if (firstLiveDeltaAt === null) firstLiveDeltaAt = nowMs;
+          liveQueue.push({ receivedAt: nowMs, delta });
+          const elapsedMs = Math.max(0, nowMs - firstLiveDeltaAt);
+          if (elapsedMs >= 1200 && nowMs - lastLiveCalcAt >= 250) {
+            lastLiveCalcAt = nowMs;
+            const cutoff = nowMs - 5000;
+            liveQueue = liveQueue.filter(item => item.receivedAt >= cutoff);
+            const durationMs = Math.min(5000, elapsedMs);
+            let joined = "";
+            for (let i = 0; i < liveQueue.length; i++) joined += liveQueue[i].delta;
+            const est = estimateDeltaTokens(joined);
+            const tps = durationMs > 0 ? (est * 1000) / durationMs : null;
+            if (tps !== null && Number.isFinite(tps) && tps > 0) {
+              currentLiveTps = tps;
+              lastValidLiveTps = tps;
+              changed = true;
+            }
+          }
+        }
+        return changed;
+      },
+      finalize(outputTokens, nowMs = Date.now()) {
+        stopTimer();
+        if (phase !== "waiting" && phase !== "streaming") return null;
+        if (phase === "waiting" && requestStartedAt !== null) {
+          firstContentDeltaAt = nowMs;
+          lockedTtft = Math.max(0, (nowMs - requestStartedAt) / 1000);
+          _pushSample(recentTtftSamples, lockedTtft);
+        }
+        phase = "settled";
+        let settled = null;
+        if (typeof outputTokens === "number" && Number.isFinite(outputTokens) && outputTokens > 0) {
+          const streamMs = firstContentDeltaAt !== null ? Math.max(0, nowMs - firstContentDeltaAt) : 0;
+          const totalMs = requestStartedAt !== null ? Math.max(0, nowMs - requestStartedAt) : 0;
+          const durMs = streamMs >= 300 ? streamMs : (totalMs >= 200 ? totalMs : 0);
+          if (durMs > 0) settled = (outputTokens * 1000) / durMs;
+        }
+        if (settled === null && lastValidLiveTps !== null && lastValidLiveTps > 0) {
+          settled = lastValidLiveTps;
+        }
+        if (settled !== null && Number.isFinite(settled) && settled > 0) {
+          _pushSample(recentTpsSamples, settled);
+          lastSettledTps = settled;
+        }
+        return settled;
+      },
+      handleAgentEnd(aborted = false) {
+        stopTimer();
+        if (aborted && (phase === "waiting" || phase === "streaming")) {
+          lastSettledTps = null;
+        }
+        phase = "idle";
+        resetTurn();
+      },
+      getView(nowMs = Date.now()) {
+        let ttft;
+        if (phase === "waiting" && requestStartedAt !== null) {
+          ttft = { value: Math.max(0, (nowMs - requestStartedAt) / 1000), kind: "counting" };
+        } else if (lockedTtft !== null) {
+          ttft = { value: lockedTtft, kind: "locked" };
+        } else {
+          const avg = _avgSample(recentTtftSamples);
+          ttft = avg !== null ? { value: avg, kind: "average" } : { value: null, kind: "unknown" };
+        }
+        let tps;
+        if (phase === "settled" && lastSettledTps !== null) {
+          tps = { value: lastSettledTps, kind: "settled" };
+        } else if (phase === "streaming" && currentLiveTps !== null) {
+          tps = { value: currentLiveTps, kind: "live" };
+        } else if (phase !== "idle" && lastSettledTps !== null) {
+          tps = { value: lastSettledTps, kind: "last" };
+        } else {
+          const avg = _avgSample(recentTpsSamples);
+          tps = avg !== null ? { value: avg, kind: "average" } : { value: null, kind: "unknown" };
+        }
+        return { phase, ttft, tps };
+      },
+      reset() {
+        stopTimer();
+        phase = "idle";
+        resetTurn();
+        lastSettledTps = null;
+        recentTtftSamples = [];
+        recentTpsSamples = [];
+      },
+      snapshot() {
+        stopTimer();
+        return {
+          phase: phase === "waiting" ? "idle" : phase,
+          lockedTtft,
+          lastSettledTps,
+          recentTtftSamples: [...recentTtftSamples],
+          recentTpsSamples: [...recentTpsSamples],
+        };
+      },
+      restore(snap) {
+        stopTimer();
+        resetTurn();
+        if (!snap) {
+          phase = "idle";
+          lastSettledTps = null;
+          recentTtftSamples = [];
+          recentTpsSamples = [];
+          return;
+        }
+        phase = snap.phase ?? "idle";
+        lockedTtft = snap.lockedTtft ?? null;
+        lastSettledTps = snap.lastSettledTps ?? null;
+        recentTtftSamples = Array.isArray(snap.recentTtftSamples) ? [...snap.recentTtftSamples] : [];
+        recentTpsSamples = Array.isArray(snap.recentTpsSamples) ? [...snap.recentTpsSamples] : [];
+      },
+    };
+  }
+
   // ── Exports ───────────────────────────────────────────────────────────────
   Object.assign(window, {
     normalizeToolName,
@@ -615,5 +838,7 @@
     pickRecentModels,
     modelKey,
     timeNow,
+    estimateDeltaTokens,
+    createTpsTracker,
   });
 })();

@@ -229,6 +229,8 @@
     pct: 23,
     cost: "$0.41",
     tokensPerSec: 184,
+    ttft: { value: 0.8, kind: "locked" },
+    tpsReading: { value: 184, kind: "settled" },
   };
 
   // ── Side session (split-pane peer)

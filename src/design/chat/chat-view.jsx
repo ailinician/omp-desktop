@@ -184,10 +184,23 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
   const flashTimerRef               = React.useRef(null);
   const wrapRef                     = React.useRef(null);
 
-  const userTurns = React.useMemo(
-    () => extractUserTurns(messages, window.OMP_TURN_STATUS.isHidden, _t),
-    [messages],
-  );
+  const userTurnsRef = React.useRef([]);
+  const userTurns = React.useMemo(() => {
+    const next = extractUserTurns(messages, window.OMP_TURN_STATUS.isHidden, _t);
+    const prev = userTurnsRef.current;
+    if (next.length === prev.length) {
+      let same = true;
+      for (let i = 0; i < next.length; i++) {
+        if (next[i].id !== prev[i].id || next[i].msgIdx !== prev[i].msgIdx || next[i].text !== prev[i].text) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return prev;
+    }
+    userTurnsRef.current = next;
+    return next;
+  }, [messages]);
 
   const syncActiveTurn = React.useCallback((el) => {
     if (!el || !userTurns.length) return;

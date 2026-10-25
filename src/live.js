@@ -314,6 +314,10 @@
     "compact context": "压缩上下文",
     "compacting…": "压缩中…",
     "compact context window": "立即压缩当前会话上下文 (/compact)",
+    "TTFT": "首字",
+    "(avg)": "(均)",
+    "(last)": "(上轮)",
+    "TTFT (time to first token) · output throughput (tok/s)": "首字耗时 (TTFT) · 输出速率 (tok/s)",
     "Tweaks": "偏好设置",
     "Look": "外观",
     "language": "界面语言",
@@ -443,6 +447,10 @@
   let pendingAskFlushTimer = null;  // armed while the queue is non-empty
   let tpsSamples      = Array(30).fill(0);
   let turnStartTime   = null;
+  const tpsTracker = window.createTpsTracker ? window.createTpsTracker(() => {
+    _refreshCtx();
+    notify();
+  }) : null;
   let activityLog     = [];           // [{ts, toolName}], pruned to 60s
   let activityDecayTimer = null;
   function _tickActivityRadar() {
@@ -730,8 +738,9 @@
   // Snapshot `sessions[]`: the registry entries plus each tab's run state.
   // Active tab reads live state; background tabs read their cached snapshot
   // (never activated yet = "idle" defaults).
+  let _lastSessionsView = [];
   function _sessionsView() {
-    return [...sessionRegistry.values()].map(s => ({
+    const next = [...sessionRegistry.values()].map(s => ({
       ...s,
       runState: runStateCached(
         s.id === activeSessionId
@@ -739,6 +748,23 @@
           : sessionSnapshots.get(s.id) ?? _EMPTY_SESSION_FIELDS
       ),
     }));
+    if (next.length === _lastSessionsView.length) {
+      let same = true;
+      for (let i = 0; i < next.length; i++) {
+        const a = _lastSessionsView[i], b = next[i];
+        if (
+          a.id !== b.id || a.name !== b.name || a.path !== b.path ||
+          a.color !== b.color || a.branch !== b.branch ||
+          a.profile !== b.profile || a.runState !== b.runState
+        ) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return _lastSessionsView;
+    }
+    _lastSessionsView = next;
+    return next;
   }
 
   // Invoke a Tauri command, returning `fallback` when there's no Tauri
@@ -1089,6 +1115,8 @@
     state.messages = TURN.retryCleared(state.messages);
     // Its extensions died with it; the backend's copy ended with the entry.
     state.extWidgets = EXT.EMPTY;
+    tpsTracker?.handleAgentEnd(true);
+    _refreshCtx();
   }
 
   // Reset all per-session volatile state (called before loading a new session)
@@ -1127,6 +1155,7 @@
     activeToolCards = new Map();
     tpsSamples      = Array(30).fill(0);
     turnStartTime   = null;
+    tpsTracker?.reset();
     activityLog     = [];
     lastSeq         = 0;
     extSnapshotSeq  = 0;
@@ -1174,6 +1203,7 @@
       activeToolCards: new Map(activeToolCards),
       tpsSamples:    [...tpsSamples],
       turnStartTime,
+      tpsSnap:       tpsTracker ? tpsTracker.snapshot() : null,
       activityLog:   [...activityLog],
       lastSeq,
       // An abort whose pause frame and response are still in the tab's
@@ -1215,6 +1245,7 @@
     activeToolCards = snap.activeToolCards;
     tpsSamples      = snap.tpsSamples;
     turnStartTime   = snap.turnStartTime;
+    tpsTracker?.restore(snap.tpsSnap);
     activityLog     = snap.activityLog;
     lastSeq         = snap.lastSeq ?? 0;
     userAbortInFlight = snap.userAbortInFlight ?? false;
@@ -2302,6 +2333,8 @@
       // Emitted only after session.abort() returns, and abort() sends no
       // id, so this uncorrelated response is the release point.
       _releaseAutoRenameAfterAbort();
+      tpsTracker?.handleAgentEnd(true);
+      _refreshCtx();
       userAbortInFlight = false;
       return;
     }
@@ -2379,7 +2412,8 @@
     } else if (command === "set_model") {
       if (data) {
         state.model  = _buildModelEntry(data);
-        state.models = state.models.map(m => ({ ...m, current: m.id === data.id }));
+        state.models = state.models.map(m => ({ ...m, current: m.id === data.id && (!data.provider || m.provider === data.provider) }));
+        _refreshCtx();
         notify();
       }
 
@@ -2387,7 +2421,8 @@
       if (data?.model) {
         // A re-clamped thinking level arrives as `thinking_level_changed`.
         state.model  = _buildModelEntry(data.model);
-        state.models = state.models.map(m => ({ ...m, current: m.id === data.model.id }));
+        state.models = state.models.map(m => ({ ...m, current: m.id === data.model.id && (!data.model.provider || m.provider === data.model.provider) }));
+        _refreshCtx();
         notify();
       }
 
@@ -2722,8 +2757,10 @@
     if (type === "turn_start") {
       turnStartTime = now;
       state.isStreaming = true;
+      if (_replayBuffer === null) tpsTracker?.beginWaiting(now);
       // A turn while omp waited to retry: the next attempt is in flight.
       state.messages = TURN.retryAttempting(state.messages, now);
+      _refreshCtx();
       notify();
       return;
     }
@@ -2732,7 +2769,16 @@
       state.isStreaming = false;
       streamingBubble = null;
       const usage = ev.message?.usage;
-      if (turnStartTime) {
+      const phase = tpsTracker?.getView(now)?.phase;
+      if (tpsTracker && (phase === "waiting" || phase === "streaming")) {
+        const settled = tpsTracker.finalize(usage?.output, now);
+        if (settled != null && settled > 0) {
+          tpsSamples.push(Math.round(settled));
+          tpsSamples.shift();
+          state.currentTps = settled;
+          state.sparkline  = [...tpsSamples];
+        }
+      } else if (!tpsTracker && turnStartTime) {
         const elapsed   = (now - turnStartTime) / 1000;
         const outTokens = usage?.output ?? 0;
         if (elapsed > 0 && outTokens > 0) {
@@ -2745,8 +2791,8 @@
       }
       if (usage?.cost?.total) {
         state.sessionCost = (state.sessionCost ?? 0) + usage.cost.total;
-        _refreshCtx();
       }
+      _refreshCtx();
       _send({ type: "get_session_stats" });
       _send({ type: "get_state" });
       notify();
@@ -2821,6 +2867,11 @@
       const msg = ev.message;
       if (!msg) return;
 
+      if (_replayBuffer === null && msg.role === "assistant" && tpsTracker?.handleMessageUpdate(ev, now)) {
+        const liveVal = tpsTracker.getView(now).tps?.value;
+        if (liveVal != null && liveVal > 0) state.currentTps = liveVal;
+        _refreshCtx();
+      }
       const blocks = Array.isArray(msg.content) ? msg.content : [];
       let thought = null;
       const designBlocks = [];
@@ -2862,6 +2913,20 @@
       const usage = msg?.usage;
       const tokens = usage ? ((usage.input ?? 0) + (usage.output ?? 0)) : null;
       // Only an assistant message ends the streaming bubble: when frames were
+      if (msg?.role === "assistant" && tpsTracker) {
+        if (!answered) {
+          tpsTracker.handleAgentEnd(true);
+        } else {
+          const settled = tpsTracker.finalize(usage?.output, now);
+          if (settled != null && settled > 0) {
+            tpsSamples.push(Math.round(settled));
+            tpsSamples.shift();
+            state.currentTps = settled;
+            state.sparkline  = [...tpsSamples];
+          }
+        }
+        _refreshCtx();
+      }
       // lost, a tool result's, a steer's or a job's message_end can arrive
       // while a stale bubble is still open, and must neither fill nor re-tag
       // it (the get_messages merge sorts that bubble out by its `ts`).
@@ -3037,6 +3102,8 @@
       }
       if (type === "agent_end") {
         // A yield is the run's final outcome — omp's own retries are behind it.
+        tpsTracker?.handleAgentEnd(false);
+        _refreshCtx();
         // (Background work left behind reaches `asyncPending` through the
         // get_state below, which notifies anyway.)
         if (TURN.isYield(ev)) {
@@ -3216,7 +3283,7 @@
   }
 
   function _refreshCtx() {
-    state.ctx = window.buildCtx(state.rpcState, state.sessionCost, state.currentTps);
+    state.ctx = window.buildCtx(state.rpcState, state.sessionCost, state.currentTps, tpsTracker ? tpsTracker.getView() : null);
   }
 
   function _initFetch() {

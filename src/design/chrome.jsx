@@ -225,6 +225,14 @@ function TabBar({
 // under the workspace; the st-ctx meter, st-cost and st-tps cells (each
 // with its separator) drop out when the window is narrow (layout/rail.css).
 function StatusBar({ ctx, todoDone, todoTotal, onTodo, onSettings, settingsActive = false, onChanges, onRules, approvalMode, onStats, onTree, treeOpen = false, onTerminal, terminalOpen, onBrowser, browserOpen = false }) {
+  const ttft = ctx.ttft;
+  const tpsR = ctx.tpsReading;
+  const ttftVal = ttft && ttft.value != null ? `${ttft.value.toFixed(1)}s` : "—";
+  const ttftSuffix = ttft && ttft.kind === "average" ? _t("(avg)") : "";
+  const tpsVal = tpsR && tpsR.value != null ? tpsR.value.toFixed(1) : String(ctx.tokensPerSec ?? 0);
+  const tpsSuffix = tpsR && tpsR.kind === "average" ? _t("(avg)") : tpsR && tpsR.kind === "last" ? _t("(last)") : "";
+  const ttftHot = Boolean(ttft && ttft.kind === "counting");
+  const tpsHot = Boolean(tpsR && tpsR.kind === "live");
   return (
     <div className="status">
       <span className="status-cell"><span className="dot live" /> {_t("connected")}</span>
@@ -237,9 +245,16 @@ function StatusBar({ ctx, todoDone, todoTotal, onTodo, onSettings, settingsActiv
         <span className="st-ctx-pct" style={{ color: "var(--fg-4)" }}>{(+ctx.pct).toFixed(1)}%</span>
       </span>
       <span className="status-sep st-cost">·</span>
-      <span className="status-cell st-cost mono"><span style={{ color: "var(--fg-3)" }}>{_t("cost")}</span> {ctx.cost}</span>
+      <span className="status-cell st-cost mono">
+        <span style={{ color: "var(--fg-3)" }}>{_t("cost")}</span> {ctx.cost}
+      </span>
       <span className="status-sep st-tps">·</span>
-      <span className="status-cell st-tps mono"><span style={{ color: "var(--fg-3)" }}>{ctx.tokensPerSec}</span> t/s</span>
+      <span className="status-cell st-tps mono" title={_t("TTFT (time to first token) · output throughput (tok/s)")}>
+        <span style={{ color: "var(--fg-3)" }}>{_t("TTFT")}</span>
+        <span style={{ color: ttftHot ? "var(--accent)" : "var(--fg-2)" }}>{ttftVal}{ttftSuffix && <span style={{ color: "var(--fg-4)" }}>{ttftSuffix}</span>}</span>
+        <span className="status-sep">·</span>
+        <span><span style={{ color: tpsHot ? "var(--accent)" : "var(--fg-2)" }}>{tpsVal}</span> t/s{tpsSuffix && <span style={{ color: "var(--fg-4)" }}>{tpsSuffix}</span>}</span>
+      </span>
       <div className="status-gap" />
       <button className="status-cell btn ghost" onClick={onTodo} style={{ height: 20, padding: "0 6px" }}>
         <Icon name="plan" size={11} color="var(--accent)" />
@@ -305,7 +320,7 @@ function ApprovalModeCell({ cell, onClick }) {
 // messages, opacity is log-scaled by tokens used so expensive turns pop
 // against cheap ones. Click scrolls the chat to that message; hover
 // highlights it via shared hoveredIdx state.
-function SessionMinimap({ messages, hoveredIdx, onHover, onClick }) {
+const SessionMinimap = React.memo(function SessionMinimap({ messages, hoveredIdx, onHover, onClick }) {
   // Log-scaled max across assistant messages so heatmap variance is
   // visible even when one compaction turn dwarfs the rest.
   const { maxTokens, shown } = React.useMemo(() => {
@@ -398,7 +413,15 @@ function SessionMinimap({ messages, hoveredIdx, onHover, onClick }) {
       </div>
     </div>
   );
-}
+}, (prev, next) => {
+  if (prev.hoveredIdx !== next.hoveredIdx || prev.onHover !== next.onHover || prev.onClick !== next.onClick) return false;
+  const a = prev.messages, b = next.messages;
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  if (a.length === 0) return true;
+  const la = a[a.length - 1], lb = b[b.length - 1];
+  return la._id === lb._id && la.kind === lb.kind && la.streaming === lb.streaming && la.status === lb.status && la.tokens === lb.tokens && la.failure === lb.failure && a[0]._id === b[0]._id;
+});
 
 // ── Right rail: ambient peripherals stacked ──────────────────────────
 // `show`: { context, radar, subagents, minimap } — false hides that card
