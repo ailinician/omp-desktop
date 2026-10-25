@@ -46,14 +46,15 @@ function _TC_ReadBody({ msg, projectRoot, onPreviewFile }) {
   );
 }
 
-function ScrubbableDiff({ msg, onOpenFile }) {
+function ScrubbableDiff({ msg, onOpenFile, collapsed }) {
   const total = msg.diff.length;
   const [pos, setPos]     = React.useState(total);
   const [hover, setHover] = React.useState(null);
   const trackRef          = React.useRef(null);
 
-  // Auto-play: lines land in sequence on first mount
+  // Auto-play: lines land in sequence on first mount (skip when collapsed or huge)
   React.useEffect(() => {
+    if (collapsed || total > 40) { setPos(total); return undefined; }
     let i = 0;
     setPos(0);
     const id = setInterval(() => {
@@ -62,9 +63,9 @@ function ScrubbableDiff({ msg, onOpenFile }) {
       if (i >= total) clearInterval(id);
     }, 70);
     return () => clearInterval(id);
-  }, [total]);
+  }, [total, collapsed]);
 
-  const visiblePos = hover != null ? hover : pos;
+  const visiblePos = collapsed ? Math.min(4, total) : (hover != null ? hover : pos);
 
   const onScrub = (e) => {
     const r = trackRef.current.getBoundingClientRect();
@@ -91,7 +92,7 @@ function ScrubbableDiff({ msg, onOpenFile }) {
               <span className="diff-code">{l.text}</span>
             </div>
           ))}
-          {visiblePos < total && Array.from({ length: total - visiblePos }, (_, i) => (
+          {!collapsed && visiblePos < total && Array.from({ length: total - visiblePos }, (_, i) => (
             <div key={`g-${i}`} className="diff-line ghost">
               <span className="diff-gutter">·</span><span className="diff-mark"> </span>
               <span className="diff-code">━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span>
@@ -99,23 +100,25 @@ function ScrubbableDiff({ msg, onOpenFile }) {
           ))}
         </div>
       </div>
-      <div className="diff-track-wrap">
-        <span className="mono" style={{ color: "var(--fg-4)", fontSize: "var(--d-text-xs)" }}>scrub</span>
-        <div className="diff-track" ref={trackRef}
-          onMouseMove={onScrub} onMouseLeave={() => setHover(null)}>
-          <div className="diff-track-base" />
-          {msg.diff.map((l, i) => (
-            <div key={i}
-              className={`diff-tick k-${l.kind}`}
-              style={{ left: `${(i / total) * 100}%`, width: `${100 / total}%` }} />
-          ))}
-          <div className="diff-track-cursor"
-            style={{ left: `${(visiblePos / total) * 100}%` }} />
+      {!collapsed && (
+        <div className="diff-track-wrap">
+          <span className="mono" style={{ color: "var(--fg-4)", fontSize: "var(--d-text-xs)" }}>scrub</span>
+          <div className="diff-track" ref={trackRef}
+            onMouseMove={onScrub} onMouseLeave={() => setHover(null)}>
+            <div className="diff-track-base" />
+            {msg.diff.map((l, i) => (
+              <div key={i}
+                className={`diff-tick k-${l.kind}`}
+                style={{ left: `${(i / total) * 100}%`, width: `${100 / total}%` }} />
+            ))}
+            <div className="diff-track-cursor"
+              style={{ left: `${(visiblePos / total) * 100}%` }} />
+          </div>
+          <span className="mono" style={{ color: "var(--fg-4)", fontSize: "var(--d-text-xs)" }}>
+            {visiblePos}/{total}
+          </span>
         </div>
-        <span className="mono" style={{ color: "var(--fg-4)", fontSize: "var(--d-text-xs)" }}>
-          {visiblePos}/{total}
-        </span>
-      </div>
+      )}
     </div>
   );
 }
@@ -250,7 +253,7 @@ function ToolCard({ msg, idx, highlighted, onInspectSubagent, onOpenFile, onPrev
             </div>
           )}
 
-          {msg.tool === "edit" && msg.diff && <ScrubbableDiff msg={msg} onOpenFile={onOpenFile} />}
+          {msg.tool === "edit" && msg.diff && <ScrubbableDiff msg={msg} onOpenFile={onOpenFile} collapsed={collapsed} />}
           {msg.tool === "edit" && !msg.diff && (
             <div className="tool-foot mono">
               <span style={{ color: "var(--fg-3)" }}>↳</span>
@@ -274,7 +277,7 @@ function ToolCard({ msg, idx, highlighted, onInspectSubagent, onOpenFile, onPrev
 
           {msg.tool === "eval" && msg.cells && (
             <div className="tool-eval">
-              {msg.cells.map((cell, i) => <_TC_EvalCell key={i} cell={cell} />)}
+              {(collapsed ? msg.cells.slice(0, 1) : msg.cells).map((cell, i) => <_TC_EvalCell key={i} cell={cell} collapsed={collapsed} />)}
             </div>
           )}
           {msg.tool === "task" && msg.subagents?.length > 0 && (

@@ -11,7 +11,7 @@
   flex: 1;
   overflow-y: auto; overflow-x: hidden;
   background: var(--bg-window);
-  contain: layout style paint;
+  contain: strict;
 }
 
 /* Shown only while unpinned from the bottom (issue #20) — an explicit,
@@ -46,7 +46,7 @@
   gap: 18px;
 }
 
-.row { display: flex; gap: 12px; }
+.row { display: flex; gap: 12px; content-visibility: auto; contain-intrinsic-size: auto 68px; }
 .row.user { justify-content: flex-end; }
 
 /* assistant left rail with thread */
@@ -291,19 +291,21 @@
 .collapse-toggle svg { width: 1.75em; height: 1.75em; transition: transform 120ms; }
 .collapse-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
 .collapse-clip {
+  position: relative;
   max-height: calc(var(--collapse-lines) * 1.55em + 18px);
   overflow: hidden;
-  -webkit-mask-image: linear-gradient(to bottom, #000 45%, transparent);
-  mask-image: linear-gradient(to bottom, #000 45%, transparent);
 }
-/* bash keeps its last lines (tool-card.jsx renders only those): fade the
-   top, and when wrapped lines still overflow, cut them off the top too, so
-   the final line (often the exit code or wall time) stays in view. The
-   floating copy button moves to the bottom, out of the fade. */
+.collapse-clip::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 34px;
+  background: linear-gradient(to bottom, transparent, var(--bg-surface));
+  pointer-events: none;
+}
 .collapse-clip.from-end {
   display: flex; flex-direction: column; justify-content: flex-end;
-  -webkit-mask-image: linear-gradient(to top, #000 45%, transparent);
-  mask-image: linear-gradient(to top, #000 45%, transparent);
+}
+.collapse-clip.from-end::after {
+  bottom: auto; top: 0;
+  background: linear-gradient(to top, transparent, var(--bg-input));
 }
 .collapse-clip.from-end > * { flex: none; }
 .collapse-clip.from-end .copy-btn.is-floating { top: auto; bottom: 6px; }

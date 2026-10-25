@@ -484,7 +484,7 @@
 
   // ── Minimap / message-history trim ───────────────────────────────────────
   const MINIMAP_COLS = 13;
-  const MINIMAP_MAX  = MINIMAP_COLS * 150; // 1950 — 150 scrollable 13-col rows
+  const MINIMAP_MAX  = MINIMAP_COLS * 30; // 390 — 30 scrollable 13-col rows
 
   // ── Session registry ───────────────────────────────────────────────────────
   // Tracks all open tabs. The tab list in the UI is derived from this.
@@ -654,8 +654,9 @@
   // purpose, so it does not bring the cut history back.
   function _trimMessages() {
     if (state.isStreaming) return;                  // wait for clean turn boundary
-    if (state.messages.length <= MINIMAP_MAX) return;
-    const drop = MINIMAP_COLS;                      // evict one full row (13)
+    const over = state.messages.length - MINIMAP_MAX;
+    if (over <= 0) return;
+    const drop = Math.ceil(over / MINIMAP_COLS) * MINIMAP_COLS;
     state.messages = state.messages.slice(drop);
     state.trimmed = true;
     for (const [id, idx] of activeToolCards) {

@@ -101,7 +101,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const mentionListRef = React.useRef(null);
   const mentionReqRef  = React.useRef(0);
 
-  const mentionRange = React.useMemo(() => parseMentionQuery(text, caret), [text, caret]);
+  const mentionRange = React.useMemo(() => (text.includes("@") ? parseMentionQuery(text, caret) : null), [text, caret]);
   const mentionKey    = mentionRange ? `${mentionRange.start}:${mentionRange.query}` : null;
   const showMention   = mentionRange !== null && mentionItems.length > 0 && mentionDismissedKey !== mentionKey;
 
@@ -159,15 +159,12 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   // ("/plan do /sk"); when no skill matches, the leading popup applies as
   // before. Escape dismisses only that token, like the @ list — never the
   // draft, which here is the user's prose.
-  const slashRange = React.useMemo(() => midPromptSlashToken(text, caret), [text, caret]);
+  const slashRange = React.useMemo(() => (text.includes("/") ? midPromptSlashToken(text, caret) : null), [text, caret]);
   const slashKey   = slashRange ? `${slashRange.start}:${slashRange.query}` : null;
-  // A dismissal belongs to one token: once there is none (sent, deleted,
-  // caret moved off it), forget it, or the same offset and query in a later
-  // message would never open the list — same rule as the @ list.
   React.useEffect(() => { if (!slashRange) setSlashDismissedKey(null); }, [slashRange === null]);
   const skillHits  = slashRange && slashDismissedKey !== slashKey ? skillMenu(cmds, slashRange.query) : [];
   const midSlash   = skillHits.length > 0;
-  const filtered   = midSlash ? skillHits : slashMenu(cmds, text);
+  const filtered   = midSlash ? skillHits : (text.startsWith("/") ? slashMenu(cmds, text) : []);
   const showSlash  = filtered.length > 0 && !showMention;
 
   // Keep activeIdx in bounds; auto-select when single result
@@ -189,7 +186,8 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
 
   // Grow with the text up to the CSS max-height, then scroll: hidden
   // overflow past it would leave the rest of a long draft unreachable.
-  const prevLenRef = React.useRef(0);
+  const prevLenRef   = React.useRef(0);
+  const composingRef = React.useRef(false);
   React.useLayoutEffect(() => {
     const ta = taRef.current;
     if (!ta) return;
@@ -197,9 +195,12 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
     const shrunk = len < prevLenRef.current;
     prevLenRef.current = len;
     if (!len) { ta.style.height = "22px"; ta.style.overflowY = "hidden"; return; }
-    if (shrunk && ta.clientHeight > 26) { ta.style.height = "auto"; ta.style.overflowY = "hidden"; }
+    if (composingRef.current) return;
+    const ch = ta.clientHeight;
+    if (!shrunk && ch <= 26 && len < 48 && !text.includes("\n")) return;
+    if (shrunk && ch > 26) { ta.style.height = "auto"; ta.style.overflowY = "hidden"; }
     const full = ta.scrollHeight;
-    if (full !== ta.clientHeight || shrunk) {
+    if (full !== ta.clientHeight) {
       ta.style.height = `${Math.min(full, 180)}px`;
       ta.style.overflowY = full > 180 ? "auto" : "hidden";
     }
@@ -683,6 +684,18 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
                   : (microcopy?.paletteTip ?? `${_t("type / to give orders")}${bridgeHint ? ` · ${bridgeHint}${_t(" opens the bridge")}` : ""}`)
             }
             value={text}
+            onCompositionStart={() => { composingRef.current = true; }}
+            onCompositionEnd={(e) => {
+              composingRef.current = false;
+              const ta = e.currentTarget;
+              if (ta.value.length >= 48 || ta.value.includes("\n") || ta.clientHeight > 26) {
+                const full = ta.scrollHeight;
+                if (full !== ta.clientHeight) {
+                  ta.style.height = `${Math.min(full, 180)}px`;
+                  ta.style.overflowY = full > 180 ? "auto" : "hidden";
+                }
+              }
+            }}
             onChange={(e) => { const v = e.target.value; setText(v); if (v.includes("@") || v.includes("/")) setCaret(e.target.selectionStart); }}
             onSelect={(e) => { if (text.includes("@") || text.includes("/")) setCaret(e.target.selectionStart); }}
             onKeyDown={onKey}

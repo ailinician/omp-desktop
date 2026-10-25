@@ -6,16 +6,20 @@
 
 const { CopyHost: _EvalCopyHost } = window;
 
-function EvalCell({ cell }) {
+function EvalCell({ cell, collapsed }) {
   const done = cell.status === "complete" || cell.status === "error";
   const lang = cell.language === "py" ? "python" : "javascript";
+  const shownCode = cell.code ? (collapsed ? cell.code.split("\n", 5).join("\n") : cell.code.trimEnd()) : "";
+  const shownOut  = cell.output && !(collapsed && shownCode)
+    ? (collapsed ? cell.output.split("\n", 5).join("\n") : cell.output.trimEnd())
+    : "";
 
   const codeHtml = React.useMemo(() => {
-    if (!done || !cell.code || !window.hljs) return null;
+    if (!done || !shownCode || !window.hljs) return null;
     try {
-      return window.hljs.highlight(cell.code.trimEnd(), { language: lang }).value;
+      return window.hljs.highlight(shownCode, { language: lang }).value;
     } catch (_) { return null; }
-  }, [done, cell.code, lang]);
+  }, [done, shownCode, lang]);
 
   return (
     <div className={`eval-cell eval-${cell.status}`}>
@@ -27,18 +31,18 @@ function EvalCell({ cell }) {
           : cell.status === "running" && <span className="shimmer-text" style={{ marginLeft: "auto", fontSize: 10 }}>running…</span>
         }
       </div>
-      {cell.code && (
+      {shownCode && (
         <_EvalCopyHost label="Copy code" text={done ? cell.code.trimEnd() : ""}>
           {codeHtml
             ? <pre className="eval-code selectable"><code className={`hljs language-${lang}`}
                 dangerouslySetInnerHTML={{ __html: codeHtml }} /></pre>
-            : <pre className="eval-code selectable mono">{cell.code.trimEnd()}</pre>}
+            : <pre className="eval-code selectable mono">{shownCode}</pre>}
         </_EvalCopyHost>
       )}
-      {cell.output && (
+      {shownOut && (
         <_EvalCopyHost label="Copy output" text={done ? cell.output.trimEnd() : ""}>
           <pre className={`eval-output selectable mono${cell.status === "error" ? " eval-error" : ""}`}>
-            {cell.output.trimEnd()}
+            {shownOut}
           </pre>
         </_EvalCopyHost>
       )}

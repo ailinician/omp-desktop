@@ -229,7 +229,7 @@ body {
 
 button { font: inherit; color: inherit; cursor: pointer; }
 input, textarea { font: inherit; color: inherit; background: transparent; border: 0; outline: none; }
-.selectable, .selectable * { user-select: text; }
+.selectable { user-select: text; }
 .mono { font-family: var(--font-mono); font-feature-settings: "ss01"; }
 
 /* ── App backdrop: subtle aurora wash + grain ─────────────────────────── */
@@ -289,8 +289,8 @@ input, textarea { font: inherit; color: inherit; background: transparent; border
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.fade-up { animation: fadeUp 320ms var(--ease-out) both; }
-.slide-in { animation: slideIn 360ms var(--ease-out) both; }
+.fade-up { animation: fadeUp 220ms var(--ease-out); }
+.slide-in { animation: slideIn 260ms var(--ease-out); }
 
 /* shimmer skeleton for streaming text */
 .shimmer-text {
