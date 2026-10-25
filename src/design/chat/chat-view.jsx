@@ -12,6 +12,7 @@ const { collapseStates: _CV_collapseStates, PREVIEW_LINES: _CV_PREVIEW_LINES } =
 // Lines a collapsed block keeps in view, for chat.css; one object, so a
 // streaming frame does not diff a fresh style.
 const _CV_PAD_STYLE = { "--collapse-lines": _CV_PREVIEW_LINES };
+const _CV_WIN = 80, _CV_STEP = 40, _CV_EST_H = 72;
 var _t = (en) => (window.OMP_LANG === "en" ? en : (window.OMP_ZH_DICT?.[en] ?? en));
 
 
@@ -25,7 +26,7 @@ const _CV_AssistantBubble_M = React.memo(_CV_AssistantBubble);
 const _CV_AskBubble_M       = React.memo(_CV_AskBubble);
 
 const CompactRow = React.memo(function CompactRow({ msg }) {
-  const [open, setOpen] = React.useState(false);
+  const _op = React.useState(false), open = _op[0], setOpen = _op[1];
   const pending  = msg.status === "pending";
   const error    = msg.status === "error";
   const COLOR    = error ? "var(--rose)" : "var(--lilac)";
@@ -168,21 +169,24 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
   const followRef   = React.useRef(followOutput);
   followRef.current = followOutput;
   // Mirrors pinnedRef into render so the "Jump to latest" button can show —
-  // scroll position itself must not force a re-render on every wheel tick.
-  const [showJump, setShowJump] = React.useState(false);
-  // While the user reads history: the last message shown when they left the
-  // bottom. Newer blocks don't auto-collapse older ones meanwhile, so the
-  // text being read doesn't fold away under the reader.
-  const [collapseHorizon, setCollapseHorizon] = React.useState(null);
-
-  const [activeTurn, setActiveTurn] = React.useState(0);
+  const _sj = React.useState(false), showJump = _sj[0], setShowJump = _sj[1];
+  const _ch = React.useState(null), collapseHorizon = _ch[0], setCollapseHorizon = _ch[1];
+  const _at = React.useState(0), activeTurn = _at[0], setActiveTurn = _at[1];
   const activeTurnRef = React.useRef(0);
-  const [hoverTurn, setHoverTurn]   = React.useState(null);
-  const [popY, setPopY]             = React.useState(120);
-  const [flashIdx, setFlashIdx]     = React.useState(null);
+  const _ht = React.useState(null), hoverTurn = _ht[0], setHoverTurn = _ht[1];
+  const _py = React.useState(120), popY = _py[0], setPopY = _py[1];
+  const _fi = React.useState(null), flashIdx = _fi[0], setFlashIdx = _fi[1];
   const hideTimerRef                = React.useRef(null);
   const flashTimerRef               = React.useRef(null);
   const wrapRef                     = React.useRef(null);
+  const _we = React.useState(null), winEnd = _we[0], setWinEnd = _we[1];
+  const anchorRef                   = React.useRef(null);
+  const pendingJumpRef              = React.useRef(null);
+  const totalMsgs                   = messages.length;
+  const endIdx                      = winEnd === null || winEnd >= totalMsgs ? totalMsgs : Math.max(_CV_WIN, winEnd);
+  const startIdx                    = Math.max(0, endIdx - _CV_WIN);
+  const topPad                      = startIdx * _CV_EST_H;
+  const botPad                      = (totalMsgs - endIdx) * _CV_EST_H;
 
   const userTurnsRef = React.useRef([]);
   const userTurns = React.useMemo(() => {
@@ -215,7 +219,10 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
     const threshold = el.scrollTop + el.clientHeight * 0.42;
     let found = 0;
     for (let k = 0; k < userTurns.length; k++) {
-      const node = el.querySelector(`[data-msg-idx="${userTurns[k].msgIdx}"]`);
+      const mIdx = userTurns[k].msgIdx;
+      if (mIdx < startIdx) { found = k; continue; }
+      if (mIdx >= endIdx) break;
+      const node = el.querySelector(`[data-msg-idx="${mIdx}"]`);
       if (node && node.offsetTop <= threshold) found = k;
       else if (node && node.offsetTop > threshold) break;
     }
@@ -223,7 +230,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
       activeTurnRef.current = found;
       setActiveTurn(found);
     }
-  }, [userTurns]);
+  }, [userTurns, startIdx, endIdx]);
   const setPinned = (val) => {
     pinnedRef.current = val;
     setShowJump(!val);
@@ -239,18 +246,61 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
 
   // Only a real user scroll — up and away from the bottom — unpins.
   // Scrolling back down near the bottom re-pins. See app/scroll-pin.js.
+  React.useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const jmp = pendingJumpRef.current;
+    if (jmp !== null) {
+      const rowEl = el.querySelector(`[data-msg-idx="${jmp}"]`);
+      if (rowEl) {
+        pendingJumpRef.current = null;
+        const targetTop = Math.max(0, rowEl.offsetTop - 24);
+        prevTopRef.current = targetTop;
+        el.scrollTo({ top: targetTop, behavior: "smooth" });
+      }
+      return;
+    }
+    const anc = anchorRef.current;
+    if (anc) {
+      anchorRef.current = null;
+      const node = el.querySelector(`[data-msg-idx="${anc.idx}"]`);
+      if (node) {
+        el.scrollTop += node.getBoundingClientRect().top - anc.top;
+        prevTopRef.current = el.scrollTop;
+      }
+    }
+  }, [startIdx, endIdx]);
+
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
     const pinned = _CV_nextPinned(pinnedRef.current, prevTopRef.current, el);
     prevTopRef.current = el.scrollTop;
-    if (pinned !== pinnedRef.current) setPinned(pinned);
+    if (pinned !== pinnedRef.current) {
+      setPinned(pinned);
+      if (pinned && winEnd !== null) setWinEnd(null);
+    }
+    if (!pinned && !anchorRef.current && pendingJumpRef.current === null) {
+      if (startIdx > 0 && el.scrollTop < topPad + 280) {
+        const rows = el.querySelectorAll(".row[data-msg-idx]");
+        const n = rows[0];
+        if (n) anchorRef.current = { idx: n.dataset.msgIdx, top: n.getBoundingClientRect().top };
+        setWinEnd(Math.max(_CV_WIN, endIdx - _CV_STEP));
+      } else if (endIdx < totalMsgs && el.scrollTop + el.clientHeight > el.scrollHeight - botPad - 280) {
+        const rows = el.querySelectorAll(".row[data-msg-idx]");
+        const n = rows[rows.length - 1];
+        if (n) anchorRef.current = { idx: n.dataset.msgIdx, top: n.getBoundingClientRect().top };
+        const nextEnd = endIdx + _CV_STEP;
+        setWinEnd(nextEnd >= totalMsgs ? null : nextEnd);
+      }
+    }
     syncActiveTurn(el);
   };
 
   const jumpToLatest = () => {
     const el = scrollRef.current;
     if (!el) return;
+    if (winEnd !== null) setWinEnd(null);
     stickToBottom(el);
     setPinned(true);
   };
@@ -274,7 +324,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
     lastIdRef.current = messages[messages.length - 1]?._id ?? null;
     const next = _CV_afterOutput({ pinned: pinnedRef.current, follow: followRef.current, repin }, el);
     if (next.pinned !== pinnedRef.current) setPinned(next.pinned);
-    if (next.stick) stickToBottom(el);
+    if (next.stick) { if (winEnd !== null) setWinEnd(null); stickToBottom(el); }
     syncActiveTurn(el);
   }, [messages, syncActiveTurn]);
 
@@ -343,24 +393,31 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
     updatePopYForTurn(next, null);
   };
 
-  const jumpToTurn = (k) => {
-    const t = userTurns[k];
+  const scrollToMsgIdx = (msgIdx) => {
     const el = scrollRef.current;
-    if (!t || !el) return;
-    const rowEl = el.querySelector(`[data-msg-idx="${t.msgIdx}"]`);
+    if (msgIdx == null || msgIdx < 0 || msgIdx >= totalMsgs || !el) return;
+    if (msgIdx < totalMsgs - 2) setPinned(false);
+    for (let k = 0; k < userTurns.length; k++) {
+      if (userTurns[k].msgIdx <= msgIdx) { activeTurnRef.current = k; setActiveTurn(k); }
+    }
+    setFlashIdx(msgIdx);
+    clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = setTimeout(() => setFlashIdx(null), 1500);
+    if (msgIdx < startIdx || msgIdx >= endIdx) {
+      pendingJumpRef.current = msgIdx;
+      const nextEnd = Math.min(totalMsgs, Math.max(_CV_WIN, msgIdx + (_CV_WIN >> 1)));
+      setWinEnd(nextEnd >= totalMsgs ? null : nextEnd);
+      return;
+    }
+    const rowEl = el.querySelector(`[data-msg-idx="${msgIdx}"]`);
     if (!rowEl) return;
-    const isLast = k === userTurns.length - 1;
-    if (!isLast) setPinned(false);
     const targetTop = Math.max(0, rowEl.offsetTop - 24);
     prevTopRef.current = targetTop;
     el.scrollTo({ top: targetTop, behavior: "smooth" });
-    activeTurnRef.current = k;
-    setActiveTurn(k);
-    setFlashIdx(t.msgIdx);
-    clearTimeout(flashTimerRef.current);
-    flashTimerRef.current = setTimeout(() => setFlashIdx(null), 1500);
   };
+  window.__ompScrollToMsg = scrollToMsgIdx;
 
+  const jumpToTurn = (k) => { if (userTurns[k]) scrollToMsgIdx(userTurns[k].msgIdx); };
   const hoveredTurnMsgIdx = hoverTurn !== null ? userTurns[hoverTurn]?.msgIdx : null;
   const fisheyeCards = fisheyeWindow(userTurns, hoverTurn);
   return (
@@ -372,7 +429,9 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
              MINIMAP_COLS = 156). Streaming re-renders are unaffected. Driving annotable
              and scroll-targeting off _id instead of idx would make trim zero-cost for
              history, but requires a larger refactor. */}
-          {messages.map((m, i) => {
+          {topPad > 0 && <div style={{ height: topPad, flexShrink: 0 }} />}
+          {messages.slice(startIdx, endIdx).map((m, off) => {
+            const i = startIdx + off;
             const hl = hoveredMsgIdx === i || hoveredTurnMsgIdx === i || flashIdx === i;
             if (window.OMP_TURN_STATUS.isHidden(m)) return null;
             if (m.kind === "user")    return <_CV_UserBubble_M    key={m._id ?? i} idx={i} highlighted={hl} msg={m} />;
@@ -390,6 +449,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
               onAnnotate={onAnnotate}
               thoughtCollapsed={collapsed[m._id]} onToggleCollapse={onToggleCollapse} />;
           })}
+          {botPad > 0 && <div style={{ height: botPad, flexShrink: 0 }} />}
           <div style={{ height: 24 }} />
         </div>
       </div>

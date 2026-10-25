@@ -528,6 +528,16 @@
             ...(failure ? { failure } : {}),
           });
         }
+      } else if (role === "compaction") {
+        result.push({
+          kind: "compact",
+          status: "done",
+          ts,
+          time,
+          summary: msg.summary || null,
+          shortSummary: msg.shortSummary || null,
+          tokensBefore: msg.tokensBefore ?? null,
+        });
       }
     }
     return result;

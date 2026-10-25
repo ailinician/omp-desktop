@@ -88,23 +88,18 @@ function App() {
   const treeFlashRef = React.useRef(null);
   React.useEffect(() => () => clearTimeout(treeFlashRef.current), []);
   const handleMinimapClick = (idx) => {
-    const el = document.querySelector(`[data-msg-idx="${idx}"]`);
-    el?.scrollIntoView({ block: "center", behavior: "smooth" });
+    window.__ompScrollToMsg?.(idx);
   };
   const handleTreeJump = (row) => {
-    if (!row || row.kind !== "prompt") return;
-    let idx = row.ts != null ? messages.findIndex(m => m.kind === "user" && m.ts === row.ts) : -1;
-    if (idx === -1 && row.inCurrent && row.text) {
+    if (!row || (row.kind !== "prompt" && row.kind !== "compaction")) return;
+    const targetKind = row.kind === "compaction" ? "compact" : "user";
+    let idx = row.ts != null ? messages.findIndex(m => m.kind === targetKind && m.ts === row.ts) : -1;
+    if (idx === -1 && targetKind === "user" && row.text) {
       const norm = row.text.replace(/\s+/g, " ").trim();
       idx = messages.findIndex(m => m.kind === "user" && (m.text || "").replace(/\s+/g, " ").trim().startsWith(norm));
     }
     if (idx === -1) return;
-    const el = document.querySelector(`[data-msg-idx="${idx}"]`);
-    if (!el) return;
-    el.scrollIntoView({ block: "center", behavior: "smooth" });
-    setHoveredMsgIdx(idx);
-    clearTimeout(treeFlashRef.current);
-    treeFlashRef.current = setTimeout(() => setHoveredMsgIdx(cur => (cur === idx ? null : cur)), 1200);
+    window.__ompScrollToMsg?.(idx);
   };
   // ── Live data (all per-session — driven by OMP_BRIDGE.onUpdate) ───────────
   const [messages,      setMessages]      = React.useState([]);

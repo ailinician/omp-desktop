@@ -653,17 +653,8 @@
   // `state.trimmed` tells the get_messages merge that the head is gone on
   // purpose, so it does not bring the cut history back.
   function _trimMessages() {
-    if (state.isStreaming) return;                  // wait for clean turn boundary
-    const over = state.messages.length - MINIMAP_MAX;
-    if (over <= 0) return;
-    const drop = Math.ceil(over / MINIMAP_COLS) * MINIMAP_COLS;
-    state.messages = state.messages.slice(drop);
-    state.trimmed = true;
-    for (const [id, idx] of activeToolCards) {
-      const shifted = idx - drop;
-      if (shifted < 0) activeToolCards.delete(id); // guard: possible on abort (no tool_execution_end)
-      else activeToolCards.set(id, shifted);
-    }
+    // Full session history is retained in memory; ChatView and SessionMinimap
+    // window their own DOM rendering so scrolling/jumping back to turn #1 works.
   }
 
   // Memo for a session's run state (`TURN.runStateOf`, app/turn-status.js),
@@ -2324,6 +2315,7 @@
           : { status: "error" };
         state.messages = state.messages.map((m, i) => i === idx ? { ...m, ...update } : m);
       }
+      _refreshCtx();
       notify();
       return;
     }
@@ -3066,6 +3058,29 @@
     if (type === "auto_retry_end") {
       const next = TURN.retryEnded(state.messages, ev);
       if (next !== state.messages) { state.messages = next; notify(); }
+      return;
+    }
+    if (type === "auto_compaction_start") {
+      state.messages = [...state.messages, { kind: "compact", status: "pending", id: `ac-${now}`, ts: now, time: timeNow() }];
+      notify();
+      return;
+    }
+    if (type === "auto_compaction_end") {
+      let idx = -1;
+      for (let i = state.messages.length - 1; i >= 0; i--) {
+        if (state.messages[i].kind === "compact" && state.messages[i].status === "pending") { idx = i; break; }
+      }
+      const r = ev.result;
+      const update = (!ev.aborted && !ev.errorMessage && r)
+        ? { status: "done", shortSummary: r.shortSummary || null, summary: r.summary || null, tokensBefore: r.tokensBefore ?? null }
+        : { status: "error" };
+      if (idx !== -1) {
+        state.messages = state.messages.map((m, i) => (i === idx ? { ...m, ...update } : m));
+      } else if (!ev.aborted) {
+        state.messages = [...state.messages, { kind: "compact", ts: now, time: timeNow(), ...update }];
+      }
+      _refreshCtx();
+      notify();
       return;
     }
 

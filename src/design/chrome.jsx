@@ -333,7 +333,8 @@ const SessionMinimap = React.memo(function SessionMinimap({ messages, hoveredIdx
     }
     return { maxTokens: max, shown: n };
   }, [messages]);
-  const logMax = Math.log10(maxTokens + 1) || 1;
+  const logMax  = Math.log10(maxTokens + 1) || 1;
+  const mmStart = Math.max(0, messages.length - 260);
 
   return (
     <div className="minimap">
@@ -343,7 +344,8 @@ const SessionMinimap = React.memo(function SessionMinimap({ messages, hoveredIdx
         <span className="mono" style={{ marginLeft: "auto", color: "var(--fg-4)" }}>{shown}</span>
       </div>
       <div className="minimap-grid">
-        {messages.map((m, i) => {
+        {messages.slice(mmStart).map((m, off) => {
+          const i = mmStart + off;
           if (window.OMP_TURN_STATUS.isHidden(m)) return null;
           let hue = "var(--fg-5)";
           if      (m.kind === "user")      hue = "var(--magenta)";

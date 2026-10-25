@@ -23,7 +23,7 @@
    *  everything the desktop builds itself — cards, notes, job rows — and for
    *  a bubble whose echo never came (a command omp ran locally). */
   function messageKey(m) {
-    if (m?.kind !== "user" && m?.kind !== "assistant") return null;
+    if (m?.kind !== "user" && m?.kind !== "assistant" && m?.kind !== "compact") return null;
     return Number.isFinite(m.ts) ? `${m.kind}:${m.ts}` : null;
   }
 
