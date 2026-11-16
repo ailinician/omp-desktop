@@ -600,7 +600,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const sendHints = _CMP_SEND_HINTS[submitKey] ?? _CMP_SEND_HINTS.enter;
 
   return (
-    <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}${fastMode ? " fast-on" : ""}${dropActive ? " drop-on" : ""}`}
+    <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}${fastMode ? (fastModeScope === "locked" ? " fast-on fast-locked" : " fast-on") : ""}${dropActive ? " drop-on" : ""}`}
       onDragEnter={onFileDrag} onDragOver={onFileDrag} onDragLeave={onFileDrag} onDrop={onFileDrag}>
       {planMode && (
         <div className="plan-strip">
@@ -759,7 +759,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
             )}
             <button className={`btn primary${goalMode ? " goal-start" : ""}${fastMode && !goalMode && !planMode ? " fast-send" : ""}`} onClick={send}
               disabled={!sendable || pendingImages > 0}>
-              {fastMode && !goalMode && !planMode && <><Icon name="bolt" size={11} color="#FFD04D" dotColor="#FFF5CC" />{" "}</>}
+              {fastMode && !goalMode && !planMode && <><Icon name="bolt" size={11} color="currentColor" />{" "}</>}
               {goalMode
                 ? OMP_TR("start goal")
                 : planMode
@@ -794,8 +794,8 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
                 ].filter(Boolean).join("\n")
               : OMP_TR("fast mode (/fast) — click for 1-turn priority boost, click again to lock")
           }>
-          <Icon name="bolt" size={11} color={fastMode ? "#FFD04D" : "var(--fg-3)"} dotColor={fastMode ? "#FFF5CC" : undefined} />
-          <span style={{ color: fastMode ? "#FFD04D" : "var(--fg-2)", fontWeight: fastMode ? 600 : undefined }}>
+          <Icon name="bolt" size={11} color={fastMode ? "#FFD84D" : "var(--fg-3)"} dotColor={fastMode ? "#FFFDF0" : undefined} />
+          <span className="fast-pill-label">
             {fastMode
               ? (fastModeScope === "locked" ? OMP_TR("fast · lock") : OMP_TR("fast · 1x"))
               : OMP_TR("fast")}
@@ -806,7 +806,9 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
             ) : fastTariff?.kind === "priority_miss" ? (
               <span className="fast-verify-badge warn">{fastModeScope === "locked" ? "📌!" : "!"}</span>
             ) : (
-              <span className="fast-verify-badge pending">{fastModeScope === "locked" ? "📌" : (fastModeActive ? "1x" : "…")}</span>
+              <span className={`fast-verify-badge ${fastModeScope === "locked" ? "locked" : "pending"}`}>
+                {fastModeScope === "locked" ? "📌" : (fastModeActive ? "1x" : "…")}
+              </span>
             )
           )}
         </button>
