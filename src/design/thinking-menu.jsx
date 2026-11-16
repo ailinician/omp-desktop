@@ -16,24 +16,14 @@ function ThinkingMenu({ model, level, cycleHint, onLoad, onSet }) {
   // for: shown only while that still matches, so a model switch never shows
   // the previous model's levels, not even until the refetch lands.
   const [list, setList] = React.useState(null);
-  const [error, setError] = React.useState(null); // a refused pick
-  const [busy, setBusy] = React.useState(false);
-  // The pick in flight, if any. Every close clears it, so a pick that
-  // settles after its menu closed leaves the next one alone.
-  const pending = React.useRef(null);
   const rootRef = React.useRef(null);
   const popRef = React.useRef(null);
   const triggerRef = React.useRef(null);
+  // A pick in flight, its refusal and the close that drops a late one
+  // (ui/use-menu-pick.js).
+  const { busy, error, pick: run, close } = window.useMenuPick(triggerRef, () => setOpen(false));
   const key = model ? window.modelKey(model) : "";
   const shown = list?.key === key ? list : null;
-
-  const close = React.useCallback((refocus = true) => {
-    pending.current = null;
-    setOpen(false);
-    setBusy(false);
-    setError(null);
-    if (refocus) triggerRef.current?.focus();
-  }, []);
 
   React.useEffect(() => {
     if (!open) return undefined;
@@ -62,24 +52,9 @@ function ThinkingMenu({ model, level, cycleHint, onLoad, onSet }) {
 
   // Sent even for the ticked level: in `auto` mode the tick is only what
   // auto resolved to, and picking it is how the level gets pinned.
-  const pick = async value => {
-    if (pending.current) return;
-    const token = {};
-    pending.current = token;
-    setBusy(true);
-    setError(null);
-    try {
-      await onSet(value);
-    } catch (e) {
-      if (pending.current !== token) return;
-      pending.current = null;
-      setBusy(false);
-      setError(e?.timedOut ? "omp has not answered yet; the level may still change"
-        : `not applied: ${e?.message ?? e}`);
-      return;
-    }
-    if (pending.current === token) close();
-  };
+  const pick = value => run(() => onSet(value), e => e?.timedOut
+    ? "omp has not answered yet; the level may still change"
+    : `not applied: ${e?.message ?? e}`);
 
   return (
     <div className="thinking-menu" ref={rootRef}>
@@ -87,16 +62,16 @@ function ThinkingMenu({ model, level, cycleHint, onLoad, onSet }) {
         title={cycleHint ? `thinking level (${cycleHint} cycles)` : "thinking level"}
         onClick={() => (open ? close() : setOpen(true))}>
         <_TM_Icon name="thinking" size={11} color="var(--lilac)" />
-        <span style={{ color: "var(--fg-2)" }}>thinking · {level}</span>
+        <span style={{ color: "var(--fg-2)" }}>{OMP_TR("thinking ·")} {level}</span>
         <_TM_Icon name="chev" size={10} color="var(--fg-4)" />
       </button>
       {open && (
-        <div ref={popRef} className={`thinking-pop${busy ? " busy" : ""}`} role="menu" aria-label="thinking level" onKeyDown={onPopKey}>
-          <div className="thinking-pop-head mono" role="none">thinking · {model?.name}</div>
+        <div ref={popRef} className={`thinking-pop${busy ? " busy" : ""}`} role="menu" aria-label={OMP_TR("thinking level")} onKeyDown={onPopKey}>
+          <div className="thinking-pop-head mono" role="none">{OMP_TR("thinking ·")} {model?.name}</div>
           {!shown ? (
-            <div className="thinking-pop-note" role="none">loading…</div>
+            <div className="thinking-pop-note" role="none">{OMP_TR("loading…")}</div>
           ) : shown.error ? (
-            <div className="thinking-pop-note error" role="none">could not load the levels: {shown.error}</div>
+            <div className="thinking-pop-note error" role="none">{OMP_TR("could not load the levels:")} {shown.error}</div>
           ) : (<>
             {shown.levels.map(l => (
               <button key={l} className={`thinking-item${l === level ? " active" : ""}`}
@@ -106,15 +81,15 @@ function ThinkingMenu({ model, level, cycleHint, onLoad, onSet }) {
                   {l === level && <_TM_Icon name="check" size={10} color="var(--accent)" />}
                 </span>
                 <span className="thinking-item-name mono">{l}</span>
-                {_TM_LEVELS[l] && <span className="thinking-item-hint">{_TM_LEVELS[l].hint}</span>}
+                {_TM_LEVELS[l] && <span className="thinking-item-hint">{OMP_TR(_TM_LEVELS[l].hint)}</span>}
               </button>
             ))}
             {shown.levels.length <= 1 && (
-              <div className="thinking-pop-note" role="none">this model has no thinking levels</div>
+              <div className="thinking-pop-note" role="none">{OMP_TR("this model has no thinking levels")}</div>
             )}
           </>)}
           {error && <div className="thinking-pop-note error" role="none">{error}</div>}
-          {cycleHint && <div className="thinking-pop-foot mono" role="none">{cycleHint} cycles the level</div>}
+          {cycleHint && <div className="thinking-pop-foot mono" role="none">{cycleHint} {OMP_TR("cycles the level")}</div>}
         </div>
       )}
     </div>

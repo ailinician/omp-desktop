@@ -107,7 +107,7 @@ IPC glue only, no lifecycle policy:
 ## Lifecycle
 
 - **Open.** The first time a tab's panel is open *and* its xterm is mounted (`needsSpawn`), the hook fits the xterm and calls `terminal_open` with the fitted size, so the pty starts at the right size. A spawn failure is written into the xterm and treated as an exited shell (Enter retries).
-- **Hide.** The ✕ in the panel head, the toggle chord, the status-bar button and `/terminal` only change visibility (`open`); the shell keeps running.
+- **Hide.** The toolbar's terminal button, the toggle chord and `/terminal` only change visibility (`open`); the shell keeps running. The panel head has no close button of its own.
 - **Exit.** `terminal://exit` of the current instance marks the status `exited` and writes "shell exited (code N) — press Enter to restart" into the xterm. The state stays `exited` across hide/show; Enter (intercepted in xterm's key handler) resets the xterm and calls `terminal_open` again, which spawns a higher instance.
 - **Profile switch.** `stop_session` + `start_session` under the same id: omp restarts, `register_tab` updates the folder, the shell keeps running.
 - **Close tab.** `closeSession` → `close_tab`; the hook drops that tab's state and disposes its xterm.
@@ -167,7 +167,7 @@ The decisions are a pure reducer, `window.OMP_TERMINAL_STREAM`, covered by `test
 - **Spawn** (`onOpened`). `terminalOpen` with the xterm's size at call time → `applyStatus`, adopt a higher instance, then a replay from `lastSeq` to pick up output emitted before the reply arrived; a reply older than the shell shown changes nothing. A live reply records its instance in the hook record's `opened`; if the xterm was resized while the open was in flight, the current size is sent then. A failure is written into the xterm and recorded with `spawnFailed`.
 - **Resize.** `onResize` forwards to `terminal_resize` only while `shellLive(entry, opened)`: no resize goes to a tab without a shell (the first fit before the first spawn, an exited shell, an open in flight), so none is refused by Rust.
 - **Restart.** Enter's keydown restarts only when `canRestart(entry, opened)`, so a second Enter while the respawn is in flight (`spawning`) or its reply not rendered yet does nothing. The restarting keydown is `preventDefault`ed and returns `false`: the browser fires no `keypress`, which xterm would otherwise send to the pty as `\r`; a keypress that comes anyway is swallowed until that Enter's keyup (`app/terminal-xterm.js`).
-- View policy stays in the hook: auto-open, visibility, height, focus, restart on Enter. Hiding a panel (`close`, `toggle`) while the focus is inside it (xterm's textarea, the ✕) moves the focus to the composer's prompt box, so keys never land on `<body>`. The hook returns the shared `height`. The Settings shell menu keeps its own state in `usePathSetting` (`design/path-setting.jsx`), read from Rust each time the `shell` row mounts.
+- View policy stays in the hook: auto-open, visibility, height, focus, restart on Enter. Hiding a panel (`toggle`) while the focus is inside it (xterm's textarea) moves the focus to the composer's prompt box, so keys never land on `<body>`. The hook returns the shared `height`. The Settings shell menu keeps its own state in `usePathSetting` (`design/path-setting.jsx`), read from Rust each time the `shell` row mounts.
 
 ### Per-tab xterm instances
 
@@ -181,7 +181,7 @@ The panel head shows `shellLabel(status.shell)`, the shell actually running. Set
 
 xterm's focus target is a hidden `<textarea>`, and the global keymap listens on `window` and ignores events with `defaultPrevented`. xterm consumes (and prevents) the keys it handles, so those never reach the keymap; `attachCustomKeyEventHandler` (installed by `createXterm`, `app/terminal-xterm.js`) returns `false` for a keydown that `OMP_KEYMAP.guestShouldBypass` (`app/keymap.js`) accepts, which hands it back to the page. The browser panel's page uses the same function, so both guests leave the same keys to the app. The decision follows the **resolved keymap**, not a fixed list: the chord is normalised with `OMP_KEYMAP.chordFromEvent` like the keymap itself and looked up with `OMP_KEYMAP.lookup`, so a rebinding in Settings → Shortcuts applies inside the terminal too. A chord goes to the app iff it resolves to a `global`-scope action and
 
-- the action is marked `fromGuest` in `KEYMAP_ACTIONS` (`app/keymap.js`): `desktop.terminal.toggle` (the chord that opened the panel also closes it, whatever it is bound to), `desktop.browser.toggle` and `desktop.tab.next` / `desktop.tab.prev`; or
+- the action is marked `fromGuest` in `KEYMAP_ACTIONS` (`app/keymap.js`): `desktop.terminal.toggle` (the chord that opened the panel also closes it, whatever it is bound to), `desktop.browser.toggle`, `desktop.files.toggle` and `desktop.tab.next` / `desktop.tab.prev`; or
 - the chord has the `super` modifier (the macOS ⌘ forms of new/close tab, command bridge, history, sidebar, shortcuts, settings, toggle); or
 - off macOS, it has both `ctrl` and `shift` (`ctrl+shift+p`, `ctrl+shift+pageup`, … — no shell binds these).
 

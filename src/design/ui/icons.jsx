@@ -1,4 +1,4 @@
-/* ui/icons.jsx — OMP Icon Pack v1 (59 icons) + Icon component +
+/* ui/icons.jsx — OMP Icon Pack v1 + Icon component +
    TOOL_META map (tool name → colour, icon, label). */
 
 // Each icon has a single accent dot. Props: name, size, color, dotColor.
@@ -30,6 +30,7 @@ const _ICON_PATHS = {
   bolt:    { p: ['<path d="M9 1L3 9h4l-1 6 6-8H8z"/>'],                                                                                                                                                                                       d: [12,3]    },
   radar:   { p: ['<circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="3"/><path d="M8 8l4-3"/>'],                                                                                                                                           d: [12,5]    },
   voice:   { p: ['<rect x="6" y="2" width="4" height="8" rx="2"/><path d="M3 8a5 5 0 0 0 10 0M8 13v2"/>'],                                                                                                                                    d: [8,2]     },
+  conversation: { p: ['<path d="M14 9a3 3 0 0 1-3 3H6l-4 2V5a3 3 0 0 1 3-3h6a3 3 0 0 1 3 3z"/><path d="M5 6v2M8 4.5v5M11 6v2"/>'], d: [13,3] },
   context: { p: ['<circle cx="8" cy="8" r="6"/><path d="M8 8 L8 2 A6 6 0 0 1 13 11 Z" fill="currentColor" fill-opacity=".15" stroke-width="0"/><circle cx="8" cy="8" r="6"/>'],                                                             d: [13,11]   },
   tokens:  { p: ['<circle cx="5" cy="8" r="3"/><circle cx="11" cy="8" r="3"/>'],                                                                                                                                                              d: [11,8]    },
   cost:    { p: ['<circle cx="8" cy="8" r="6"/><path d="M10 6H7a1.5 1.5 0 0 0 0 3h2a1.5 1.5 0 0 1 0 3H6"/><path d="M8 4v8"/>'],                                                                                                             d: [8,4]     },
@@ -41,6 +42,7 @@ const _ICON_PATHS = {
   back:    { p: ['<path d="M13 8H3"/><path d="M7 4L3 8l4 4"/>'],                                                                                                                                                                              d: [3,8]     },
   external:{ p: ['<path d="M9 3h4v4"/><path d="M13 3l-6 6"/><path d="M11 9v3a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h3"/>'],                                                                                                         d: [13,3]    },
   sidebar: { p: ['<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M6 3v10"/>'],                                                                                                                                                      d: [6,3]     },
+  rail:    { p: ['<rect x="2" y="3" width="12" height="10" rx="1"/><path d="M10 3v10"/>'],                                                                                                                                                     d: [10,3]    },
   split:   { p: ['<rect x="2" y="2" width="12" height="12" rx="1"/><path d="M8 2v12"/>'],                                                                                                                                                      d: [8,2]     },
   grid:    { p: ['<rect x="2" y="2" width="5" height="5"/><rect x="9" y="2" width="5" height="5"/><rect x="2" y="9" width="5" height="5"/><rect x="9" y="9" width="5" height="5"/>'],                                                        d: [14,2]    },
   minimap: { p: ['<rect x="2" y="2" width="12" height="12" rx="1"/><rect x="4" y="6" width="8" height="3"/>'],                                                                                                                                d: [14,2]    },

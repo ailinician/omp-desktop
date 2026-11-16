@@ -2,6 +2,7 @@
    Pairs with styles.css (design tokens). */
 
 @import "./chrome.css";
+@import "./toolbar.css";
 @import "./stage.css";
 @import "./sidebar.css";
 @import "./chat.css";
@@ -20,4 +21,5 @@
 @import "./git.css";
 @import "./subagents.css";
 @import "./tree.css";
+@import "./files.css";
 @import "./terminal.css";

@@ -24,6 +24,40 @@
   margin-bottom: 6px;
 }
 
+/* Live voice stays inside the composer; captions are ephemeral, not chat. */
+.live-voice {
+  margin: 0 2px 8px; padding: 8px;
+  border: 1px solid var(--line-bright); border-radius: 8px;
+  background: var(--bg-elevated); font-size: var(--d-text-xs);
+}
+.live-voice-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.live-voice-title { color: var(--accent); font-family: var(--font-mono); }
+.live-voice-phase, .live-voice-head label { color: var(--fg-2); }
+.live-voice-head label { display: inline-flex; align-items: center; gap: 4px; }
+.live-voice-head meter { width: 48px; height: 8px; accent-color: var(--accent); }
+.live-voice-spacer { flex: 1; }
+.live-voice-error { margin-top: 6px; color: var(--rose); overflow-wrap: anywhere; }
+.live-voice-captions { list-style: none; padding: 0; margin: 6px 0 0; max-height: 120px; overflow-y: auto; }
+.live-voice-captions li { display: flex; gap: 8px; padding: 3px 0; color: var(--fg-2); overflow-wrap: anywhere; }
+.live-voice-role { flex: none; min-width: 4.5em; color: var(--fg-3); font-family: var(--font-mono); }
+.live-voice-interim { color: var(--fg-3); }
+.btn.icon.live-voice-mic-on { color: var(--accent); background: var(--accent-soft); }
+/* The microphone's equalizer (design/voice-spectrum.jsx) right above the
+   input while voice capture records; the bars are canvas-drawn. */
+.voice-spectrum {
+  height: 44px; margin: 0 2px 8px;
+  border: 1px solid var(--line-bright); border-radius: 8px;
+  background:
+    radial-gradient(120% 90% at 50% 100%, var(--accent-soft), transparent 70%),
+    var(--bg-elevated);
+  overflow: hidden;
+  animation: voice-spectrum-in .22s ease-out;
+}
+.voice-spectrum canvas { display: block; width: 100%; height: 100%; }
+@keyframes voice-spectrum-in { from { opacity: 0; transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) { .voice-spectrum { animation: none; } }
+.dictation-preview { margin-top: 6px; max-height: 120px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg-2); }
+
 /* Image attachments, and the collapsed-paste chips (#31) under the same layout.
    The queue strip below shares their spacing. */
 .attach-strip, .paste-strip, .queue-strip { padding: 0 2px 8px; }
@@ -81,8 +115,9 @@
 /* `.btn.icon.ghost` (styles.css), sized down; the inset ring stays inside
    the strip's scroll box. */
 .btn.icon.queue-btn { flex: none; width: 1.25rem; height: 1.25rem; }
-.queue-btn:disabled { opacity: .4; cursor: default; }
-.btn.queue-btn:disabled:hover { background: transparent; color: var(--fg-3); }
+/* `.btn` has no disabled look of its own. */
+.queue-btn:disabled, .btn.voice-mode-btn:disabled, .live-voice .btn:disabled { opacity: .4; cursor: default; }
+.btn.queue-btn:disabled:hover, .btn.voice-mode-btn:disabled:hover, .live-voice .btn:disabled:hover { background: transparent; color: var(--fg-3); }
 .btn.queue-btn:focus-visible { outline-offset: -2px; }
 
 .composer-row {
@@ -143,17 +178,11 @@
   /* As wide as its longest row, so each hint stays on one line. */
   width: max-content; min-width: 240px; max-width: min(420px, calc(100vw - 32px));
 }
-.thinking-pop.busy, .thinking-pop.busy .thinking-item { cursor: progress; }
 .thinking-pop-head, .thinking-pop-foot {
   padding: 5px 8px 4px;
   font-size: var(--d-text-xs); color: var(--fg-4);
 }
 .thinking-pop-foot { border-top: 1px solid var(--line-soft); margin-top: 3px; }
-.thinking-pop-note { padding: 5px 8px; font-size: var(--d-text-xs); color: var(--fg-3); }
-.thinking-pop-note.error { color: var(--rose); overflow-wrap: anywhere; }
-/* Row base shared with .profile-item (chrome.css); the hint sits on the
-   name's baseline. */
-.thinking-item { align-items: baseline; }
 /* Fixed gutter so the names align whether or not a row is checked. */
 .thinking-item-mark { width: 10px; flex: none; align-self: center; display: inline-flex; }
 .thinking-item-name { flex: none; min-width: 56px; }

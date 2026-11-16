@@ -12,14 +12,9 @@
 const { Icon, TabRunDot, TabLabel, RenameField } = window;
 const { groupTabs, groupRunState, groupTarget, membersNewestFirst, basename, parentName } = window.OMP_PROJECT_NAV;
 
-// Same guard as chrome.jsx's copy: the registry may not be loaded.
-function sidebarHint(actionId, fallback) {
-  return window.OMP_KEYMAP ? window.OMP_KEYMAP.hintFor(actionId) : fallback;
-}
-
 function ProjectSidebar({
-  tabs, activeId, recents, profileLabel,
-  onSelectTab, onCloseTab, onRenameTab, onNewInProject, onOpenRecent, onForgetRecent, onOpenFolder, onHide, onReorder,
+  tabs, activeId, recents, profileLabel, projectAppearances,
+  onSelectTab, onCloseTab, onRenameTab, onNewInProject, onOpenRecent, onForgetRecent, onOpenFolder, onReorder,
 }) {
   // Group keys the user folded. Not persisted: tab ids (and so pathless
   // groups' keys) don't survive a restart anyway.
@@ -34,36 +29,35 @@ function ProjectSidebar({
       onCommit={name => onRenameTab(t.id, name)}
       onClose={() => setRenaming(null)} />
   );
-  const renameButton = t => (
-    <button className="psb-act" title={_t("rename conversation")} onClick={() => startRename(t.id)}>
-      <Icon name="edit" size={10} />
+  // A row's icon action (new conversation, rename, close, forget recent).
+  const actButton = (title, icon, size, onClick) => (
+    <button className="psb-act" title={title} onClick={onClick}>
+      <Icon name={icon} size={size} />
     </button>
   );
+  const renameButton = t => actButton(OMP_TR("rename conversation"), "edit", 10, () => startRename(t.id));
+  const closeButton = id => actButton(OMP_TR("close tab"), "close", 9, () => onCloseTab(id));
   const groups = groupTabs(tabs);
   // Drag to reorder (#40), the same lists as the tab bar's: projects (a
   // project's rows move as one block), and members within their project.
   const reorder = window.useDragReorder(onReorder);
-  const hideHint = sidebarHint("desktop.sidebar.toggle", "Ctrl+B");
 
   return (
-    <aside className="project-sidebar" aria-label="projects">
-      <div className="psb-head">
-        <span>{_t("projects")}</span>
-        <button className="psb-act" title={`${_t("hide sidebar")} (${hideHint})`} onClick={onHide}>
-          <Icon name="sidebar" size={11} />
-        </button>
-      </div>
+    <aside className="project-sidebar" aria-label={OMP_TR("projects")}>
+      <div className="psb-head">{OMP_TR("projects")}</div>
 
       <div className="psb-scroll" onPointerDown={reorder.onPointerDown}>
-        <div className="psb-section">{_t("open")}</div>
-        {groups.length === 0 && <div className="psb-empty">{_t("no open tabs")}</div>}
+        <div className="psb-section">{OMP_TR("open tabs")}</div>
+        {groups.length === 0 && <div className="psb-empty">{OMP_TR("no open tabs")}</div>}
         {groups.map(group => {
           const multi = group.tabs.length > 1;
           const expanded = multi && !collapsed[group.key];
           const containsActive = group.tabs.some(t => t.id === activeId);
           const profile = profileLabel(group.profile);
           const editing = !multi && renaming === group.tabs[0].id;
-          const folderIcon = <Icon name="folder" size={11} color={containsActive ? "var(--accent)" : "var(--fg-4)"} />;
+          const appearance = window.OMP_PROJECT_APPEARANCE.forProject(projectAppearances, group.path);
+          const folderColor = appearance?.accent || (containsActive ? "var(--accent)" : "var(--fg-4)");
+          const folderIcon = <Icon name="folder" size={11} color={folderColor} />;
           // Single-tab cards show `folder · title` (#46), which ellipsizes.
           // The tooltip keeps the full title plus the folder path; multi-tab
           // project rows still tip the path (member rows tip each tab name).
@@ -80,7 +74,7 @@ function ProjectSidebar({
               <div className={`psb-row psb-project ${containsActive && !expanded ? "active" : ""}`}>
                 {multi ? (
                   <button className={`psb-chev ${expanded ? "open" : ""}`}
-                    title={expanded ? _t("collapse") : _t("expand")} aria-expanded={expanded}
+                    title={expanded ? OMP_TR("collapse") : OMP_TR("expand")} aria-expanded={expanded}
                     onClick={e => { e.stopPropagation(); toggle(group.key); }}>
                     <Icon name="chevR" size={10} />
                   </button>
@@ -99,25 +93,16 @@ function ProjectSidebar({
                       ? <span className="psb-name">{group.name}</span>
                       : <TabLabel tab={group.tabs[0]} className="psb-name" />}
                     {profile && (
-                      <span className="chip muted tab-profile" title={`${_t("profile")}: ${profile}`}>{profile}</span>
+                      <span className="chip muted tab-profile" title={`${OMP_TR("profile:")} ${profile}`}>{profile}</span>
                     )}
                     <TabRunDot state={groupRunState(group.tabs)} />
                     {multi && <span className="tab-count psb-count">{group.tabs.length}</span>}
                   </button>
                 )}
                 <span className="psb-actions">
-                  {group.path && (
-                    <button className="psb-act" title={_t("new conversation here")}
-                      onClick={() => onNewInProject(group.path, group.profile)}>
-                      <Icon name="plus" size={10} />
-                    </button>
-                  )}
+                  {group.path && actButton(OMP_TR("new conversation here"), "plus", 10, () => onNewInProject(group.path, group.profile))}
                   {!multi && !editing && renameButton(group.tabs[0])}
-                  {!multi && (
-                    <button className="psb-act" title={_t("close tab")} onClick={() => onCloseTab(group.tabs[0].id)}>
-                      <Icon name="close" size={9} />
-                    </button>
-                  )}
+                  {!multi && closeButton(group.tabs[0].id)}
                 </span>
               </div>
               {expanded && membersNewestFirst(group).map(t => (
@@ -134,9 +119,7 @@ function ProjectSidebar({
                   )}
                   <span className="psb-actions">
                     {renaming !== t.id && renameButton(t)}
-                    <button className="psb-act" title={_t("close tab")} onClick={() => onCloseTab(t.id)}>
-                      <Icon name="close" size={9} />
-                    </button>
+                    {closeButton(t.id)}
                   </span>
                 </div>
               ))}
@@ -144,8 +127,8 @@ function ProjectSidebar({
           );
         })}
 
-        <div className="psb-section">{_t("recent")}</div>
-        {recents.length === 0 && <div className="psb-empty">{_t("no recent projects")}</div>}
+        <div className="psb-section">{OMP_TR("recent")}</div>
+        {recents.length === 0 && <div className="psb-empty">{OMP_TR("no recent projects")}</div>}
         {recents.map(r => (
           <div key={r.path} className="psb-row psb-recent">
             <span className="psb-chev-spacer" />
@@ -157,16 +140,14 @@ function ProjectSidebar({
               </span>
             </button>
             <span className="psb-actions">
-              <button className="psb-act" title={_t("remove from recent")} onClick={() => onForgetRecent(r.path)}>
-                <Icon name="close" size={9} />
-              </button>
+              {actButton(OMP_TR("remove from recent"), "close", 9, () => onForgetRecent(r.path))}
             </span>
           </div>
         ))}
       </div>
 
       <button className="psb-foot" onClick={onOpenFolder}>
-        <Icon name="plus" size={11} />{_t("open folder…")}
+        <Icon name="plus" size={11} />{OMP_TR("open folder…")}
       </button>
     </aside>
   );

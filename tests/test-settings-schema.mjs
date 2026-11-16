@@ -14,7 +14,8 @@ import { dirname, join } from "node:path";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const win = {};
 // The schema loads before the modules it reads bounds from: they are read late.
-for (const f of ["constants.js", "settings-schema.js", "accent.js", "chat-collapse.js", "prompt-history.js", "session-ui.js", "keymap.js"]) {
+// app/i18n.js precedes it (search indexes translated text), as in index.html.
+for (const f of ["i18n.js", "constants.js", "settings-schema.js", "accent.js", "chat-collapse.js", "prompt-history.js", "session-ui.js", "keymap.js", "backdrops.js"]) {
   // eslint-disable-next-line no-new-func
   new Function("window", readFileSync(join(root, "src/app", f), "utf8"))(win);
 }
@@ -56,8 +57,15 @@ check("every tweak row names a TWEAK_DEFAULTS key whose default is valid", () =>
 
 check("custom rows name the renderers the page expects", () => {
   assert.deepEqual(S.rows().filter(r => r.kind === "custom").map(r => r.type).sort(),
-    ["approvalMode", "approvalRules", "chromium", "goalContinue", "remoteCert", "remoteDevices", "remotePair", "remotePush", "remoteServer", "shell", "shortcuts", "startupProfile", "terminalHeight", "version", "widgets", "widths"]);
+    ["approvalMode", "approvalRules", "chromium", "goalContinue", "projectAppearance", "remoteCert", "remoteDevices", "remotePair", "remotePush", "remoteServer", "shell", "shortcuts", "startupProfile", "terminalHeight", "version", "widgets", "widths"]);
   for (const r of S.rows().filter(r => r.kind === "custom")) for (const k of r.keys ?? []) assert.ok(k in D, k);
+});
+
+check("the projectAppearance row owns no tweak keys, so badges and section reset ignore every project entry", () => {
+  const r = S.rows().find(x => x.type === "projectAppearance");
+  const edited = vals({ projectAppearance: { "/a": { accent: "#112233" } } });
+  assert.equal(S.isModified(r, edited), false);
+  assert.equal("projectAppearance" in S.resetEdits("appearance", edited), false);
 });
 
 check("bounds come from the owning modules", () => {
@@ -69,6 +77,12 @@ check("bounds come from the owning modules", () => {
   assert.equal(row("pasteCollapseLines").max, win.OMP_SESSION_UI.PASTE_LINES_MAX);
   assert.deepEqual(row("foldTools").options.map(o => o.value), [...win.OMP_COLLAPSE.MODES]);
   assert.deepEqual([row("fontSize").min, row("fontSize").max, row("fontSize").step], [75, 150, 5]);
+});
+
+check("a stale stored start screen falls back to the default", () => {
+  const r = row("startScreen");
+  assert.equal(S.clamp(r, "neural"), "neural");
+  assert.equal(S.clamp(r, "starfield"), D.startScreen);
 });
 
 check("clamp keeps values in bounds and on the step", () => {
@@ -147,6 +161,14 @@ check("resetEdits resets only changed rows; theme brings its accent", () => {
   const all = S.resetEdits("all", v);
   assert.equal(all.showRadar, true);
   assert.deepEqual(S.resetRow(row("accent"), vals({ theme: "daylight", accent: "#fff" })), { accent: S.themeAccent("daylight") });
+});
+
+check("Changes participates in Rail search, modified counts and reset", () => {
+  const v = vals({ showChanges: false });
+  assert.equal(S.value(row("showChanges"), v), false);
+  assert.equal(S.modifiedCount("rail", v), 1);
+  assert.deepEqual(S.resetEdits("rail", v), { showChanges: true });
+  assert.ok(S.search("pull request", v).groups.some(g => g.sectionId === "rail" && g.rows.some(r => r.id === "showChanges")));
 });
 
 check("resetRows resets only the given rows (the search matches)", () => {

@@ -316,6 +316,7 @@ function liveBridge() {
     OMP_SESSION_PREFS: { fromTweaks: () => ({}) }, OMP_TWEAKS_STORE: { read: () => ({}) },
     INTENT_FRAMING: () => "", timeNow: () => "00:00",
   };
+  runInNewContext(source("src/app/live-voice.js"), { window });
   const logs = [], calls = [], listeners = new Map();
   runInNewContext(source("src/live.js"), { window, console: { log() {}, error: (...args) => logs.push(args) } });
   let fail = false, stopped = 0;
@@ -619,7 +620,12 @@ function remoteRows() {
     useCallback: fn => fn,
   };
   const window = { Icon: {} };
-  const scope = { window, React };
+  // app/i18n.js globals: in the browser they are window properties, so the
+  // rows' bare OMP_TR(...) resolves; a vm context needs them in scope.
+  const i18n = { t: (s) => s, plural: (n, one, other) => (n === 1 ? one : other) };
+  window.OMP_I18N = i18n;
+  window.OMP_TR = i18n.t;
+  const scope = { window, React, OMP_TR: i18n.t, OMP_I18N: i18n };
   for (const file of ["rows-remote-shared.jsx", "rows-remote-server.jsx", "rows-remote-phones.jsx"]) {
     const { code } = Babel.transform(source(`src/design/settings/${file}`), { presets: ["react"] });
     runInNewContext(code, scope);
@@ -660,6 +666,36 @@ test("two delayed push toggles both survive: nested push merges inside the queue
     await flush();
   }
   assert.deepEqual(own(applies[3].s.push), { enabled: true, questions: true, finished: true, contact: "fresh@omp-desktop.app" });
+});
+
+test("the only-while-locked switch shows only where lock detection exists and patches push", async () => {
+  const { window, reset } = remoteRows();
+  const find = (node, label) => {
+    if (!node || typeof node !== "object") return null;
+    if (node.props?.label === label) return node;
+    for (const child of node.children.flat()) { const hit = find(child, label); if (hit) return hit; }
+    return null;
+  };
+  const LABEL = "Notify only while the desktop is locked";
+  const rendered = async (lockDetection, applies = []) => {
+    const settings = { enabled: true, cert: {}, push: { enabled: true, questions: true, finished: true, contact: "me@example.test", onlyWhenLocked: false } };
+    const bridge = {
+      onRemoteEvent: () => () => {}, remoteStatus: async () => ({ settings, devices: [], lockDetection }),
+      remoteDefaultContact: async () => "",
+      remoteApply: async s => { applies.push(s); return { ok: true, value: { settings: s, devices: [], lockDetection } }; },
+    };
+    const render = () => { reset(); return window.OMP_SETTINGS_ROWS.remotePush({ row: {}, ctx: { bridge }, query: "" }); };
+    render(); await flush(); await flush();
+    return render();
+  };
+  assert.equal(find(await rendered(false), LABEL), null, "hidden without lock detection");
+  const applies = [];
+  const tree = await rendered(true, applies);
+  find(tree, LABEL).props.onChange(true);
+  await flush(); await flush();
+  assert.equal(applies.length, 1);
+  assert.equal(applies[0].push.onlyWhenLocked, true);
+  assert.equal(applies[0].push.contact, "me@example.test", "the rest of push is kept");
 });
 
 // ---- settings: Enter confirms an IME candidate, it does not commit the field --

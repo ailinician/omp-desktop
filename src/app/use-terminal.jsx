@@ -20,7 +20,7 @@
    (or failed) shell starts a new one; auto-open, height and focus (a
    panel hidden while it holds the focus hands it to the composer).
 
-   Returns `{ state, height, toggle, close, setHeight, mountFor,
+   Returns `{ state, height, toggle, setHeight, mountFor,
    copySelection }`. `height` is the panel height every
    panel shares, the `terminalHeight` tweak (its default lives in
    TWEAK_DEFAULTS). Every panel body is watched with a ResizeObserver:
@@ -29,7 +29,7 @@
    ═════════════════════════════════════════════════════════════════════ */
 
 const {
-  EMPTY: _UT_EMPTY, openPanel: _UT_open, closePanel: _UT_close, togglePanel: _UT_toggle,
+  EMPTY: _UT_EMPTY, openPanel: _UT_open, togglePanel: _UT_toggle,
   applyStatus: _UT_applyStatus, applyExit: _UT_applyExit, spawnFailed: _UT_spawnFailed,
   needsSpawn: _UT_needsSpawn, shellLive: _UT_shellLive, canRestart: _UT_canRestart,
   entryOf: _UT_entryOf,
@@ -48,7 +48,7 @@ const {
 
 const _UT_FONT_PX = 13;
 
-function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) {
+function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak, appearance }) {
   const [state, setState] = React.useState(_UT_EMPTY);
   const stateRef = React.useRef(state);
   stateRef.current = state;
@@ -276,23 +276,17 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
   }, []);
 
   const focus = React.useCallback((sid) => recs.current.get(sid)?.term.focus(), []);
-  // Hiding a panel that holds the focus (xterm's textarea, the close
-  // button) would drop it on <body>, where keys reach nothing: the
-  // composer's prompt box takes it instead.
-  const releaseFocus = React.useCallback((sid) => {
-    const panel = recs.current.get(sid)?.term.element?.closest(".term-panel");
-    if (!panel?.contains(document.activeElement)) return;
-    document.querySelector(".composer-input textarea")?.focus();
-  }, []);
+  // Hiding a panel that holds the focus (xterm's textarea) would drop it
+  // on <body>, where keys reach nothing: the composer's prompt box takes
+  // it instead.
   const toggle = React.useCallback((sid) => {
     if (!sid) return;
-    if (_UT_entryOf(stateRef.current, sid).open) releaseFocus(sid);
+    if (_UT_entryOf(stateRef.current, sid).open) {
+      const panel = recs.current.get(sid)?.term.element?.closest(".term-panel");
+      if (panel?.contains(document.activeElement)) document.querySelector(".composer-input textarea")?.focus();
+    }
     setState((s) => _UT_toggle(s, sid));
-  }, [releaseFocus]);
-  const close = React.useCallback((sid) => {
-    releaseFocus(sid);
-    setState((s) => _UT_close(s, sid));
-  }, [releaseFocus]);
+  }, []);
   const setHeight = React.useCallback((px) => setTweak("terminalHeight", px), [setTweak]);
 
   // A visible panel: size the xterm to it, start the shell of a tab that has
@@ -328,7 +322,10 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
     for (const sid of [...recs.current.keys()]) if (!sessionIds.includes(sid)) dispose(sid);
   }, [idsKey, dispose]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Theme, font and scrollback follow the tweaks for every instance.
+  // Theme, font and scrollback follow the tweaks for every instance. The
+  // theme is read back from the CSS useThemeEffect just wrote, so it re-runs
+  // when the rendered project's resolved theme or accent changes (`appearance`
+  // falls back to the global tweaks, so it covers global edits too).
   React.useEffect(() => {
     for (const [sid, rec] of recs.current) {
       rec.term.options.theme = _UT_theme();
@@ -337,9 +334,9 @@ function useTerminal({ bridge, activeSessionId, sessionIds, tweaks, setTweak }) 
       if (rec.term.options.scrollback !== scrollback) rec.term.options.scrollback = scrollback;
       fit(sid);
     }
-  }, [tweaks.theme, tweaks.accent, fontSize, scrollback, fit]);
+  }, [appearance.theme, appearance.accent, fontSize, scrollback, fit]);
 
-  return { state, height, toggle, close, setHeight, mountFor, copySelection };
+  return { state, height, toggle, setHeight, mountFor, copySelection };
 }
 
 Object.assign(window, { useTerminal });

@@ -26,10 +26,7 @@ function PromptHistoryModal({ open, entries, onClose, onPick }) {
 
   const clampedIdx = entries.length > 0 ? Math.max(0, Math.min(activeIdx, entries.length - 1)) : 0;
 
-  React.useEffect(() => {
-    if (!open || !listRef.current) return;
-    listRef.current.children[clampedIdx]?.scrollIntoView({ block: "nearest" });
-  }, [clampedIdx, open]);
+  window.useActiveRowIntoView(listRef, clampedIdx, open);
 
   const pick = (text) => { onPick?.(text); onClose(); };
 
@@ -39,31 +36,10 @@ function PromptHistoryModal({ open, entries, onClose, onPick }) {
   // before the event ever reaches the composer's onKeyDown — same
   // pattern as settings/shortcuts-editor.jsx's chord recorder. Modified keys are
   // let through untouched so Ctrl+Up still reaches the keymap toggle.
-  React.useEffect(() => {
-    if (!open) return;
-    const onKey = (e) => {
-      if (e.ctrlKey || e.altKey || e.metaKey) return;
-      if (e.key === "Escape") {
-        e.preventDefault(); e.stopPropagation();
-        onClose();
-      } else if (e.key === "ArrowDown") {
-        e.preventDefault(); e.stopPropagation();
-        setActiveIdx(Math.max(0, Math.min(clampedIdx + 1, entries.length - 1)));
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault(); e.stopPropagation();
-        setActiveIdx(Math.max(clampedIdx - 1, 0));
-      } else if (e.key === "Enter") {
-        // Swallowed unconditionally, even with an empty list (nothing to
-        // pick): this listener exists precisely so Enter can never reach
-        // the composer's send() while the picker is open, regardless of
-        // whether there's an entry under the cursor.
-        e.preventDefault(); e.stopPropagation();
-        if (entries[clampedIdx]) pick(entries[clampedIdx]);
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [open, onClose, entries, clampedIdx]);
+  window.useListKeys({
+    open, count: entries.length, index: clampedIdx, setIndex: setActiveIdx,
+    onEnter: i => pick(entries[i]), onClose, guard: true,
+  });
 
   if (!open) return null;
 
@@ -72,16 +48,16 @@ function PromptHistoryModal({ open, entries, onClose, onPick }) {
       <div ref={containerRef} tabIndex={-1} className="bridge slide-in" onClick={e => e.stopPropagation()} style={{ width: "min(640px, calc(100vw - 32px))", maxHeight: "72vh", outline: "none" }}>
         <div className="bridge-input-row" style={{ padding: "12px 16px", gap: 10 }}>
           <Icon name="clock" size={16} color="var(--accent)" />
-          <span style={{ color: "var(--fg)", fontWeight: 550, flex: 1 }}>Prompt history</span>
+          <span style={{ color: "var(--fg)", fontWeight: 550, flex: 1 }}>{OMP_TR("Prompt history")}</span>
           <span className="mono" style={{ color: "var(--fg-4)", fontSize: "var(--d-text-xs)" }}>
             {entries.length} {entries.length === 1 ? "prompt" : "prompts"}
           </span>
-          <span className="kbd">esc</span>
+          <span className="kbd">{OMP_TR("esc")}</span>
         </div>
 
         <div ref={listRef} className="bridge-body" style={{ maxHeight: "56vh", padding: "6px 8px" }}>
           {entries.length === 0 && (
-            <div className="bridge-empty">No prompts sent in this tab yet.</div>
+            <div className="bridge-empty">{OMP_TR("No prompts sent in this tab yet.")}</div>
           )}
           {entries.map((text, idx) => {
             const isSelected = idx === clampedIdx;
@@ -112,9 +88,9 @@ function PromptHistoryModal({ open, entries, onClose, onPick }) {
         </div>
 
         <div className="bridge-foot mono" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span className="kbd">↑↓</span> navigate
-          <span className="kbd">↵</span> insert into composer
-          <span className="kbd">esc</span> close
+          <span className="kbd">↑↓</span> {OMP_TR("navigate")}
+          <span className="kbd">↵</span> {OMP_TR("insert into composer")}
+          <span className="kbd">{OMP_TR("esc")}</span> {OMP_TR("close")}
         </div>
       </div>
     </div>

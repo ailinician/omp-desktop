@@ -1,7 +1,8 @@
 [package]
 name = "omp-desktop"
-version = "0.12.0"
+version = "0.15.0"
 edition = "2021"
+rust-version = "1.98"
 
 [lib]
 name = "omp_desktop_lib"
@@ -30,6 +31,11 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 # Read-only access to omp's own `agent.db` (model MRU for the picker, #11).
 # `bundled` compiles SQLite in, so no system library is needed on any OS.
 rusqlite = { version = "0.40", features = ["bundled"] }
+# The composer's voice spectrum (`src/voice_spectrum/`): the app reads the
+# default microphone itself (omp's capture is in its own process) and turns
+# it into equalizer bands. ALSA on Linux (`libasound2-dev` to build).
+cpal = "0.18"
+realfft = "3.5"
 # The terminal panel's pseudo-terminal (`src/terminal/`): a shell per tab.
 portable-pty = "0.9"
 # Terminal output travels as base64 in JSON event payloads. Already in the
@@ -52,6 +58,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_System_JobObjects",
+    # WTS session flags: the screen-lock probe (`remote/lock.rs`).
+    "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
 ] }
 # Machine/user PATH for omp and git children (`child_path.rs`, #34). Already
@@ -64,6 +72,17 @@ windows-registry = "0.6"
 # `RunEvent::Opened` and needs no plugin - see `src/external_open.rs`.
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"
+
+# Screen-lock probe for push-only-while-locked (`remote/lock.rs`). All of
+# these crates are already in the tree (macOS via tauri/wry, zbus via
+# tauri-plugin-single-instance); only the feature set is chosen here.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGSession"] }
+
+# Linux: logind's `LockedHint` over the system bus.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

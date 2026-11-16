@@ -6,6 +6,91 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-14
+
+### Added
+
+- A project can have its own theme and accent: Settings → Appearance → Project colours sets them for the rendered tab's folder, every other project keeps the global pair. The sidebar tints the project's folder glyph with its accent, and switching tabs applies that project's palette at once, terminal included. Stored as `projectAppearance` in the window's tweaks, keyed by the normalised project path.
+
+## [0.14.1] - 2026-11-13
+
+### Fixed
+
+- Linux: the installed `.desktop` entry (`.deb`, `.rpm`, AppImage) no longer carries the template's explanatory comments, and lists the app under Development instead of an empty category.
+
+### Changed
+
+- Building from source declares its minimum Rust version (`rust-version = "1.98"`), so an older toolchain fails with a clear "requires rustc 1.98" message instead of an unstable-feature error.
+
+## [0.14.0] - 2026-11-09
+
+### Added
+
+- The app's own interface can speak Chinese: Settings → Appearance → Language, where `auto` follows the system language. Strings are keyed by their English source (`app/i18n.js`, `OMP_TR`), so a missing translation falls back to English instead of blanking out. The whole desktop chrome is translated — Settings and its search, window chrome, sidebar, composer, chat cards, modals, terminal and browser panels, keymap action labels and the desktop slash-command hints. omp's own text — replies, tool output, ask questions, model names — keeps its language. Contract: `docs/architecture/i18n.md`.
+- Files panel: a toolbar toggle (`Ctrl+Shift+M`) opens project files beside the chat, with the git browser's file tree and its filter box (a folder without git gets a search box instead). Pick lines on the line numbers or select text, then **explain** (mark it for an explanation) or **comment** (write what you want). Marks can span several files; each shows as a chip above the composer and they all go out with your next message as file locations (`path:from-to`), so the agent reads the lines itself — or send them on their own with "send now". The file preview's "Comment in files panel" and an Alt-click on a file link in a reply open a file there. A mark whose lines changed since is flagged. Details: `docs/architecture/file-comments.md`.
+
+## [0.13.3] - 2026-11-04
+
+### Fixed
+
+- Release pages on GitHub list what changed in that version (its CHANGELOG section) above the installation notes; before, only the in-app updater showed the changes (#75).
+
+## [0.13.2] - 2026-10-31
+
+### Added
+
+- The project's branch is a pill in the status bar; clicking it lists the other local and remote branches, newest first, with a filter, and a click switches the project folder to that branch (`git switch`; a remote branch gets a local branch tracking it). The branch you're on is left out, and so is a remote branch whose local branch already exists. If git refuses, for example because local changes would be overwritten, its message shows in the menu and nothing changes. While an agent works in the repository (a turn, a retry, a pending question or background jobs, in any tab on a folder of it) the list still opens but switching is disabled.
+
+### Changed
+
+- The branch moved from the title bar to the status bar.
+
+### Fixed
+
+- With no tab open, the title bar reads "OMP Desktop" instead of "OMP · OMP Desktop", and with a tab the "OMP ·" prefix sits on the project name's baseline instead of a pixel above it.
+
+## [0.13.1] - 2026-10-31
+
+### Added
+
+- The composer has separate one-click buttons for **Voice to text** and **Live conversation**. Live conversation (#68) is Codex only (its button is greyed out while the tab's profile has no Codex login) and connects to the native omp call with state, levels, captions, mute, pause, resume and end controls. Voice to text uses the profile's omp speech-to-text engine, previews dictation and appends the final text to the originating draft without sending a prompt or playing a reply. Switching tabs or opening Settings pauses live conversation and stops dictation; closing a tab ends capture. A failed stop keeps the active control visible for retry.
+- Settings → Composer → Voice → **Send voice to text on stop** (off by default): stopping voice to text yourself sends the draft with the dictated text instead of only filling it in.
+- A live equalizer of your microphone sits above the composer input while voice to text records or a live conversation is connected (and unmuted). The app analyses the default microphone itself (an FFT in Rust, 80 Hz to 8 kHz in 64 bars by default; Settings → Composer → Voice → **Spectrum bars** picks 16 to 128); nothing is recorded or kept. Linux builds now need `libasound2-dev`; the `.deb`/`.rpm` depend on ALSA.
+- Voice to text stops by itself after a pause in your speech: Settings → Composer → Voice → **Stop voice to text after a pause** (3 s by default; off, 1.5, 2 or 5 s). Together with send on stop, dictation is hands-free.
+
+### Changed
+
+- Live conversation uses a speech-bubble-and-waveform icon rather than a recording symbol, distinct from the dictation microphone.
+- Live conversation microphone and speaker meters now use a logarithmic −60 to 0 dBFS scale, displayed as bars without numeric clutter. Normal speech is readable instead of barely filling a linear bar; 0 dBFS is full scale. Audio gain is unchanged, and the RMS readings do not claim to detect sample-peak clipping.
+
+### Fixed
+
+- Live conversation no longer overfills the service's instruction limit on long or heavily escaped conversations. The complete startup template now has a conservative UTF-8 budget that includes JSON overhead; it preserves the original objective, saved intent and latest turn, with omitted/truncated history marked explicitly.
+- Live conversation captions automatically scroll to the latest speech as new turns arrive or the current transcript grows, instead of leaving ongoing dialogue below the visible history.
+- Live conversation keeps the tab's spoken discussion across pauses, tab switches, reconnects and ended calls. Pause turns off microphone and speaker; Resume explicitly reconnects. Every connection includes the current coding-chat history plus prior voice discussion, so a call started mid-chat knows the existing task, decisions and reported results instead of starting from no context. Voice history is memory-only for the tab's current coding conversation; oversized context is marked as truncated.
+- macOS microphone access (#68): the app now declares its microphone usage description and signs with the hardened-runtime audio-input entitlement, so native omp voice capture can request microphone access on behalf of OMP Desktop.
+
+## [0.13.0] - 2026-10-31
+
+### Added
+
+- Five new start screens for the empty workspace, next to the matrix rain: **Latent space** (code-token embeddings rotating in 3-D, with semantic queries retrieving their nearest neighbours), **Next token** (code written token by token, the top-k candidates and their probabilities at the cursor), **Agent loop** (tool calls flying from the model to tools orbiting the logo and back) **Forward pass** (a neural network firing on a window of code and predicting the next token) and **Attention** (a transformer generating code: multi-head self-attention over the tokens so far, under a causal mask, through stacked blocks). Latent space is the new default; pick another in Settings → Appearance → Start screen, where every tile is a live preview. Each screen draws the OMP-DESKTOP logo in its own style: the rain makes letter blocks flash, the letters form an embedding point cloud, the logo is typed in like generated code, a light sweep and result flares run across it with each agent turn, or the letters are built from neuron dots that fire with the forward pass. All screens follow the theme and accent, react subtly to the mouse moving over them, and show a still frame under reduced motion.
+
+- The ambient rail has a compact **Changes** card for the GitHub PR on the project's checked-out branch, with its title, repository/number, draft state and diff counts. Click the title to open it in your browser; the menu offers GitHub links, copy link, changed files, review comments and opt-in **Auto-fix** for failed CI and unresolved reviews. The card also shows the PR's CI: the step in progress with a spinner (or the outcome) and how many checks finished, a green/red dot per finished check (a progress bar for large matrices), and on click the full list of checks, each opening its CI page; while CI runs the card updates every 15 seconds. Discovery works with Auto-fix off and refreshes automatically on tab or branch changes, turn completion and returning focus, without a manual Refresh button. Only enabled Auto-fix tabs, or a PR whose CI is still running, keep checking in the background; with Auto-fix off, a card you can't see (focus layout, tree or browser panel open, window minimized) makes no GitHub requests and updates when it comes back. Repositories still reached through a renamed or transferred URL, and fork PRs from common branch names such as `main`, are found too. **Settings → Rail → Changes** uses the same persisted toggle as the other built-in cards; turning it off hides the card, stops monitoring and revokes Auto-fix in every tab. No GitHub App, webhook server or tunnel is required. Auto-fix asks the agent to fix, verify, commit and push changes and resolve only addressed threads. It is off by default, active-tab only, with existing tool approvals unchanged; requires authenticated GitHub CLI and a synchronized upstream branch. Without GitHub CLI (`gh`) the card stays hidden and appears once `gh` is installed; a signed-out `gh` shows an error asking for `gh auth login`. Auto-fix waits for GitHub to catch up after the agent pushes instead of pausing, the agent's own reply in a review thread does not send that thread again, and switching tabs while a fix prompt is being sent leaves Auto-fix on. Turning it off prevents new fixes, and Stop disables it too.
+
+### Changed
+
+- Streaming replies use omp's delta `message_update` frames: each frame carries only the new text instead of the whole reply so far. Replaying a recorded 8.7 MB session into a release build: 944 MB → 25 MB sent from omp to the window, a background tab catches up 6.7× faster (11.5 s → 1.7 s) with 4× less window CPU, and the window's JavaScript memory drops from 3 GB to 150 MB. A tab that comes back to a reply still streaming after a long time in the background shows it whole.
+- OMP Desktop now requires omp 18.13.2 or newer. A tab started against an older omp does not start; its note names the installed and the required version, and an `omp update` takes effect for the next tab without restarting the app.
+- Endless status animations (the tab's running dot, live dots, the activity radar, "running" chips, shimmer text) step through a few frames per keyframe interval instead of redrawing at the display's refresh rate, and the status bar and model pill dots and the activity radar move only while the agent is working (the dots used to pulse all the time, the radar until the next tool call). Together with the delta frames, the window's CPU use while the agent streams drops by three quarters (11.0 s → 2.8 s per 30 s, most of it in the GPU process), and an idle window no longer keeps the GPU busy (3.5 s → 0.08 s per 15 s).
+- A toolbar between the title bar and the tabs now holds the app's buttons, with bigger icons. On the left: the project sidebar and ambient rail toggles, open project and history; the subagent manager, conversation tree, browser and terminal toggles (each toggle lit while open, with the open tree's refresh and the browser's annotate and full-view buttons beside their toggle); git browser and usage statistics. On the right: approvals with the mode in use, the command bridge, the tab's profile and settings. They used to be spread over the title bar, the tab bar, the status bar and the heads of the rail and the side panels, whose close buttons are gone: the panel's toolbar toggle closes it, and the rail toggle brings a hidden rail back without going through Settings. The status bar keeps the connection, context, cost, speed and the todo count, and now shows the app version (click to check for updates) and an available update at its right end.
+
+## [0.12.1] - 2026-10-21
+
+### Added
+
+- Remote access: Settings → Remote access → Notifications has an "Only while the desktop is locked" switch (off by default), so the phone is notified only when you are away from the computer. Works on macOS, Windows and Linux; on Linux it needs a screen locker that reports the lock to systemd-logind (GNOME and KDE Plasma do). "Send test notification" ignores it.
+
 ## [0.12.0] - 2026-10-20
 
 ### Added

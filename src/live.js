@@ -23,351 +23,10 @@
   const TURN = window.OMP_TURN_STATUS;
   const GOAL = window.OMP_GOAL;
   const EXT = window.OMP_EXT_WIDGETS;
+  const DELTA = window.OMP_STREAM_DELTA;
+  const LIVE = window.OMP_LIVE_VOICE;
+  const DICTATION = LIVE.DICTATION;
   const { tsOf, mergeTranscript } = window.OMP_TRANSCRIPT;
-
-  // ── Centralized Simplified Chinese localization (i18n) ───────────────────
-  let _initialLang = "zh";
-  try {
-    const _rawTweaks = localStorage.getItem("omp-desktop:tweaks") || localStorage.getItem("omp_tweaks") || "{}";
-    _initialLang = JSON.parse(_rawTweaks).lang || "zh";
-  } catch {
-    _initialLang = "zh";
-  }
-  window.OMP_LANG = _initialLang;
-
-  window.OMP_ZH_DICT = {
-    // Chrome & Window Controls
-    "bridge": "指令桥",
-    "Minimize": "最小化",
-    "Maximize / Restore": "最大化 / 还原",
-    "Close": "关闭",
-    "project sidebar": "项目侧栏",
-    "double-click to rename": "双击重命名",
-    "profile": "配置文件",
-    "open project": "打开项目",
-    "conversation history": "对话历史",
-    "is available": "现已可用",
-    "check for updates": "检查更新",
-    "connected": "已连接",
-    "cost": "费用",
-    "todo": "任务",
-    "toggle autosave": "切换自动保存",
-    "autosave": "自动保存",
-    "on": "开启",
-    "off": "关闭",
-    "git browser": "Git 变更浏览器",
-    "conversation tree (prompt-cache status)": "会话树 (Prompt 缓存状态)",
-    "browser panel": "浏览器面板",
-    "approvals": "权限审批",
-    "switches to": "将切换为",
-    "usage statistics": "用量统计",
-    "terminal": "终端",
-    "tweaks": "偏好设置",
-    "session": "会话",
-    "request failed": "请求失败",
-    "assistant": "智能体",
-    "you": "你",
-    "finished": "已完成",
-    "retrying": "正在重试",
-    "attempt": "第",
-    "auto-approved": "自动批准",
-    "ask": "提问",
-    "tool": "工具",
-    "ambient": "环境指标",
-    "hide rail": "隐藏侧栏",
-    "throughput": "吞吐率",
-    "agent radar": "智能体雷达",
-    "last 60s": "最近 60 秒",
-    "minimap": "小地图",
-
-    // Project Sidebar
-    "rename conversation": "重命名对话",
-    "projects": "项目",
-    "hide sidebar": "隐藏侧边栏",
-    "open": "进行中",
-    "no open tabs": "暂无开启的标签页",
-    "collapse": "折叠",
-    "expand": "展开",
-    "new conversation here": "在此新建对话",
-    "close tab": "关闭标签页",
-    "recent": "最近项目",
-    "no recent projects": "暂无最近项目",
-    "remove from recent": "从最近列表中移除",
-    "open folder…": "打开文件夹…",
-
-    // Subagent Rail Card
-    "Expand subagents": "展开子智能体",
-    "Collapse subagents": "折叠子智能体",
-    "subagents": "子智能体",
-    "live": "运行中",
-    "ran": "已运行",
-    "idle": "空闲",
-    "Agents spawned by ": "由 ",
-    " calls show up here, live.": " 调用的子智能体将在此实时展示。",
-    "tools": "次工具调用",
-    "failed": "失败",
-    "more": "更多",
-    "hide manager": "隐藏管理器",
-    "open manager": "打开管理器",
-
-    // Composer & Command Bridge
-    "plan mode": "计划模式",
-    "I'll draft before I write": "先规划再执行",
-    "exit": "退出",
-    "remove": "移除",
-    "attach image": "添加图片",
-    "attached image": "已添加图片",
-    "dictate": "语音输入",
-    "describe the goal — the agent works toward it until it calls it done…": "描述目标 — 智能体将持续工作直至达成…",
-    "describe what to build, or give feedback on the plan…": "描述要构建的内容，或对计划提出反馈…",
-    "Press ": "按 ",
-    " to interrupt — your cursor is in the room.": " 打断 — 随时可介入。",
-    "type / to give orders": "输入 / 发出指令",
-    " opens the bridge": " 打开指令桥",
-    "open command bridge": "打开指令桥",
-    "start goal": "开始目标",
-    "steer": "实时干预",
-    "abort": "中止",
-    "approve": "批准执行",
-    "send": "发送",
-    "send feedback": "发送反馈",
-    "comment": "条批注",
-    "comments": "条批注",
-    "goal": "目标",
-    "goal mode: your next message becomes a goal the agent works toward": "目标模式：你的下一条消息将作为智能体努力达成的目标",
-    "btw": "顺便一问",
-    "side question (/btw) — asks without touching the main context": "旁路提问 (/btw) — 共享当前上下文，不写入主对话历史",
-    "Side Questions (/btw)": "顺便一问 (/btw)",
-    "Ask a quick side question using the current context — never enters the main conversation.": "基于当前会话上下文快速提问 — 互不阻塞、绝不污染主对话历史。",
-    "New question": "新问题",
-    "Ask a new side question…": "输入新的旁路问题…",
-    "Ask a follow-up in this topic…": "在此话题下继续追问…",
-    "No side questions in this session yet.": "当前会话暂无旁路提问记录。",
-    "Type below to ask while the agent works, or anytime.": "在下方直接提问，即使主智能体正在忙碌也可随时秒问。",
-    "Insert into composer": "带回主输入框",
-    "Copy answer": "复制回答",
-    "Copied": "已复制",
-    "Topics": "历史话题",
-    "Follow-up": "追问",
-    "Cancel": "取消生成",
-    "Answering…": "正在回答…",
-    "Cancelled": "已取消",
-    "Interrupted": "已中断",
-    "Error": "出错",
-    "Done": "已完成",
-    "omp reports background work (an async bash, task or eval job) whose result will wake the agent": "omp 正在后台运行异步任务 (bash/task/eval)，完成后将自动唤醒智能体",
-    "background job running · the agent resumes when it finishes": "后台任务运行中 · 完成后智能体将自动继续",
-    "newline": "换行",
-    "back": "返回",
-    "filter models…": "过滤模型…",
-    "recently used": "最近使用",
-    "all models": "所有模型",
-    "refresh": "刷新",
-    "no models found": "未找到匹配模型",
-    "navigate": "导航",
-    "switch": "切换",
-    "login": "登录",
-    "select provider": "选择提供商",
-    "loading providers…": "正在加载提供商…",
-    "no providers available": "暂无可用的提供商",
-    "logged in": "已登录",
-    "available": "可用",
-    "unavailable": "不可用",
-    "authenticate": "认证",
-    "cross the bridge — type to filter…": "指令桥 — 输入以过滤…",
-    "no luck — try `plan`, `branch`, `model`…": "未找到匹配项 — 尝试 `plan`、`branch`、`model`…",
-    "run": "执行",
-    "close": "关闭",
-
-    // Chat View
-    "compacting context…": "正在压缩上下文…",
-    "compaction failed": "上下文压缩失败",
-    "context compacted": "上下文已压缩",
-    "running": "运行中",
-    "before": "压缩前",
-    "Jump to prompt #": "跳转到提示词 #",
-    "click to jump": "点击定位",
-    "image": "图片",
-    "(empty)": "（空消息）",
-    "Jump to latest": "回到底部",
-
-    // Terminal Tweaks
-    "Terminal": "终端",
-    "shell": "终端 Shell",
-    "open with new tab": "新建标签页时自动开启",
-    "height": "面板高度",
-
-    // Settings & Rail
-    "Settings": "设置",
-    "Search settings": "搜索设置",
-    "Appearance": "外观",
-    "Theme": "主题",
-    "Accent": "强调色",
-    "Text": "文字与语言",
-    "Language": "界面语言",
-    "Interface display language.": "切换软件界面的显示语言。",
-    "Density": "界面密度",
-    "Font size": "字号大小",
-    "Monospace chat": "等宽对话字体",
-    "Columns": "分栏与宽度",
-    "Side column": "右侧栏模式",
-    "New tabs show": "新标签页右侧默认显示",
-    "Project sidebar": "项目侧边栏",
-    "Column widths": "分栏宽度",
-    "Folding": "折叠策略",
-    "Thinking": "思考过程",
-    "Tool output": "工具输出",
-    "Collapse after": "自动折叠阈值",
-    "Scrolling": "滚动行为",
-    "Follow new output": "跟随最新输出",
-    "Composer": "输入框",
-    "Quote to prompt": "引用到输入框",
-    "Sending": "发送快捷键",
-    "Send with": "发送按键",
-    "Pasting": "粘贴折叠",
-    "Collapse pastes longer than": "长文本粘贴折叠行数",
-    "History": "历史记录",
-    "Prompt history": "提示词历史上限",
-    "Built-in cards": "内置监控卡片",
-    "Context gauge": "上下文计量表",
-    "Agent radar": "智能体雷达",
-    "Subagents": "子智能体",
-    "Minimap": "会话迷你图",
-    "Widgets": "小组件",
-    "Plugin config": "插件配置",
-    "Terminal": "终端",
-    "Shell": "终端程序",
-    "Panel": "终端面板",
-    "Open with new tab": "新建标签页时自动打开",
-    "Scrollback": "回滚缓存行数",
-    "Height": "面板高度",
-    "Chromium": "浏览器内核",
-    "Links": "链接行为",
-    "Open localhost links in the panel": "在内置面板中打开 localhost 链接",
-    "Agent": "智能体",
-    "Profiles": "配置文件",
-    "Startup profile": "默认启动配置",
-    "Goals": "目标模式",
-    "Keep working on a goal": "自动推进目标",
-    "omp behaviour": "OMP 行为",
-    "Auto-compact context": "自动压缩上下文",
-    "Retry failed requests": "失败请求自动重试",
-    "Tabs": "标签页",
-    "Reopen tabs on launch": "启动时恢复上次打开的标签页",
-    "Ask before closing a working tab": "关闭运行中的标签页前询问",
-    "Name tabs automatically": "自动生成标签页标题",
-    "Updates": "版本更新",
-    "Check for updates": "自动检查更新",
-    "Version": "当前版本",
-    "Remote access": "远程访问",
-    "Read your sessions, answer questions and steer the agent from a phone on your network. Off by default; nothing listens until you enable it.": "在局域网或 VPN 下的手机上查看会话、回答问题并操控智能体。默认关闭，开启前不会监听任何端口。",
-    "Server": "服务端",
-    "The interface, port and name the phone connects to. The server only listens on the chosen interface.": "手机连接所用的网卡接口、端口与主机名。服务端仅在所选网卡上监听。",
-    "Certificate": "TLS 证书",
-    "A generated certificate is self-signed; your own files (for example for `omp.home.lan`) let the phone trust the page.": "自动生成的证书为自签名证书；也可指定自有证书文件（例如 `omp.home.lan`）以便手机直接信任页面。",
-    "Phones": "已配对手机",
-    "Pair a phone": "配对新手机",
-    "Shows a one-time QR code; scanning it links that phone.": "生成一次性配对二维码，使用手机扫码即可绑定。",
-    "Paired phones": "已绑定设备",
-    "Rename a phone or revoke its access.": "重命名已绑定的手机或撤销其访问权限。",
-    "Notifications": "消息推送",
-    "Push notifications": "Web Push 推送通知",
-    "Tell the phone when a question waits or a turn finished, even with the page closed.": "当有待回答问题或当前轮次完成时，向手机发送推送通知（即使网页已关闭）。",
-    "Pair a phone…": "配对新手机…",
-    "Enable remote access first": "请先开启远程访问",
-    "Enable": "启用远程访问",
-    "Interface": "监听网卡",
-    "Port": "监听端口",
-    "Host name": "自定义主机名",
-    "Source": "证书来源",
-    "Certificate (PEM)": "证书路径 (PEM)",
-    "Private key (PEM)": "私钥路径 (PEM)",
-    "Enable push": "启用推送",
-    "A question is waiting": "有待回答问题时通知",
-    "A turn finished": "对话轮次完成时通知",
-    "Contact (VAPID)": "联系邮箱 (VAPID)",
-    "Regenerate": "重新生成证书",
-    "Use these files": "使用上述证书文件",
-    "generated": "自动生成",
-    "own files": "自有文件",
-    "Revoke": "撤销权限",
-    "Confirm revoke": "确认撤销",
-    "Keep": "保留",
-    "Send test notification": "发送测试通知",
-    "Approvals": "权限审批",
-    "Tool approval mode": "工具调用审批模式",
-    "Standing rules": "常驻规则",
-    "Always-allow rules": "始终允许规则",
-    "Shortcuts": "快捷键",
-    "Keyboard shortcuts": "键盘快捷键",
-    "Key bindings": "键位绑定",
-    "changes apply at once": "修改即时生效",
-    "reset": "重置",
-    "matches": "匹配项",
-    "to defaults": "为默认值",
-    "sections": "切换分类",
-    "close tab": "关闭标签页",
-    "changed from default": "项已修改",
-    "Changed from default": "已修改（非默认值）",
-    "Reset to default": "重置为默认值",
-    "context window": "上下文窗口",
-    "compact context": "压缩上下文",
-    "compacting…": "压缩中…",
-    "compact context window": "立即压缩当前会话上下文 (/compact)",
-    "TTFT": "首字",
-    "(avg)": "(均)",
-    "(last)": "(上轮)",
-    "TTFT (time to first token) · output throughput (tok/s)": "首字耗时 (TTFT) · 输出速率 (tok/s)",
-    "Tweaks": "偏好设置",
-    "Look": "外观",
-    "language": "界面语言",
-    "theme": "主题",
-    "aurora": "极光",
-    "phosphor": "荧光",
-    "daylight": "日光",
-    "dark": "深色",
-    "light": "浅色",
-    "density": "密度",
-    "cozy": "宽松",
-    "compact": "紧凑",
-    "dense": "极密",
-    "accent": "强调色",
-    "mono chat font": "等宽对话字体",
-    "font size": "字号大小",
-    "Layout": "布局",
-    "layout": "布局模式",
-    "rail": "侧边栏",
-    "split": "分栏",
-    "focus": "聚焦",
-    "tree": "会话树",
-    "browser": "浏览器",
-    "Chat": "对话",
-    "thinking": "思考过程",
-    "tool output": "工具输出",
-    "auto": "自动",
-    "folded": "折叠",
-    "collapse after": "自动折叠阈值",
-    "newer": "条后",
-    "Rail": "侧栏面板",
-    "context gauge": "上下文计量表",
-    "widget": "小组件",
-    "plugins": "插件",
-    "reload widgets": "重新加载小组件",
-    "Browser": "浏览器",
-    "open localhost links in panel": "在面板中打开本地链接",
-    "Session": "会话",
-    "prompt history": "提示词历史",
-    "prompts": "条记录",
-    // Microcopy
-    "Hand me a project. I'll set the table.": "选择或打开一个项目即可开始。",
-    "no plan yet. think out loud below.": "暂无计划，在下方直接输入想法。",
-    "agent has been busy — last 60 seconds": "智能体过去 60 秒内的活动情况",
-  };
-
-  window._t = function (en) {
-    if (typeof en !== "string") return en;
-    return window.OMP_LANG === "en" ? en : (window.OMP_ZH_DICT[en] || en);
-  };
 
   // ── Safe defaults so design components never crash on missing fields ──────
   const DEFAULT_DATA = {
@@ -436,9 +95,22 @@
     extWidgets:     EXT.EMPTY,
     // Side questions (/btw): newest-first BtwHistoryRecord[] for the active tab.
     btwRecords:     [],
+    liveVoice:      LIVE.EMPTY,
+    dictation:      DICTATION.EMPTY,
+    // Whether this tab's profile has omp's Codex login, which live voice
+    // needs (`_refreshCodexLogin`); null until known.
+    codexLogin:     null,
   };
 
+  // Cancels in-flight reads and sends when the tab's conversation is replaced.
+  let sessionContext = {};
   let streamingBubble = null;
+  // The streaming message's content, rebuilt from delta frames
+  // (app/stream-delta.js `accFor`): `{ mid, blocks, seed }` — omp's
+  // `messageId`, its blocks so far, and the `streamSnapshot` they started
+  // from (or null). Kept off the bubble, which the transcript (and the
+  // phone) carries.
+  let streamAcc = null;
   let activeToolCards = new Map();    // toolCallId → message index
   const ASK_FLUSH_MS = 150;         // upper bound on how long an ask may stay buffered
   // Ask bubbles (and auto-approval rows) awaiting a flush into
@@ -470,6 +142,10 @@
   // after a dropped replay): replayed and buffered setStatus / setWidget
   // frames at or below it are already in `state.extWidgets`. 0 = none.
   let extSnapshotSeq  = 0;
+  // The backend's copy of the message streaming when a dropped replay ran
+  // (`streaming_message`: `{ messageId, seq, message }`), or null. Its frames
+  // at or below `seq` are already in it.
+  let streamSnapshot  = null;
   // The user's `abort` is in flight — set by `abort()`, cleared by its
   // id-less response. omp pauses an active goal on abort, and that pause is
   // labelled as the user's stop (app/goal.js `fromFrame`).
@@ -497,6 +173,7 @@
   // respawns only that tab (see switchSessionProfile).
   const sessionRegistry = new Map();
   const sessionSnapshots = new Map(); // id -> saved state + volatile vars
+  const respawnVoice = new Map(); // same-conversation voice awaiting a fresh process activation
   const gitListeners = new Map();  // session_id → Tauri unlisten fn for git://branch/{id}
   // Prompt history — one list per tab, newest-first, in memory only. Never
   // persisted to disk/localStorage: filled as the user sends (_recordPrompt)
@@ -516,6 +193,7 @@
   // Session ids with an omp respawn in flight (`_respawnSession`: a profile
   // switch or an approval-mode restart).
   const _respawning = new Set();
+  const _closingVoiceTabs = new Set();
   // Tool approval mode (app/approval-mode.js): the `{ default, projects }`
   // view from Rust (`approval_mode_get`, replaced by every set's response),
   // null until the boot fetch lands. App-wide like `profiles`.
@@ -597,6 +275,20 @@
   // ── ID-keyed response correlation ─────────────────────────────────────────
   // Used by _sendWithResponse to correlate commands that need a typed reply.
   const _pendingResponses = new Map(); // id → { resolve, reject }
+  let _liveGen = 0;
+  let _liveStartPending = null;
+  let _liveStopPending = null;
+  let _liveMutePending = null;
+  let _dictationGen = 0;
+  let _dictationStartPending = null;
+  let _dictationStopPending = null;
+  // Completed captures wait here until the mounted composer consumes them;
+  // React may coalesce snapshots across a tab switch or several captures.
+  let _dictationCompleted = [];
+  // The capture the user stopped with "send on stop" on: its completion is
+  // tagged `send`, so the composer sends that tab's draft once it holds the
+  // text. Stops for a tab switch, Settings or a close never set it.
+  let _dictationSendCapture = null;
   let _nextCmdId = 1;
   // Timeout for a short interactive command a user is waiting on.
   const QUICK_CMD_TIMEOUT_MS = 15000;
@@ -607,14 +299,15 @@
    * @param {object}  cmd         Command body (type + args, no id).
    * @param {number}  [timeout]   Ms to wait before rejecting (0 = no timeout).
    */
-  function _sendWithResponse(cmd, timeout = 120000) {
+  function _sendWithResponse(cmd, timeout = 120000, idPrefix = "d") {
     let handedOff = Promise.resolve(false);
+    let commandId = null;
     const response = new Promise((resolve, reject) => {
       if (!window.__TAURI__ || !activeSessionId) {
         reject(new Error("Not connected"));
         return;
       }
-      const id = `d${_nextCmdId++}`;
+      const id = commandId = `${idPrefix}${_nextCmdId++}`;
       let timer;
       if (timeout > 0) {
         timer = setTimeout(() => {
@@ -639,6 +332,14 @@
       });
     });
     response.handedOff = handedOff;
+    // Voice teardown cancels commands that can no longer receive a reply
+    // after a tab switch or process exit; other commands retain their timeout.
+    response.cancel = reason => {
+      const handler = _pendingResponses.get(commandId);
+      if (!handler) return;
+      _pendingResponses.delete(commandId);
+      handler.reject(new Error(reason));
+    };
     return response;
   }
 
@@ -710,6 +411,10 @@
       goal:            state.goal,
       extWidgets:      state.extWidgets,
       btwRecords:      state.btwRecords,
+      liveVoice:       state.liveVoice,
+      dictation:       state.dictation,
+      codexLogin:      state.codexLogin,
+      dictationCompleted: _dictationCompleted,
       // Tab list — derived from session registry, not per-session state.
       // runState: active tab reads live state; background tabs read their
       // cached snapshot (never activated yet = "idle" defaults).
@@ -964,6 +669,19 @@
     };
   }
 
+  // The bubble of omp message `mid` starting to stream (`streamAcc` holds its
+  // content): empty, or as far as the backend's copy got when a dropped
+  // replay loaded one for it (`streamSnapshot`).
+  function _startStreamingBubble(mid, ts, time) {
+    streamAcc = DELTA.accFor(null, mid, streamSnapshot, lastSeq).acc;
+    return {
+      kind: "assistant", time, ts,
+      ...DELTA.view(streamAcc.blocks),
+      streaming: true,
+      model: state.model?.name ?? "–",
+    };
+  }
+
   // Show a run's final failure (`make(previous)` builds it, app/turn-status.js)
   // on the bubble its failed message created: the one with the failed
   // message's `ts` when the caller knows it — even one still marked
@@ -1106,13 +824,17 @@
     state.asyncPending = false;
     state.messages = TURN.retryCleared(state.messages);
     // Its extensions died with it; the backend's copy ended with the entry.
+    _cancelLiveRequests();
+    state.liveVoice = LIVE.apply(state.liveVoice, { type: "process_exit", error: state.exitReason });
+    if (state.dictation.active) _finishDictation({ type: "process_exit", error: state.exitReason || "The omp process ended during voice to text" });
+    _cancelDictationRequests();
     state.extWidgets = EXT.EMPTY;
     tpsTracker?.handleAgentEnd(true);
     _refreshCtx();
   }
 
   // Reset all per-session volatile state (called before loading a new session)
-  function _resetSessionVars() {
+  function _resetSessionVars(keepVoice = false) {
     Object.assign(state, {
       messages:      [],
       isStreaming:   false,
@@ -1139,8 +861,14 @@
       goal:          GOAL.UNKNOWN,
       extWidgets:    EXT.EMPTY,
       btwRecords:    [],
+      liveVoice:     keepVoice ? state.liveVoice : LIVE.EMPTY,
+      dictation:     keepVoice ? state.dictation : DICTATION.EMPTY,
+      codexLogin:    keepVoice ? state.codexLogin : null,
     });
+    sessionContext = {};
     streamingBubble = null;
+    streamAcc       = null;
+    streamSnapshot  = null;
     lastTurnOk  = true;
     pendingAskBubbles = [];
     _disarmAskFlush();
@@ -1190,8 +918,13 @@
       goal:          state.goal,
       extWidgets:    state.extWidgets,
       btwRecords:    state.btwRecords,
+      liveVoice:     state.liveVoice,
+      dictation:     state.dictation,
+      codexLogin:    state.codexLogin,
       // volatile vars
+      sessionContext,
       streamingBubble,
+      streamAcc,
       activeToolCards: new Map(activeToolCards),
       tpsSamples:    [...tpsSamples],
       turnStartTime,
@@ -1232,8 +965,13 @@
       goal:          snap.goal ?? GOAL.UNKNOWN,
       extWidgets:    snap.extWidgets ?? EXT.EMPTY,
       btwRecords:    snap.btwRecords ?? [],
+      liveVoice:     snap.liveVoice ?? LIVE.EMPTY,
+      dictation:     snap.dictation ?? DICTATION.EMPTY,
+      codexLogin:    snap.codexLogin ?? null,
     });
+    sessionContext = snap.sessionContext ?? {};
     streamingBubble = snap.streamingBubble;
+    streamAcc       = snap.streamAcc ?? null;
     activeToolCards = snap.activeToolCards;
     tpsSamples      = snap.tpsSamples;
     turnStartTime   = snap.turnStartTime;
@@ -1257,13 +995,32 @@
   // state after a newer switch already took over; guarded stale call detects
   // the generation mismatch and bails without touching shared state).
   let _switchGen = 0;
+  // Keep the old listener alive while stopping its microphone. Separate
+  // intent from activation generation so rapid tab clicks share that stop.
+  let _switchIntent = 0;
+  let _switchAwayFrom = null;
   let _switchPromise = Promise.resolve();
   async function _switchToSession(id) {
     if (!window.__TAURI__) return;
     let done;
     const p = new Promise(resolve => { done = resolve; });
     _switchPromise = p;
+    const intent = ++_switchIntent;
+    const previous = activeSessionId;
+    _switchAwayFrom = previous !== id ? previous : null;
     try {
+    if (previous && previous !== id && state.liveVoice.active) {
+      const stopped = await _livePause();
+      if (_switchIntent !== intent || activeSessionId !== previous) return;
+      // A failed stop might still be recording. Do not background that tab.
+      if (!stopped.ok && state.liveVoice.active) return;
+    }
+    if (previous && previous !== id && (state.dictation.active || _dictationStopPending)) {
+      const stopped = await _dictationStop();
+      if (_switchIntent !== intent || activeSessionId !== previous) return;
+      if (!stopped.ok && state.dictation.active) return;
+    }
+    if (_switchIntent !== intent || !sessionRegistry.has(id)) return;
     const myGen = ++_switchGen;
 
     // Snapshot current session so we can restore it when switching back
@@ -1288,6 +1045,10 @@
     if (!_restoreSession(id)) {
       _resetSessionVars();
     }
+    if (respawnVoice.has(id)) {
+      state.liveVoice = respawnVoice.get(id);
+      respawnVoice.delete(id);
+    }
     if (workspaceNotes.length > 0) {
       for (const note of workspaceNotes) _pushAssistantNote(note);
       workspaceNotes = [];
@@ -1298,6 +1059,7 @@
     // (never lost, never double-processed) — drained once replay is applied.
     _replayBuffer = [];
     extSnapshotSeq = 0;
+    streamSnapshot = null;
 
     // Each callback checks it still belongs to this activation: an unlisten
     // only settles after an IPC round-trip, and until it does a superseded
@@ -1371,13 +1133,18 @@
           state.extWidgets = EXT.fromSnapshot(ext);
           extSnapshotSeq = Number.isInteger(ext.seq) ? ext.seq : 0;
         }
+        // The message streaming now: omp sends only increments, so its
+        // bubble cannot be rebuilt from what is left of the journal.
+        const streaming = await _invokeSafe("streaming_message", { sessionId: id }, null);
+        if (!current()) return; // superseded by a newer switch, or detached
+        streamSnapshot = streaming;
       }
       for (const ev of replay.events) _dispatchEnvelope(ev);
       // A pending auto-`/rename` whose outcome note fell out of the ring
       // will never be swallowed, and nothing else would release the flag:
       // refinements would stay blocked for good. The replayed events above
       // had their chance to swallow it; if the note is in fact still to
-      // come (generation outlasting 256 lines of output), the cost is one
+      // come (generation outlasting the journal's window), the cost is one
       // plumbing line in the transcript.
       if (replay.dropped && sessionRegistry.get(id)?.autoRenameInFlight) {
         sessionRegistry.set(id, { ...sessionRegistry.get(id), autoRenameInFlight: false });
@@ -1436,6 +1203,7 @@
     _initFetch();
     notify();
     } finally {
+      if (_switchIntent === intent) _switchAwayFrom = null;
       done();
     }
   }
@@ -1536,13 +1304,14 @@
         approvalMode: AMODE.isMode(approvalMode) ? approvalMode : null,
       });
     }
-    // Git: read initial branch and arm the HEAD watcher (fire-and-forget errors)
+    // Git: read initial branch and work tree and arm the HEAD watcher
+    // (fire-and-forget errors)
     if (cwd) {
-      const branch = await window.__TAURI__.core
+      const watch = await window.__TAURI__.core
         .invoke("start_git_watch", { sessionId: id, path: cwd })
         .catch(() => null);
       const entry = sessionRegistry.get(id);
-      if (entry) sessionRegistry.set(id, { ...entry, branch: branch ?? null });
+      if (entry) sessionRegistry.set(id, { ...entry, branch: watch?.branch ?? null, repoRoot: watch?.root ?? null });
       // Live updates: re-emitted by Rust whenever .git/HEAD changes
       const { listen } = window.__TAURI__.event;
       const unlisten = await listen(`git://branch/${id}`, ev => {
@@ -1578,6 +1347,12 @@
    *  `start_session` installed the fresh incarnation under the same id, it
    *  would reap the *new* process instead of the dead one. */
   function _killSessionProcess(id) {
+    if (id === activeSessionId) {
+      _cancelLiveRequests();
+      state.liveVoice = LIVE.EMPTY;
+      _cancelDictationRequests();
+      state.dictation = DICTATION.EMPTY;
+    }
     let stopped = Promise.resolve();
     if (window.__TAURI__) {
       stopped = window.__TAURI__.core.invoke("stop_session", { sessionId: id }).catch(() => {});
@@ -1593,8 +1368,16 @@
    *  Every path that removes a tab from `sessionRegistry` goes through here;
    *  a respawn uses `_killSessionProcess`, which keeps the browser and shell. */
   function _closeTab(id) {
+    if (id === activeSessionId) {
+      _cancelLiveRequests();
+      state.liveVoice = LIVE.EMPTY;
+      _cancelDictationRequests();
+      state.dictation = DICTATION.EMPTY;
+    }
+    _dictationCompleted = _dictationCompleted.filter(item => item.sessionId !== id);
     const closed = _invokeSafe("close_tab", { sessionId: id });
     _dropGitListener(id);
+    respawnVoice.delete(id);
     sessionSnapshots.delete(id);
     return closed;
   }
@@ -1635,6 +1418,9 @@
     // and `lastSeq` under its id - and the interleaved switch's own
     // `activeSessionId`/`activeListeners` writes would be clobbered when this
     // call resumes.
+    ++_switchIntent;
+    _switchAwayFrom = null;
+    _cancelLiveRequests();
     const listeners = activeListeners;
     activeListeners = [];
     activeSessionId = null;
@@ -1677,12 +1463,9 @@
    *  can render a refusal (a respawn already in flight, a failed respawn)
    *  instead of dropping it silently.
    *
-   *  Not unit-tested directly: every step is a Tauri IPC call or an event
-   *  listener mutation and there is no fake `__TAURI__` harness in this
-   *  repo. The pure decisions it leans on are extracted and proven
-   *  separately (`_resolveProfile`, `OMP_APPROVAL_MODE.restartPlan`); what
-   *  remains is ordering, and the comments inside state why each await
-   *  sits where it does. */
+   *  The dictation-before-restart ordering is covered by the fake IPC bridge
+   *  in test-live-voice.mjs; the remaining ordering relies on the comments
+   *  at each await and the pure profile/approval-mode decisions. */
   async function _respawnSession(id, { profile, resume = null, fresh = false }) {
     if (!window.__TAURI__) return { ok: false, error: "not connected" };
     const entry = sessionRegistry.get(id);
@@ -1699,6 +1482,17 @@
     }
     _respawning.add(id);
     try {
+      if (id === activeSessionId && (state.dictation.active || _dictationStopPending)) {
+        const stopped = await _dictationStop();
+        if (!stopped.ok && state.dictation.active) return stopped;
+        if (!sessionRegistry.has(id)) return { ok: false, error: "tab closed" };
+      }
+      // Only a resumed coding conversation can retain its tab-local voice
+      // history. Killing the process itself closes its native transport.
+      let savedVoice = !fresh && resume ? (id === activeSessionId ? state.liveVoice : sessionSnapshots.get(id)?.liveVoice) : null;
+      if (savedVoice?.active) {
+        savedVoice = LIVE.apply(LIVE.apply(savedVoice, { type: "stop" }), { type: "stop_success", paused: true });
+      }
       // Awaited: `stop_session` must have removed the old incarnation from
       // the backend's session map before `_spawnSession` installs the new
       // one under the same id, or the late remove would reap the fresh
@@ -1766,6 +1560,7 @@
       // spawned or registered, so the second `start_session` starts clean.)
       if (spawnError && resume && spawnError.includes("resume path does not exist") && sessionRegistry.has(id)) {
         sessionRegistry.set(id, { ...sessionRegistry.get(id), sessionFile: null });
+        savedVoice = null;
         spawnError = null;
         try {
           await _spawnSession(id, entry.path, { profile, resume: null });
@@ -1794,6 +1589,11 @@
           notify();
         }
         return spawnError ? { ok: false, error: spawnError } : { ok: true };
+      }
+      if (savedVoice) {
+        if (id === activeSessionId) state.liveVoice = savedVoice;
+        else if (sessionSnapshots.has(id)) sessionSnapshots.set(id, { ...sessionSnapshots.get(id), liveVoice: savedVoice });
+        else respawnVoice.set(id, savedVoice);
       }
       // The folder is now open under `profile`, so it belongs in that
       // profile's recents (a mode restart keeps the profile: nothing new).
@@ -1979,9 +1779,10 @@
     const tabName = name || _tabNameFor(cwd, resume ? "resumed" : "new session");
     const color = resume ? "var(--cyan)" : "var(--lilac)";
     // Register in tab list before starting omp so the tab shows immediately.
-    // Register with null branch — chip hidden until git resolves.
+    // Register with null branch — chip hidden until git resolves. `repoRoot`:
+    // the repository's work tree, shared by every tab on a folder of it.
     sessionRegistry.set(id, {
-      id, name: tabName, path: cwd ?? "", color, branch: null, profile,
+      id, name: tabName, path: cwd ?? "", color, branch: null, repoRoot: null, profile,
       // The approval mode `start_session` spawned this tab's current omp
       // with (set by `_spawnSession`); null while no process runs it.
       approvalMode: null,
@@ -2302,6 +2103,9 @@
       }
       return;
     }
+    // A cancelled or timed-out contextual history request must not be
+    // treated as the ordinary, uncorrelated transcript refresh on replay.
+    if (resp.command === "get_messages" && typeof resp.id === "string" && resp.id.startsWith("live-history-")) return;
     // Compact — handle success and failure both (must come before early-return below)
     if (resp.command === "compact") {
       let idx = -1;
@@ -2477,6 +2281,28 @@
     const { type } = ev;
     const now  = Date.now();
     const time = timeNow();
+    if (type === "live_phase" || type === "live_levels" || type === "live_transcript" || type === "live_end") {
+      const before = state.liveVoice;
+      // The new controller emits connecting before its own transcripts.
+      // Discard queued frames from an older call while fetching history or
+      // before that marker; native frames do not carry a call id.
+      if (_liveStartPending && !_liveStartPending.acceptFrames) {
+        if (!_liveStartPending.request || type !== "live_phase" || ev.phase !== "connecting") return;
+        _liveStartPending.acceptFrames = true;
+      }
+      const next = LIVE.apply(before, ev);
+      if (next !== before) {
+        state.liveVoice = next;
+        if (before.active && !next.active) _cancelLiveRequests(next.error || "Live voice ended");
+        notify();
+      }
+      return;
+    }
+    if (type === "dictation_state" || type === "dictation_transcript" || type === "dictation_end") {
+      if (type === "dictation_end") _finishDictation(ev);
+      else _dictationUpdate(ev);
+      return;
+    }
 
     // Subagent frames (only emitted once _initFetch subscribed this process).
     if (type === "subagent_lifecycle" || type === "subagent_progress" || type === "subagent_event") {
@@ -2842,13 +2668,7 @@
           }
         }
       } else if (role === "assistant") {
-        streamingBubble = {
-          kind: "assistant", time, ts,
-          thought: null, lead: null,
-          blocks: [{ type: "text", text: "" }],
-          streaming: true,
-          model: state.model?.name ?? "–",
-        };
+        streamingBubble = _startStreamingBubble(ev.messageId, ts, time);
         state.messages = [...state.messages, streamingBubble];
         notify();
       }
@@ -2856,31 +2676,37 @@
     }
 
     if (type === "message_update") {
-      if (!streamingBubble) return;
-      const msg = ev.message;
-      if (!msg) return;
-
-      if (_replayBuffer === null && msg.role === "assistant" && tpsTracker?.handleMessageUpdate(ev, now)) {
+      // Delta frames (app/stream-delta.js): `message` carries only the role.
+      const mid = ev.messageId;
+      let changed = false;
+      if (_replayBuffer === null && ev.message?.role === "assistant" && tpsTracker?.handleMessageUpdate(ev, now)) {
         const liveVal = tpsTracker.getView(now).tps?.value;
         if (liveVal != null && liveVal > 0) state.currentTps = liveVal;
         _refreshCtx();
+        changed = true;
       }
-      const blocks = Array.isArray(msg.content) ? msg.content : [];
-      let thought = null;
-      const designBlocks = [];
-      for (const block of blocks) {
-        if (block.type === "thinking" && block.thinking?.trim()) thought = block.thinking;
-        else if (block.type === "text" && block.text) designBlocks.push({ type: "text", text: block.text });
+      if (!streamingBubble && streamSnapshot?.messageId === mid) {
+        // The message's start fell out of a dropped replay: show it from the
+        // backend's copy.
+        streamingBubble = _startStreamingBubble(mid, tsOf(streamSnapshot.message), time);
+        state.messages = [...state.messages, streamingBubble];
+        changed = true;
       }
+      if (!streamingBubble) return;
+      // Another message than the bubble's restarts it (lost frames); the
+      // copy, when it is this message's, seeds it. A delta carries no
+      // timestamp, so the bubble takes the copy's `ts`, else keeps its own
+      // until `message_end` (see get_messages).
+      const step = DELTA.accFor(streamAcc, mid, streamSnapshot, lastSeq);
+      if (step.changed && step.acc.seed) streamingBubble.ts = tsOf(step.acc.seed.message) ?? streamingBubble.ts;
+      streamAcc = step.acc;
+      changed = step.changed || changed;
+      if (!step.skip) changed = DELTA.applyEvent(streamAcc.blocks, ev.assistantMessageEvent) || changed;
+      if (!changed) return;
 
-      streamingBubble.thought = thought;
-      streamingBubble.lead    = thought ? "thinking" : null;
-      streamingBubble.blocks  = designBlocks.length > 0 ? designBlocks : [{ type: "text", text: "" }];
-      // The message this bubble shows: after frames were lost, a bubble left
-      // streaming can receive the next message's updates (see get_messages).
-      if (msg.role === "assistant") streamingBubble.ts = tsOf(msg) ?? streamingBubble.ts;
+      Object.assign(streamingBubble, DELTA.view(streamAcc.blocks));
 
-      const updated = { ...streamingBubble, blocks: [...streamingBubble.blocks] };
+      const updated = { ...streamingBubble };
       // Find by streaming flag — indexOf fails after the first update because
       // each update replaces the entry with a new copy; ask bubbles may also
       // sit after the streaming bubble in state.messages.
@@ -2966,6 +2792,10 @@
         }
         streamingBubble = null;
       }
+      // Settled: its rebuilt blocks (a whole file write, image data) and the
+      // backend's copy of it are done with, and no later frame can need them.
+      if (!streamingBubble) streamAcc = null;
+      if (streamSnapshot?.messageId === ev.messageId) streamSnapshot = null;
       // A retried request answered: the retries are over even if more turns
       // follow in this run (app/turn-status.js `retryFinished`). By omp's
       // rule only output counts: after an empty stop omp keeps retrying.
@@ -3299,6 +3129,7 @@
   }
 
   function _refreshCtx() {
+    if (!window.buildCtx) return;
     state.ctx = window.buildCtx(state.rpcState, state.sessionCost, state.currentTps, tpsTracker ? tpsTracker.getView() : null);
   }
 
@@ -3314,10 +3145,11 @@
     // (activeSessionId moves only after the switch's awaits), and its
     // subscription line would undo the switch's downgrade of that process.
     const gen = _switchGen;
+    const conversation = sessionContext;
     _sendWithResponse({ type: "negotiate_protocol", protocolVersion: 2 })
       .catch(() => {})
       .finally(() => {
-        if (_switchGen !== gen) return;
+        if (_switchGen !== gen || sessionContext !== conversation) return;
         // omp's ask dialog is off by default and per process: a respawned
         // process falls back to one `select` per question until told again.
         _sendWithResponse({ type: "set_ask_dialog", enabled: true })
@@ -3338,7 +3170,21 @@
         _send({ type: "set_subagent_subscription", level: SUB.subscriptionLevelFor({ inspecting: subagentInspecting }) });
         _send({ type: "get_subagents" });
         _send({ type: "get_btw_history" });
+        _refreshCodexLogin();
       });
+  }
+
+  // Ask omp whether the active tab's profile has a Codex login. Refreshed on
+  // activation, after a login and after a failed live start (a login can
+  // also end outside the app).
+  function _refreshCodexLogin() {
+    const id = activeSessionId;
+    _sendWithResponse({ type: "get_login_providers" }, QUICK_CMD_TIMEOUT_MS).then(data => {
+      const login = LIVE.codexLogin(data?.providers);
+      if (id !== activeSessionId || login === null || login === state.codexLogin) return;
+      state.codexLogin = login;
+      notify();
+    }, () => {});
   }
 
   // ── Send a command to the active session's omp ────────────────────────────
@@ -3513,12 +3359,10 @@
     // startDragging() must be called synchronously within the mousedown handler.
     document.addEventListener("mousedown", e => {
       if (!e.target.closest(".chrome")) return;
-      // Interactive chrome content (the profile popover's text inputs, and
-      // the popover itself for padding/hints/row clicks) must never start a
-      // window drag — a mousedown there is a caret placement or a
-      // drag-select, and starting an OS window move instead swallows it.
-      // Any future interactive .chrome content needs the same exclusion.
-      if (e.target.closest("button, input, textarea, .profile-pop, .chrome-lights, .win-controls")) return;
+      // Interactive chrome content (buttons, any future text field) must
+      // never start a window drag — a mousedown there is a click or a caret
+      // placement, and starting an OS window move instead swallows it.
+      if (e.target.closest("button, input, textarea, .chrome-lights, .win-controls")) return;
       win.startDragging().catch(() => {});
     });
 
@@ -3679,7 +3523,13 @@
     // The process keeps running its extensions, and omp sends no clear on a
     // session change: keep their status lines and widgets, as omp's TUI does.
     const extWidgets = state.extWidgets;
-    _resetSessionVars();
+    // The same process can keep its recorder across a conversation change.
+    // Stop it rather than silently dropping the only state that exposes it.
+    if (state.liveVoice.active) void _liveStop();
+    if (state.dictation.active) void _dictationStop();
+    _resetSessionVars(true);
+    state.liveVoice = LIVE.apply(state.liveVoice, { type: "forget" });
+    if (id) respawnVoice.delete(id);
     state.extWidgets = extWidgets;
     if (keepTurnOutcome) lastTurnOk = turnOk;
     _initFetch();
@@ -3728,6 +3578,25 @@
     return _send({ type: "prompt", message: text, images: images ?? [], ...(streamingBehavior ? { streamingBehavior } : {}) });
   }
 
+  /** A predicate that stays true while `sessionId` is still the selected,
+   *  settled-in tab on the conversation and branch it had at this call: any
+   *  tab switch, respawn, conversation reset or branch change voids a PR
+   *  automation read or send started before it. */
+  function _prAutomationCurrent(sessionId) {
+    const context = sessionContext, switchGen = _switchGen;
+    const branch = sessionRegistry.get(sessionId)?.branch;
+    return () =>
+      !!window.__TAURI__ &&
+      sessionRegistry.has(sessionId) &&
+      sessionId === activeSessionId &&
+      !_replayBuffer &&
+      _switchAwayFrom !== sessionId &&
+      !_respawning.has(sessionId) &&
+      sessionContext === context &&
+      _switchGen === switchGen &&
+      sessionRegistry.get(sessionId)?.branch === branch;
+  }
+
   /** A `goal` command's `{goal, state}` result applied to the active tab. */
   function _applyGoalResult(data) {
     const next = GOAL.fromSnapshot(state.goal, data?.state ?? null);
@@ -3750,17 +3619,333 @@
     }
   }
 
+  // Live voice responses are tied to the process and call that sent them.
+  // Invalidate them on stop, terminal event, close, or process replacement.
+  function _cancelLiveRequests(reason = "Live voice session ended") {
+    ++_liveGen;
+    for (const op of [_liveStartPending, _liveStopPending, _liveMutePending]) {
+      op?.history?.cancel(reason);
+      op?.request?.cancel(reason);
+    }
+    _liveStartPending = _liveStopPending = _liveMutePending = null;
+  }
+
+  function _voiceUpdate(event) {
+    const next = LIVE.apply(state.liveVoice, event);
+    if (next !== state.liveVoice) { state.liveVoice = next; notify(); }
+  }
+
+  // Why the active tab cannot open a microphone now, or null when it can.
+  // `otherBusy`: the other voice mode still holds or is releasing it.
+  function _voiceStartRefusal(otherBusy, otherLabel) {
+    if (!window.__TAURI__ || !activeSessionId || !sessionRegistry.has(activeSessionId)) return "Not connected";
+    if (_replayBuffer || _switchAwayFrom === activeSessionId || _respawning.has(activeSessionId) || _closingVoiceTabs.has(activeSessionId)) return "Tab is not ready";
+    return otherBusy ? `${otherLabel} is active` : null;
+  }
+
+  // A failed live request updates the call only while it is still that call.
+  function _liveRequestFailed(id, gen, type, e) {
+    const error = String(e?.message ?? e);
+    if (id === activeSessionId && gen === _liveGen) _voiceUpdate({ type, error });
+    return { ok: false, error };
+  }
+
+  function _liveStart() {
+    const refusal = _voiceStartRefusal(state.dictation.active || !!_dictationStopPending, "Voice to text");
+    if (refusal) return Promise.resolve({ ok: false, error: refusal });
+    if (state.liveVoice.active) {
+      if (_liveStartPending && state.liveVoice.phase !== "stopping") return _liveStartPending.promise;
+      return Promise.resolve({ ok: false, error: state.liveVoice.phase === "stopping" ? "Live voice is stopping" : "Live voice is already active" });
+    }
+    if (_liveStopPending) return Promise.resolve({ ok: false, error: "Live voice is stopping" });
+    const id = activeSessionId, gen = ++_liveGen, wasPaused = state.liveVoice.paused;
+    state.liveVoice = LIVE.apply(state.liveVoice, { type: "start" });
+    const op = { history: null, request: null, promise: null, acceptFrames: false };
+    _liveStartPending = op;
+    op.promise = (async () => {
+      try {
+        // Fetch omp's raw conversation every time: the desktop transcript can
+        // be trimmed or miss activity that happened while this tab was away.
+        const data = await (op.history = _sendWithResponse({ type: "get_messages" }, QUICK_CMD_TIMEOUT_MS, "live-history-"));
+        if (id !== activeSessionId || gen !== _liveGen || !state.liveVoice.active) return { ok: false, error: "Live voice session ended" };
+        if (!Array.isArray(data?.messages)) throw new Error("Invalid conversation history response");
+        const instructions = window.OMP_LIVE_CONTEXT.instructions({ messages: data.messages, voice: state.liveVoice.transcripts, project: sessionRegistry.get(id)?.path || "" });
+        op.request = _sendWithResponse({ type: "live_start", instructions }, 0);
+        await op.request;
+        op.acceptFrames = true;
+        if (id !== activeSessionId || gen !== _liveGen || !state.liveVoice.active) {
+          return { ok: false, error: id === activeSessionId && state.liveVoice.error || "Live voice session ended" };
+        }
+        return { ok: true };
+      } catch (e) {
+        const error = String(e?.message ?? e);
+        if (id === activeSessionId && gen === _liveGen) _voiceUpdate({ type: "start_failure", error, paused: wasPaused });
+        // omp's end frame for a missing login cancels this request first.
+        if (id === activeSessionId) _refreshCodexLogin();
+        return { ok: false, error: id === activeSessionId && state.liveVoice.error || error };
+      } finally {
+        if (_liveStartPending === op) _liveStartPending = null;
+      }
+    })();
+    notify();
+    return op.promise;
+  }
+
+  function _liveStop(paused = false) {
+    if (_liveStopPending) return _liveStopPending.promise;
+    if (!state.liveVoice.active) {
+      if (!paused) _voiceUpdate({ type: "stop" });
+      return Promise.resolve({ ok: true });
+    }
+    const id = activeSessionId;
+    const gen = ++_liveGen;
+    // Only a native start needs a stop, but wait for its IPC handoff to
+    // prevent the stop overtaking it. A history fetch never opens audio.
+    const starting = _liveStartPending;
+    const startHandoff = starting?.request?.handedOff;
+    starting?.history?.cancel("Live voice was stopped");
+    starting?.request?.cancel("Live voice was stopped");
+    _liveMutePending?.request.cancel("Live voice was stopped");
+    state.liveVoice = LIVE.apply(state.liveVoice, { type: "stop" });
+    const op = { request: null, promise: null };
+    _liveStopPending = op;
+    op.promise = (async () => {
+      try {
+        const sent = await (starting ? startHandoff || false : true);
+        if (id !== activeSessionId || gen !== _liveGen) return { ok: false, error: "Live voice session ended" };
+        if (sent) {
+          op.request = _sendWithResponse({ type: "live_stop" }, QUICK_CMD_TIMEOUT_MS);
+          await op.request;
+        }
+        if (id !== activeSessionId || gen !== _liveGen) return { ok: false, error: "Live voice session ended" };
+        _voiceUpdate({ type: "stop_success", paused });
+        return { ok: true };
+      } catch (e) {
+        return _liveRequestFailed(id, gen, "stop_failure", e);
+      } finally {
+        if (_liveStopPending === op) _liveStopPending = null;
+      }
+    })();
+    notify();
+    return op.promise;
+  }
+
+  function _livePause() { return _liveStop(true); }
+
+  function _liveMute(muted) {
+    if (typeof muted !== "boolean") return Promise.resolve({ ok: false, error: "Mute requires a boolean" });
+    if (!state.liveVoice.active || state.liveVoice.phase === "stopping") return Promise.resolve({ ok: false, error: "No live voice session is active" });
+    if (_liveMutePending) {
+      return _liveMutePending.muted === muted ? _liveMutePending.promise : Promise.resolve({ ok: false, error: "A mute change is already in progress" });
+    }
+    const id = activeSessionId;
+    const gen = _liveGen;
+    const request = _sendWithResponse({ type: "live_mute", muted }, QUICK_CMD_TIMEOUT_MS);
+    const op = { request, muted, promise: null };
+    _liveMutePending = op;
+    op.promise = (async () => {
+      try {
+        const data = await request;
+        if (id !== activeSessionId || gen !== _liveGen || !state.liveVoice.active) return { ok: false, error: "Live voice session ended" };
+        _voiceUpdate({ type: "mute_success", muted: data?.muted });
+        return { ok: true };
+      } catch (e) {
+        return _liveRequestFailed(id, gen, "mute_failure", e);
+      } finally {
+        if (_liveMutePending === op) _liveMutePending = null;
+      }
+    })();
+    return op.promise;
+  }
+
+  function _cancelDictationRequests(reason = "Voice to text ended") {
+    ++_dictationGen;
+    _dictationStartPending?.request?.cancel(reason);
+    _dictationStopPending?.request?.cancel(reason);
+    _dictationStartPending = _dictationStopPending = null;
+  }
+
+  function _dictationUpdate(event) {
+    const next = DICTATION.apply(state.dictation, event);
+    if (next !== state.dictation) { state.dictation = next; notify(); }
+  }
+
+  // Both the terminal event and the stop response can finish a capture.
+  // Only the first transition queues text; replay and late replies are inert.
+  function _finishDictation(event) {
+    const before = state.dictation;
+    const next = DICTATION.apply(before, event);
+    if (next === before || next.active) return;
+    state.dictation = next;
+    const send = before.captureId === _dictationSendCapture;
+    if (send) _dictationSendCapture = null;
+    if (next.text && sessionRegistry.has(activeSessionId)) {
+      _dictationCompleted = [..._dictationCompleted, { sessionId: activeSessionId, captureId: before.captureId, text: next.text, send }];
+    }
+    _dictationStartPending?.request?.cancel(next.error || "Voice to text ended");
+    notify();
+  }
+
+  function _dictationStart() {
+    const refusal = _voiceStartRefusal(state.liveVoice.active || !!_liveStopPending, "Live conversation");
+    if (refusal) return Promise.resolve({ ok: false, error: refusal });
+    if (state.dictation.active) {
+      if (state.dictation.phase === "starting" && _dictationStartPending) return _dictationStartPending.promise;
+      return Promise.resolve({ ok: false, error: "Voice to text is already active" });
+    }
+    if (_dictationStopPending) return Promise.resolve({ ok: false, error: "Voice to text is stopping" });
+    const id = activeSessionId, gen = ++_dictationGen, captureId = `capture-${_nextCmdId++}`;
+    state.dictation = DICTATION.apply(state.dictation, { type: "start", captureId });
+    const request = _sendWithResponse({ type: "dictation_start", captureId }, 0);
+    const op = { request, promise: null };
+    _dictationStartPending = op;
+    op.promise = (async () => {
+      try {
+        await request;
+        if (id !== activeSessionId) return { ok: false, error: "Voice to text ended" };
+        if (gen !== _dictationGen) return { ok: true };
+        if (!state.dictation.active) return state.dictation.error ? { ok: false, error: state.dictation.error } : { ok: true };
+        return { ok: true };
+      } catch (e) {
+        const error = String(e?.message ?? e);
+        if (id === activeSessionId && gen !== _dictationGen) return { ok: true };
+        if (id === activeSessionId && !state.dictation.active && !state.dictation.error) return { ok: true };
+        if (id === activeSessionId && gen === _dictationGen && state.dictation.active) _finishDictation({ type: "start_failure", error });
+        return { ok: false, error: id === activeSessionId && state.dictation.error || error };
+      } finally {
+        if (_dictationStartPending === op) _dictationStartPending = null;
+      }
+    })();
+    notify();
+    return op.promise;
+  }
+
+  function _dictationStop(send = false) {
+    if (_dictationStopPending) return _dictationStopPending.promise;
+    if (!state.dictation.active) return Promise.resolve({ ok: true });
+    const id = activeSessionId, captureId = state.dictation.captureId, gen = ++_dictationGen;
+    // Each stop decides: a failed send-stop's tag must not carry over to a
+    // retry that is not the user's (tab switch, Settings).
+    _dictationSendCapture = send ? captureId : null;
+    const startHandoff = _dictationStartPending?.request.handedOff;
+    _dictationStartPending?.request.cancel("Voice to text was stopped");
+    state.dictation = DICTATION.apply(state.dictation, { type: "stop" });
+    const op = { request: null, promise: null };
+    _dictationStopPending = op;
+    op.promise = (async () => {
+      try {
+        const sent = startHandoff ? await startHandoff : true;
+        if (id !== activeSessionId || gen !== _dictationGen) return { ok: false, error: "Voice to text ended" };
+        if (!state.dictation.active) return { ok: true };
+        const data = sent ? await (op.request = _sendWithResponse({ type: "dictation_stop" }, 120000)) : { text: state.dictation.text };
+        if (id !== activeSessionId || gen !== _dictationGen) return { ok: false, error: "Voice to text ended" };
+        if (state.dictation.active) {
+          _finishDictation({ type: "dictation_end", captureId, text: typeof data?.text === "string" ? data.text : state.dictation.text,
+            error: typeof data?.text === "string" ? null : "Invalid voice to text response" });
+        }
+        return { ok: true };
+      } catch (e) {
+        const error = String(e?.message ?? e);
+        if (id === activeSessionId && gen === _dictationGen) {
+          if (!state.dictation.active) return { ok: true };
+          _dictationUpdate({ type: "stop_failure", error });
+        }
+        return { ok: false, error };
+      } finally {
+        if (_dictationStopPending === op) _dictationStopPending = null;
+      }
+    })();
+    notify();
+    return op.promise;
+  }
+
+  // Voice spectrum start/stop run one after another (each is an async Rust
+  // command on a worker thread, so they could otherwise finish out of order
+  // and leave the microphone reader running).
+  let _voiceSpectrumChain = Promise.resolve();
+  function _voiceSpectrumCall(cmd, args) {
+    const call = _voiceSpectrumChain.then(() => _invokeResult(cmd, args));
+    _voiceSpectrumChain = call;
+    return call;
+  }
+
   // ── OMP_BRIDGE public API ─────────────────────────────────────────────────
   window.OMP_BRIDGE = {
     get isConnected() { return !!window.__TAURI__ && !!activeSessionId; },
     get activeSessionId() { return activeSessionId; },
     waitForActivation() { return _switchPromise; },
 
+    // Native realtime voice is independent of the persisted chat transcript.
+    liveStart: _liveStart,
+    liveResume: _liveStart,
+    livePause: _livePause,
+    liveStop: () => _liveStop(),
+    liveMute: _liveMute,
+    dictationStart: _dictationStart,
+    stopActiveVoice() { return state.dictation.active || _dictationStopPending ? _dictationStop() : state.liveVoice.active || _liveStopPending ? _livePause() : Promise.resolve({ ok: true }); },
+    dictationStop: ({ send = false } = {}) => _dictationStop(send),
+    ackDictation(captureIds) {
+      const ids = new Set(captureIds);
+      const remaining = _dictationCompleted.filter(item => !ids.has(item.captureId));
+      if (remaining.length !== _dictationCompleted.length) { _dictationCompleted = remaining; notify(); }
+    },
+    /** The composer's voice spectrum (Rust `voice_spectrum`): an
+     *  analysis-only reader of the default microphone, run while voice
+     *  capture records, `bands` bars wide (8..=128; another count restarts
+     *  it). Start and stop are queued so a stop never overtakes the start
+     *  before it; both resolve to `{ ok, error? }`. */
+    voiceSpectrumStart(bands) { return _voiceSpectrumCall("voice_spectrum_start", { bands }); },
+    voiceSpectrumStop() { return _voiceSpectrumCall("voice_spectrum_stop"); },
+    /** `cb(bands)` per frame (~30/s): as many values 0..255 as the start
+     *  asked for, low to high frequency. Returns `{ stop, ready }`. */
+    onVoiceSpectrum(cb) { return _listen("voice://spectrum", p => cb(p?.bands ?? null)); },
+
     // ── Messaging ────────────────────────────────────────────────────────────
     // The bubble shows at once; omp's echo (`message_start`) ties it to the
     // persisted message. A command omp runs locally sends no echo, so its
     // bubble keeps no `ts` and the get_messages merge leaves it in place.
     send(text, images) { return _sendPrompt(text, images); },
+    // Monitoring is read-only. Only the selected, fully settled tab may
+    // receive remediation; recheck here after the asynchronous GitHub read.
+    // A read the tab can't take now is `OMP_PR_AUTOMATION.STALE`, never
+    // `null`: that is Rust's "no PR", and the card would say so.
+    async prAutomationSnapshot(sessionId) {
+      const { STALE } = window.OMP_PR_AUTOMATION;
+      const current = _prAutomationCurrent(sessionId);
+      if (!current()) return STALE;
+      const result = await window.__TAURI__.core.invoke(
+        "pr_automation_snapshot", { sessionId },
+      );
+      return current() ? result : STALE;
+    },
+    async prAutomationSend(sessionId, text, expected, canSend) {
+      if (!expected?.url || !expected.branch || !expected.head || typeof canSend !== "function") return false;
+      const current = _prAutomationCurrent(sessionId);
+      const ready = () => {
+        const entry = sessionRegistry.get(sessionId);
+        return (
+          canSend() && current() && !!entry?.path &&
+          !userAbortInFlight && !entry.autoRenameInFlight &&
+          state.rpcState?.isSettled === true && runStateCached(state) === "idle" &&
+          !state.queueSending.length && !(state.rpcState?.queuedMessageCount > 0) &&
+          !state.queue.steering.length && !state.queue.followUp.length &&
+          !GOAL.isOpen(state.goal) &&
+          !TURN.busyElsewhere(_sessionsView(), sessionId, entry.path)
+        );
+      };
+      if (!ready()) return false;
+      // Re-read Rust's current branch/HEAD immediately before the handoff;
+      // a displayed snapshot is not permission to fix a different revision.
+      const latest = await window.__TAURI__.core.invoke(
+        "pr_automation_snapshot", { sessionId },
+      );
+      if (!ready() || !latest || latest.url.toLowerCase() !== expected.url.toLowerCase() || latest.branch !== expected.branch || latest.head !== expected.head) return false;
+      // `ready()` just ran in this same synchronous step, so nothing can
+      // change between it and the handoff. Once handed to omp the prompt is
+      // out, whatever happens meanwhile: the controller records it as sent
+      // even after a tab switch.
+      return _sendPrompt(text);
+    },
     // No id on purpose: a pending-id match returns before the command
     // switch, and the abort response is what releases a cancelled
     // auto-rename. See `_releaseAutoRenameAfterAbort`.
@@ -4129,6 +4314,7 @@
       if (seededProfile) {
         await _invokeSafe("clear_profile_bootstrap", { id: seededProfile }, null);
       }
+      _refreshCodexLogin();
       return res;
     },
 
@@ -4308,6 +4494,20 @@
     /** A file as of commit `sha` with that commit's change inline: `FileView`. */
     gitBrowserCommitFile(sha, relPath) {
       return _gitBrowserInvoke("git_browser_commit_file", { sha, relPath });
+    },
+
+    /** The branches the status bar's picker offers: `Branch[]` (`{ name,
+     *  remote, at }`), newest tip first, without the checked-out one or a
+     *  remote branch whose local one exists. */
+    gitBranches() {
+      return _gitBrowserInvoke("git_browser_branches", {});
+    },
+
+    /** Switch the project's work tree to a listed branch (`git switch`; a
+     *  `remote` one gets a local branch tracking it). The HEAD watcher then
+     *  reports the new branch (`git://branch/{id}`). */
+    gitSwitchBranch(name, remote) {
+      return _gitBrowserInvoke("workspace_switch_branch", { name, remote });
     },
 
     /** A file of the active tab's project for the preview (issue #39):
@@ -4880,10 +5080,17 @@
       return _setApprovalModes("approval_mode_set_project", { projectRoot: path, mode: mode ?? null });
     },
 
-    /** Close a tab: Rust ends its omp process, git watcher, widgets and
-     *  shell. Unconditional; the tab bar goes through
-     *  `closeSessionGuarded`. */
+    /** Close a tab after stopping its microphone; a failed stop leaves the
+     *  tab visible so the user can retry. */
     async closeSession(id) {
+      if (!sessionRegistry.has(id) || _closingVoiceTabs.has(id)) return false;
+      _closingVoiceTabs.add(id);
+      try {
+        if (id === activeSessionId && (state.dictation.active || _dictationStopPending || state.liveVoice.active)) {
+          const stopped = await window.OMP_BRIDGE.stopActiveVoice();
+          if (!stopped.ok && id === activeSessionId && (state.dictation.active || state.liveVoice.active)) return false;
+          if (!sessionRegistry.has(id)) return false;
+        }
       _closeTab(id);
       sessionRegistry.delete(id);
       promptHistories.delete(id);
@@ -4902,6 +5109,10 @@
       } else {
         notify(); // tab list changed
       }
+      return true;
+      } finally {
+        _closingVoiceTabs.delete(id);
+      }
     },
 
     /** `closeSession`, after asking when Settings → Session "Ask before
@@ -4911,8 +5122,7 @@
       const confirm = PREFS.tabCloseConfirm(sessionPrefs, _sessionsView(), id);
       if (confirm && !(await _askClose(confirm))) return false;
       if (!sessionRegistry.has(id)) return false; // closed meanwhile
-      await window.OMP_BRIDGE.closeSession(id);
-      return true;
+      return window.OMP_BRIDGE.closeSession(id);
     },
 
     /** Answer the busy-close confirmation on screen (snapshot

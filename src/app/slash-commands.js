@@ -31,6 +31,7 @@
   const LOCAL_COMMANDS = Object.freeze([
     { name: "plan",      hint: "draft a plan before writing code",             icon: "◇", group: "Mode"    },
     { name: "goal",      hint: "start a goal the agent works on until done",   icon: "◎", group: "Mode"    },
+    { name: "live",      hint: "live voice: start, pause, resume, stop, mute, unmute", icon: "◉", group: "Mode"    },
     { name: "steer",     hint: "interrupt and redirect mid-tool",              icon: "↺", group: "Mode"    },
     { name: "btw",       hint: "ask a side question without touching the main context", icon: "💬", group: "Session" },
     { name: "compact",   hint: "compact context window",                       icon: "▤", group: "Session" },
@@ -352,6 +353,13 @@
     return { isCmd, via };
   }
 
+  // Connecting is active too: a toggle there cancels the pending start.
+  function liveCommand(args, voice) {
+    const arg = (args ?? "").trim().toLowerCase();
+    if (!arg) return voice?.paused ? "resume" : voice?.active ? "stop" : "start";
+    return ["start", "pause", "resume", "stop", "mute", "unmute"].includes(arg) ? arg : null;
+  }
+
   // The RPC frame of a steer / follow-up (`kind` "steer" | "followUp"). A
   // command goes as a `prompt` with omp's `streamingBehavior`: the
   // dedicated `steer` / `follow_up` frames skip command and skill dispatch,
@@ -375,6 +383,7 @@
     insertText,
     isCommandInvocation,
     routeSubmit,
+    liveCommand,
     queuedFrame,
   };
 })();

@@ -13,7 +13,6 @@ const { collapseStates: _CV_collapseStates, PREVIEW_LINES: _CV_PREVIEW_LINES } =
 // streaming frame does not diff a fresh style.
 const _CV_PAD_STYLE = { "--collapse-lines": _CV_PREVIEW_LINES };
 const _CV_WIN = 80, _CV_STEP = 40, _CV_EST_H = 72;
-var _t = (en) => (window.OMP_LANG === "en" ? en : (window.OMP_ZH_DICT?.[en] ?? en));
 
 
 // ── Per-bubble memo wrappers ────────────────────────────────────────────────
@@ -26,6 +25,7 @@ const _CV_AssistantBubble_M = React.memo(_CV_AssistantBubble);
 const _CV_AskBubble_M       = React.memo(_CV_AskBubble);
 
 const CompactRow = React.memo(function CompactRow({ msg }) {
+  window.OMP_I18N.useLocale();
   const _op = React.useState(false), open = _op[0], setOpen = _op[1];
   const pending  = msg.status === "pending";
   const error    = msg.status === "error";
@@ -56,20 +56,20 @@ const CompactRow = React.memo(function CompactRow({ msg }) {
             borderColor: `color-mix(in oklab, ${COLOR} 30%, var(--line))`,
           }}>compact</span>
           <span className="tool-title">
-            {pending ? _t("compacting context…")
-              : error   ? _t("compaction failed")
-              : (msg.shortSummary || _t("context compacted"))}
+            {pending ? OMP_TR("compacting context\u2026")
+              : error   ? OMP_TR("compaction failed")
+              : (msg.shortSummary || OMP_TR("context compacted"))}
           </span>
           <div className="tool-card-spacer" />
           {pending && (
             <span className="chip accent" style={{ animation: "pulseDot 1.4s infinite" }}>
-              <span className="dot live" />{" "}{_t("running")}
+              <span className="dot live" />{" "}{OMP_TR("running")}
             </span>
           )}
           {!pending && !error && msg.tokensBefore != null && (
-            <span className="chip muted mono">{tok} {_t("before")}</span>
+            <span className="chip muted mono">{tok} {OMP_TR("before")}</span>
           )}
-          {error && <span className="chip" style={{ color: "var(--rose)" }}>{_t("failed")}</span>}
+          {error && <span className="chip" style={{ color: "var(--rose)" }}>{OMP_TR("failed")}</span>}
           {hasBody && <_CV_Icon name={open ? "chev" : "chevR"} size={10} color="var(--fg-4)" />}
         </div>
         {open && hasBody && (
@@ -87,6 +87,7 @@ const CompactRow = React.memo(function CompactRow({ msg }) {
 // result woke it for, so the job is named above it. Live-only, like tool
 // cards — get_messages' merge keeps it in place.
 const JobRow = React.memo(function JobRow({ msg, idx, highlighted }) {
+  window.OMP_I18N.useLocale();
   const { color, icon, label } = _CV_TOOL_META.job;
   return (
     <div className={`row tool fade-up${highlighted ? " mm-hot" : ""}`} data-msg-idx={idx}>
@@ -104,7 +105,7 @@ const JobRow = React.memo(function JobRow({ msg, idx, highlighted }) {
             borderColor: `color-mix(in oklab, ${color} 30%, var(--line))`,
           }}>{label}</span>
           <span className="tool-title" title={msg.label ?? undefined}>
-            {msg.jobId} {_t("finished")}
+            {msg.jobId} {OMP_TR("finished")}
             {msg.label && <span className="job-label"> · {msg.label}</span>}
           </span>
           <div className="tool-card-spacer" />
@@ -125,7 +126,7 @@ const JobRow = React.memo(function JobRow({ msg, idx, highlighted }) {
 // ── Pure Turn-Rail helpers (extracted for isolated testability) ─────────────
 const TURN_POP_PAD_Y = 88;
 
-function extractUserTurns(messages, isHidden, tr = _t) {
+function extractUserTurns(messages, isHidden, tr = (s) => (window.OMP_TR ? window.OMP_TR(s) : s)) {
   const out = [];
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
@@ -190,7 +191,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
 
   const userTurnsRef = React.useRef([]);
   const userTurns = React.useMemo(() => {
-    const next = extractUserTurns(messages, window.OMP_TURN_STATUS.isHidden, _t);
+    const next = extractUserTurns(messages, window.OMP_TURN_STATUS.isHidden);
     const prev = userTurnsRef.current;
     if (next.length === prev.length) {
       let same = true;
@@ -473,7 +474,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
                   className={`turn-dot-btn${isCurrent ? " is-current" : ""}${isHot ? " is-hot" : ""}${isAdj ? " is-adj" : ""}`}
                   onMouseEnter={(e) => onEnterDot(k, e)}
                   onClick={() => jumpToTurn(k)}
-                  aria-label={`${_t("Jump to prompt #")}${t.turnNum}`}
+                  aria-label={`${OMP_TR("Jump to prompt #")}${t.turnNum}`}
                 >
                   <span className="turn-dot" />
                 </button>
@@ -493,7 +494,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
                       #{item.turnNum}{offset === 0 ? ` / ${userTurns.length}` : ""}
                     </span>
                     {item.time && <span className="turn-card-time mono">{item.time}</span>}
-                    {offset === 0 && <span className="turn-card-hint">{_t("click to jump")}</span>}
+                    {offset === 0 && <span className="turn-card-hint">{OMP_TR("click to jump")}</span>}
                   </div>
                   <div className="turn-card-text">{item.text}</div>
                 </div>
@@ -505,7 +506,7 @@ function ChatView({ messages, planMode, annotations, onAnnotate, hoveredMsgIdx, 
       {showJump && (
         <button type="button" className="chat-jump-latest" onClick={jumpToLatest}>
           <_CV_Icon name="chev" size={12} />
-          {_t("Jump to latest")}
+          {OMP_TR("Jump to latest")}
         </button>
       )}
     </div>

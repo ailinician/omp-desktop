@@ -27,12 +27,12 @@ function EvalCell({ cell, collapsed }) {
         <span className="eval-lang">{cell.language}</span>
         {cell.title && <span className="eval-title">{cell.title}</span>}
         {cell.durationMs != null
-          ? <span className="eval-dur" style={{ marginLeft: "auto" }}>{cell.durationMs}ms</span>
-          : cell.status === "running" && <span className="shimmer-text" style={{ marginLeft: "auto", fontSize: 10 }}>running…</span>
+          ? <span className="eval-dur" style={{ marginLeft: "auto" }}>{cell.durationMs}{OMP_TR("ms")}</span>
+          : cell.status === "running" && <span className="shimmer-text" style={{ marginLeft: "auto", fontSize: 10 }}>{OMP_TR("running…")}</span>
         }
       </div>
       {shownCode && (
-        <_EvalCopyHost label="Copy code" text={done ? cell.code.trimEnd() : ""}>
+        <_EvalCopyHost label={OMP_TR("Copy code")} text={done ? cell.code.trimEnd() : ""}>
           {codeHtml
             ? <pre className="eval-code selectable"><code className={`hljs language-${lang}`}
                 dangerouslySetInnerHTML={{ __html: codeHtml }} /></pre>
@@ -40,7 +40,7 @@ function EvalCell({ cell, collapsed }) {
         </_EvalCopyHost>
       )}
       {shownOut && (
-        <_EvalCopyHost label="Copy output" text={done ? cell.output.trimEnd() : ""}>
+        <_EvalCopyHost label={OMP_TR("Copy output")} text={done ? cell.output.trimEnd() : ""}>
           <pre className={`eval-output selectable mono${cell.status === "error" ? " eval-error" : ""}`}>
             {shownOut}
           </pre>

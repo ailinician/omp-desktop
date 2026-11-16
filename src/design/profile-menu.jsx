@@ -1,5 +1,5 @@
 /* ═════════════════════════════════════════════════════════════════════
-   profile-menu.jsx — per-tab omp profile selector (window chrome)
+   profile-menu.jsx — per-tab omp profile selector (app toolbar)
 
    A profile is `omp --profile <id>`: an isolated tree of auth, sessions,
    settings and caches. One tab owns one omp process, so the profile is a
@@ -17,6 +17,7 @@ function ProfileMenu({
   profiles = [], activeId = DEFAULT_PROFILE_ID, startupId = DEFAULT_PROFILE_ID,
   onSelect, onCreate, onRename, onDelete, onSetStartup,
 }) {
+  window.OMP_I18N.useLocale();
   const [open,  setOpen]  = React.useState(false);
   const [mode,  setMode]  = React.useState(null);   // null | "create" | "rename"
   const [draft, setDraft] = React.useState("");
@@ -73,10 +74,28 @@ function ProfileMenu({
 
   // Bridge mutations resolve to {ok, value} | {ok: false, error}; the
   // backend's reason (blank name, profile limit, …) is shown inline.
+  // `settle` turns a throw into the same refusal shape.
+  const settle = async call => {
+    try {
+      return await call();
+    } catch (e) {
+      return { ok: false, error: e?.message ?? String(e) };
+    }
+  };
   // `busy` guards re-entry: the input stays enabled across the await, so
   // Enter auto-repeat or a double-click would otherwise fire N create_profile
   // round-trips and leave N stray profiles for one intent.
   const busy = React.useRef(false);
+  // One round-trip under `busy`: `call` starts synchronously once the guard
+  // is taken; `done(res)` runs unless the popover was dismissed meanwhile.
+  const roundTrip = async (call, done) => {
+    if (busy.current) return;
+    const gen = openGen.current;
+    busy.current = true;
+    const res = await settle(call);
+    busy.current = false;
+    if (gen === openGen.current) done(res);
+  };
   const commit = async () => {
     if (busy.current) return;
     const name = draft.trim();
@@ -90,14 +109,7 @@ function ProfileMenu({
     // Enter (auto-repeat included) or save click re-entering commit() and
     // firing a duplicate create_profile for the same name.
     try {
-      let res;
-      try {
-        res = mode === "create"
-          ? await onCreate?.(name)
-          : await onRename?.(active.id, name);
-      } catch (e) {
-        res = { ok: false, error: e?.message ?? String(e) };
-      }
+      const res = await settle(() => (mode === "create" ? onCreate?.(name) : onRename?.(active.id, name)));
       if (gen !== openGen.current) return;   // dismissed mid-round-trip
       if (!res?.ok) { setError(res?.error ?? "could not save"); return; }
       // A freshly created profile is what the user wants this tab to use —
@@ -111,12 +123,7 @@ function ProfileMenu({
         // suffixed id for the same one intent.
         setMode(null);
         setDraft("");
-        let sel;
-        try {
-          sel = await onSelect?.(res.value.id);
-        } catch (e) {
-          sel = { ok: false, error: e?.message ?? String(e) };
-        }
+        const sel = await settle(() => onSelect?.(res.value.id));
         if (gen !== openGen.current) return;
         if (sel && !sel.ok) { setError(sel.error ?? "could not switch profile"); return; }
       }
@@ -133,65 +140,32 @@ function ProfileMenu({
   // flight for this tab, or a tab that opened while the no-tab pick was
   // pending. Await it and keep the popover open with the reason rather
   // than closing on an action that did not happen.
-  const pick = async id => {
+  const pick = id => {
     if (id === activeId) { close(); return; }
-    if (busy.current) return;
-    const gen = openGen.current;
-    busy.current = true;
-    let res;
-    try {
-      res = await onSelect?.(id);
-    } catch (e) {
-      res = { ok: false, error: e?.message ?? String(e) };
-    } finally {
-      busy.current = false;
-    }
-    if (gen !== openGen.current) return;
-    if (res && !res.ok) { setError(res.error ?? "could not switch profile"); return; }
-    close();
+    roundTrip(() => onSelect?.(id), res => {
+      if (res && !res.ok) setError(res.error ?? "could not switch profile");
+      else close();
+    });
   };
 
-  const remove = async id => {
+  const remove = id => {
     if (armedDelete !== id) { setArmedDelete(id); setError(null); return; }
     // `busy` (a ref) not `armedDelete` (state) is what blocks the second
     // click: two clicks in one tick both read the same pre-render
     // `armedDelete`, so clearing state here is too late to stop a duplicate
     // `delete_profile` - and the backend rejects the second with
     // `unknown profile: …`, reporting failure for a delete that succeeded.
-    if (busy.current) return;
-    const gen = openGen.current;
-    busy.current = true;
-    setArmedDelete(null);
-    let res;
-    try {
-      res = await onDelete?.(id);
-    } catch (e) {
-      res = { ok: false, error: e?.message ?? String(e) };
-    } finally {
-      busy.current = false;
-    }
-    if (gen !== openGen.current) return;   // dismissed mid-round-trip
-    setError(res?.ok ? null : res?.error ?? "could not delete");
+    roundTrip(() => { setArmedDelete(null); return onDelete?.(id); },
+      res => setError(res?.ok ? null : res?.error ?? "could not delete"));
   };
 
-  const setStartup = async id => {
+  const setStartup = id => {
     if (id === startupId) return;   // already the default - nothing to do
-    // Same `busy` ref as create/delete: the tick stays clickable across the
+    // Same `busy` guard as create/delete: the tick stays clickable across the
     // round-trip, and the snapshot only repaints once the backend confirms.
-    if (busy.current) return;
-    const gen = openGen.current;
-    busy.current = true;
-    setError(null);
-    let res;
-    try {
-      res = await onSetStartup?.(id);
-    } catch (e) {
-      res = { ok: false, error: e?.message ?? String(e) };
-    } finally {
-      busy.current = false;
-    }
-    if (gen !== openGen.current) return;   // dismissed mid-round-trip
-    if (res && !res.ok) setError(res.error ?? "could not set default");
+    roundTrip(() => { setError(null); return onSetStartup?.(id); }, res => {
+      if (res && !res.ok) setError(res.error ?? "could not set default");
+    });
   };
 
   return (
@@ -199,18 +173,18 @@ function ProfileMenu({
       <button
         ref={triggerRef}
         className="btn ghost outlined profile-trigger"
-        title="omp profile for this tab (auth, sessions, settings)"
+        title={OMP_TR("omp profile for this tab (auth, sessions, settings)")}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => (open ? close() : setOpen(true))}>
-        <Icon name="layers" size={11} />
+        <Icon name="layers" size={16} />
         <span className="mono profile-trigger-name">{active.name}</span>
         <Icon name="chev" size={9} color="var(--fg-4)" />
       </button>
 
       {open && (
         <div className="profile-pop" role="menu">
-          <div className="profile-pop-head mono" role="none">profile · this tab</div>
+          <div className="profile-pop-head mono" role="none">{OMP_TR("profile · this tab")}</div>
 
           {/* role="none" on every non-menuitem container: a generic element
               between role="menu" and its items breaks the owned-elements
@@ -247,8 +221,8 @@ function ProfileMenu({
                 <button
                   className={`btn icon ghost profile-star ${isStartup ? "on" : ""}`}
                   title={isStartup
-                    ? `“${p.name}” is the default for new tabs`
-                    : `make “${p.name}” the default for new tabs`}
+                    ? OMP_TR("“{name}” is the default for new tabs", { name: p.name })
+                    : OMP_TR("make “{name}” the default for new tabs", { name: p.name })}
                   role="menuitemradio"
                   aria-checked={isStartup}
                   onClick={() => setStartup(p.id)}>
@@ -279,11 +253,11 @@ function ProfileMenu({
                     role="menuitem"
                     className={`btn icon ghost profile-del ${armed ? "armed" : ""}`}
                     title={armed
-                      ? "click again to remove from the list (keeps files on disk)"
-                      : `delete profile “${p.name}”`}
+                      ? OMP_TR("click again to remove from the list (keeps files on disk)")
+                      : OMP_TR("delete profile “{name}”", { name: p.name })}
                     onClick={() => remove(p.id)}>
                     {armed
-                      ? <span className="profile-del-label mono">delete?</span>
+                      ? <span className="profile-del-label mono">{OMP_TR("delete?")}</span>
                       : <Icon name="trash" size={10} />}
                   </button>
                 ) : (
@@ -312,10 +286,10 @@ function ProfileMenu({
                   if (isSubmitEnter(e)) { e.preventDefault(); commit(); }
                   if (e.key === "Escape") { e.stopPropagation(); cancelEdit(); }
                 }} />
-              <button className="btn icon ghost" title="save" onClick={commit}>
+              <button className="btn icon ghost" title={OMP_TR("save")} onClick={commit}>
                 <Icon name="check" size={10} />
               </button>
-              <button className="btn icon ghost" title="cancel" onClick={cancelEdit}>
+              <button className="btn icon ghost" title={OMP_TR("cancel")} onClick={cancelEdit}>
                 <Icon name="close" size={9} />
               </button>
             </div>
@@ -323,11 +297,11 @@ function ProfileMenu({
             <React.Fragment>
               <button role="menuitem" className="profile-item" onClick={() => startEdit("create")}>
                 <Icon name="plus" size={10} />
-                <span className="profile-item-name">new profile…</span>
+                <span className="profile-item-name">{OMP_TR("new profile…")}</span>
               </button>
               <button role="menuitem" className="profile-item" onClick={() => startEdit("rename")}>
                 <Icon name="edit" size={10} />
-                <span className="profile-item-name">rename “{active.name}”</span>
+                <span className="profile-item-name">{OMP_TR("rename “")}{active.name}”</span>
               </button>
             </React.Fragment>
           )}
@@ -344,6 +318,6 @@ function ProfileMenu({
   );
 }
 
-// Memoised: WindowChrome re-renders on every streaming notify(), while the
+// Memoised: the toolbar re-renders on every streaming notify(), while the
 // menu's props (profile list, active id, stable handlers) rarely change.
 Object.assign(window, { ProfileMenu: React.memo(ProfileMenu) });

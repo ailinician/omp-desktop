@@ -86,9 +86,11 @@ pub fn omp_output<S: AsRef<OsStr>>(args: &[S]) -> Result<std::process::Output, S
 /// commands, events or state fields the app relies on. Raise it in the change
 /// that starts using a newer omp feature; nothing else has to follow.
 ///
-/// 18.4.11: the RPC `fork` command (the conversation tree's "Fork after the
-/// reply").
-const MIN_OMP_VERSION: [u32; 3] = [18, 4, 11];
+/// 18.13.2: `message_update` frames in `messageUpdates: "delta"` carry what a
+/// client needs to rebuild the message (the block on start/end events, the
+/// message on a restart), so every process streams deltas
+/// (`agent::DELTA_EVENT_FILTER`). Earlier delta frames cannot be rebuilt.
+const MIN_OMP_VERSION: [u32; 3] = [18, 13, 2];
 
 /// The binary whose `omp --version` check passed. Only a pass is
 /// remembered, and only for that path: after a refusal the next tab start
@@ -624,13 +626,6 @@ mod tests {
     fn resolved_cwd_is_idempotent_under_double_application() {
         let base = std::env::current_dir().expect("current dir");
         let dir = "child-project";
-
-        // Sanity check on the bug itself: applying the raw relative value
-        // twice (once as an OS chdir, once as omp's own relative --cwd)
-        // nests it one level deeper than intended.
-        let buggy_double_apply = base.join(dir).join(dir);
-        assert_eq!(buggy_double_apply, base.join(dir).join(dir));
-        assert_ne!(buggy_double_apply, base.join(dir));
 
         // The fix: resolve once, and the same absolute value survives a
         // second application unchanged.

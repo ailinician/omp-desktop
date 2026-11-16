@@ -12,29 +12,35 @@
 (function () {
   // `foldThinking` / `foldTools`: null until picked (OMP_COLLAPSE.foldModes).
   // `browserWidth`: px of the browser panel, 0 = half the stage (OMP_BROWSER.clampWidth).
-  // `sidebarWidth` / `splitWidth` / `railWidth` / `treeWidth`: px of those
+  // `sidebarWidth` / `splitWidth` / `railWidth` / `treeWidth` / `filesWidth`: px of those
   // columns, 0 = the default (OMP_LAYOUT_WIDTHS.fit).
   // `browserLocalhostInPanel`: a plain click on a localhost chat link opens
   // the panel instead of the system browser. (The Chromium path is a Rust
   // setting, browser.json — never a tweak.)
   // Settings page (#37): `defaultSide` is the side column a new tab starts
-  // with; `followOutput` pins the transcript to the newest message;
+  // with; `locale` is the interface language ("auto" = the OS language;
+  // app/i18n.js, Settings → Appearance → Language); `followOutput` pins the
+  // transcript to the newest message;
   // `terminalScrollback` is xterm's scrollback in lines; `submitKey` is
   // "enter" | "ctrl+enter" for multi-line fields; `pasteCollapseLines` is
   // the line count above which a paste becomes a chip; `restoreTabs`,
   // `confirmBusyClose`, `autoName` drive live.js; `autoCompaction` /
-  // `autoRetry` are sent to every omp process. Rows, labels and bounds:
-  // app/settings-schema.js.
+  // `autoRetry` are sent to every omp process; `startScreen` is the
+  // empty workspace's animated screen (OMP_BACKDROPS.SCREENS). Rows,
+  // labels and bounds: app/settings-schema.js.
   const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
-    "lang": "zh",
+    "locale": "auto",
     "theme": "aurora",
+    "startScreen": "latent",
     "density": "compact",
     "layout": "rail",
     "accent": "#8AF0C8",
+    "projectAppearance": {},
     "monoChat": false,
     "showContext": true,
     "showRadar": true,
     "showSubagents": true,
+    "showChanges": true,
     "showMinimap": true,
     "fontSize":  100,
     "promptHistoryLimit": 100,
@@ -49,6 +55,7 @@
     "splitWidth": 0,
     "railWidth": 0,
     "treeWidth": 0,
+    "filesWidth": 0,
     "defaultSide": "rail",
     "terminalAutoOpen": false,
     "terminalHeight": 240,
@@ -56,6 +63,9 @@
     "browserWidth": 0,
     "browserLocalhostInPanel": true,
     "submitKey": "enter",
+    "dictationSend": false,
+    "dictationAutoStop": 3,
+    "voiceSpectrumBands": 64,
     "pasteCollapseLines": 5,
     "restoreTabs": true,
     "confirmBusyClose": false,

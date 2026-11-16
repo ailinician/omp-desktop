@@ -18,9 +18,12 @@ const _CMP_SEND_HINTS = {
   "enter":      { send: _CMP_IS_MAC ? "↵" : "Enter", newline: _CMP_IS_MAC ? "⇧↵" : "Shift+Enter" },
   "ctrl+enter": { send: _CMP_IS_MAC ? "⌘↵" : "Ctrl+Enter", newline: _CMP_IS_MAC ? "↵" : "Enter" },
 };
+// The files panel's marks as composer chips (app/file-comments.js).
+const _CMP_fileIcon = (mark) => (mark.kind === "explain" ? "sparkle" : "edit");
+const _CMP_filePath = (mark) => window.OMP_FILE_COMMENTS.location(mark);
 
 // Thin wrappers around the shared `OMP_KEYMAP.hintFor`/`hintKeyFor` (display
-// logic lives there so chrome.jsx's ⌘K/history hints can reuse it too,
+// logic lives there so toolbar.jsx's ⌘K/history hints can reuse it too,
 // instead of each file re-deriving chord display independently). The guard
 // here is the one thing that can't move: "registry not loaded yet"
 // (`window.OMP_KEYMAP` absent — first render before keymap.js runs, should
@@ -37,7 +40,7 @@ function hintKeyFor(actionId, fallback) {
 // ── The composer (input + plan/steer modes + send) ────────────────────
 // `submitKey` ("enter" | "ctrl+enter") and `pasteCollapseLines` come from the
 // tweaks (Settings › Composer); the defaults match TWEAK_DEFAULTS.
-function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, btwOpen = false, btwRunning = false, btwCount = 0, onToggleBtw, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow, browserChips = [], onRemoveBrowserChip, onBrowserChipClick, submitKey = "enter", pasteCollapseLines = 5 }) {
+function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, btwOpen = false, btwRunning = false, btwCount = 0, onToggleBtw, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow, browserChips = [], onRemoveBrowserChip, onBrowserChipClick, fileChips = [], onRemoveFileChip, onFileChipClick, submitKey = "enter", pasteCollapseLines = 5, liveVoice, liveError, onLiveAction, codexLogin = null, voiceSpectrum = null, dictation, dictationError, onDictationAction, dictationCompleted, onAckDictation }) {
   // Drafts are per tab (issue #28). The composer stays mounted across tab
   // switches and keeps one draft per session id (app/session-ui.js
   // DRAFT_IDLE): text, pending image attachments (sent alongside the next
@@ -52,11 +55,11 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const draft = draftEntryOf(drafts, sessionId, DRAFT_IDLE);
   const { text, attachments, pendingImages } = draft;
   // What the draft can send. A goal needs its objective as text; a steer
-  // (mid-turn) can be images or browser annotation chips alone — app-live
-  // merges the chips into the message; a plain send can also be plan
-  // annotations alone.
+  // (mid-turn) can be images, browser annotation chips or file marks alone
+  // — app-live merges the chips and marks into the message; a plain send
+  // can also be plan annotations alone.
   const hasText = !!text.trim();
-  const steerable = goalMode ? hasText : hasText || attachments.length > 0 || browserChips.length > 0;
+  const steerable = goalMode ? hasText : hasText || attachments.length > 0 || browserChips.length > 0 || fileChips.length > 0;
   const sendable = steerable || (!goalMode && planMode && annotationCount > 0);
   const updateDraft = (id, fn) => setDrafts(m => updateDraftEntry(m, id, DRAFT_IDLE, fn));
   // Any text edit ends a prompt-history recall; only the recall step itself
@@ -72,6 +75,28 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const sessionIdRef = React.useRef(sessionId);
   sessionIdRef.current = sessionId;
   React.useEffect(() => { setDrafts(m => pruneDrafts(m, sessionIds)); }, [sessionIds]);
+  const consumedDictations = React.useRef(new Set());
+  // A capture stopped with "send on stop" (Settings › Composer): its tab's
+  // draft is sent, as Enter would, once it holds the dictated text — and
+  // only while that tab is shown.
+  const sendDictated = React.useRef(null);
+  React.useEffect(() => {
+    const items = (dictationCompleted ?? []).filter(item => !consumedDictations.current.has(item.captureId));
+    if (!items.length) return;
+    for (const item of items) consumedDictations.current.add(item.captureId);
+    setDrafts(m => items.reduce((draftMap, item) => window.OMP_SESSION_UI.appendDictation(draftMap, sessionIdsRef.current ?? [], item), m));
+    const toSend = items.findLast(item => item.send && item.sessionId === sessionIdRef.current);
+    if (toSend) sendDictated.current = { sessionId: toSend.sessionId, text: toSend.text };
+    onAckDictation(items.map(item => item.captureId));
+  }, [dictationCompleted]);
+  React.useEffect(() => {
+    const pending = sendDictated.current;
+    if (!pending) return;
+    if (pending.sessionId !== sessionId) { sendDictated.current = null; return; }
+    if (!draft.text.endsWith(pending.text)) return; // the append has not rendered yet
+    sendDictated.current = null;
+    send();
+  }, [drafts, sessionId]);
   const [activeIdx, setActiveIdx] = React.useState(0);
   const taRef   = React.useRef(null);
   // Prompt-history recall (issues #16, #55, Arrow Up/Down): the recall
@@ -170,19 +195,9 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   // Keep activeIdx in bounds; auto-select when single result
   const clampedIdx = showSlash ? Math.min(activeIdx, filtered.length - 1) : 0;
 
-  // Scroll active item into view
-  React.useEffect(() => {
-    if (!showSlash || !listRef.current) return;
-    const el = listRef.current.children[clampedIdx];
-    el?.scrollIntoView({ block: "nearest" });
-  }, [clampedIdx, showSlash]);
-
-  // Scroll active mention row into view
-  React.useEffect(() => {
-    if (!showMention || !mentionListRef.current) return;
-    const el = mentionListRef.current.children[mentionActiveIdx];
-    el?.scrollIntoView({ block: "nearest" });
-  }, [mentionActiveIdx, showMention]);
+  // Keep the active slash / mention row in view.
+  window.useActiveRowIntoView(listRef, clampedIdx, showSlash);
+  window.useActiveRowIntoView(mentionListRef, mentionActiveIdx, showMention);
 
   // Grow with the text up to the CSS max-height, then scroll: hidden
   // overflow past it would leave the rest of a long draft unreachable.
@@ -314,10 +329,10 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
     // Text typed after a desktop command goes to its handler: `/goal
     // <objective>` puts the objective back into the composer in goal mode.
     const args = expandPastes(/^\/\S*\s+([\s\S]*)$/.exec(text)?.[1]?.trim() ?? "", draft.pastes);
+    if (onPick?.(cmd, args) === false) return;
     updateDraft(sessionId, d => ({ ...d, text: "", pastes: DRAFT_IDLE.pastes, pasteCounter: 0 }));
     setActiveIdx(0);
     setMentionDismissedKey(null);
-    onPick?.(cmd, args);
   };
 
   // Replace `range` (an @mention or mid-prompt `/token`) with `insert` and
@@ -590,13 +605,15 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
       {planMode && (
         <div className="plan-strip">
           <Icon name="plan" size={12} color="var(--amber)" />
-          <span style={{ color: "var(--amber)" }}>{_t("plan mode")}</span>
-          <span style={{ color: "var(--fg-3)" }}>· {_t("I'll draft before I write")}</span>
-          <button className="btn ghost" onClick={onTogglePlan} style={{ marginLeft: "auto", height: 22 }}>{_t("exit")}</button>
+          <span style={{ color: "var(--amber)" }}>{OMP_TR("plan mode")}</span>
+          <span style={{ color: "var(--fg-3)" }}>{OMP_TR("· I'll draft before I write")}</span>
+          <button className="btn ghost" onClick={onTogglePlan} style={{ marginLeft: "auto", height: 22 }}>{OMP_TR("exit")}</button>
         </div>
       )}
       {/* Goal mode (goal-strip.jsx): built by app-live.jsx, keyed by tab. */}
       {goalStrip}
+      <LiveVoicePanel voice={liveVoice} error={liveError} onAction={onLiveAction} dictationActive={!!dictation?.active} codexLogin={codexLogin} />
+      <DictationPanel dictation={dictation} error={dictationError} onAction={onDictationAction} />
 
       {showSlash && (
         <div className="slash-pop" ref={listRef}>
@@ -607,8 +624,8 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
               onMouseDown={(e) => { e.preventDefault(); execCmd(c); }}>
               <span className="slash-glyph">{c.icon}</span>
               <span className="slash-name mono" style={{ color: "var(--accent)" }}>/{c.name}</span>
-              <span className="slash-hint" style={{ color: "var(--fg-3)" }} title={c.hint}>{c.hint}</span>
-              <span className="chip muted" style={{ marginLeft: "auto", flex: "none" }}>{c.group}</span>
+              <span className="slash-hint" style={{ color: "var(--fg-3)" }} title={isDesktop(c) ? OMP_TR(c.hint) : c.hint}>{isDesktop(c) ? OMP_TR(c.hint) : c.hint}</span>
+              <span className="chip muted" style={{ marginLeft: "auto", flex: "none" }}>{OMP_TR(c.group)}</span>
             </button>
           ))}
         </div>
@@ -639,12 +656,21 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
         onRemove={onRemoveBrowserChip}
         onChipClick={onBrowserChipClick} />
 
+      <BrowserChips
+        chips={fileChips}
+        onRemove={onRemoveFileChip}
+        onChipClick={onFileChipClick}
+        iconOf={_CMP_fileIcon}
+        labelOf={mark => window.OMP_FILE_COMMENTS.chipLabel(mark, OMP_TR("explain"))}
+        titleOf={_CMP_filePath}
+        removeLabel={OMP_TR("remove comment")} />
+
       {attachments.length > 0 && (
         <div className="attach-strip">
           {attachments.map(a => (
             <div className="attach-chip" key={a.id}>
-              <img className="attach-thumb" src={a.src} alt={a.name || _t("attached image")} />
-              <button className="attach-remove" title={_t("remove")} onClick={() => removeAttachment(a.id)}>
+              <img className="attach-thumb" src={a.src} alt={a.name || "attached image"} />
+              <button className="attach-remove" title={OMP_TR("remove")} onClick={() => removeAttachment(a.id)}>
                 <Icon name="close" size={9} />
               </button>
             </div>
@@ -655,8 +681,10 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
       {/* Keyed by tab: an open preview is that tab's, not the next one's. */}
       <PasteStrip key={sessionId} pastes={collapsed} onExpand={expandPaste} />
 
+      {voiceSpectrum && <VoiceSpectrum source={voiceSpectrum} />}
+
       <div className="composer-row">
-        <button className="btn icon ghost" title={_t("attach image")} onClick={() => fileInputRef.current?.click()}>
+        <button className="btn icon ghost" title={OMP_TR("attach image")} onClick={() => fileInputRef.current?.click()}>
           <Icon name="image" size={13} />
         </button>
         <input
@@ -667,21 +695,19 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
           style={{ display: "none" }}
           onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
         />
-        <button className="btn icon ghost" title={_t("dictate")}>
-          <Icon name="voice" size={13} />
-        </button>
+        <VoiceModeButton key={sessionId} live={liveVoice} dictation={dictation} codexLogin={codexLogin} onLiveAction={onLiveAction} onDictationAction={onDictationAction} />
         <div className="composer-input">
           <textarea
             ref={taRef}
             rows="1"
             placeholder={
               goalMode && !isStreaming
-                ? _t("describe the goal — the agent works toward it until it calls it done…")
+                ? OMP_TR("describe the goal — the agent works toward it until it calls it done…")
                 : planMode && !isStreaming
-                ? _t(microcopy?.planTip ?? "describe what to build, or give feedback on the plan…")
+                ? (microcopy?.planTip ? OMP_TR(microcopy.planTip) : OMP_TR("describe what to build, or give feedback on the plan…"))
                 : isStreaming
-                  ? (microcopy?.streamingTip ?? `${_t("Press ")}${abortHint || "Esc"}${_t(" to interrupt — your cursor is in the room.")}`)
-                  : (microcopy?.paletteTip ?? `${_t("type / to give orders")}${bridgeHint ? ` · ${bridgeHint}${_t(" opens the bridge")}` : ""}`)
+                  ? (microcopy?.streamingTip ? OMP_TR(microcopy.streamingTip) : undefined)
+                  : (microcopy?.paletteTip ? OMP_TR(microcopy.paletteTip) : `${OMP_TR("what should we ship?")}  ·  ${OMP_TR("/ for commands")}${bridgeHint ? `  ·  ${bridgeHint} ${OMP_TR("for the bridge")}` : ""}`)
             }
             value={text}
             onCompositionStart={() => { composingRef.current = true; }}
@@ -707,7 +733,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
             aria-activedescendant={showMention ? `mention-row-${mentionActiveIdx}` : undefined}
           />
         </div>
-        <button className="btn outlined" title={bridgeHint ? `${_t("open command bridge")} (${bridgeHint})` : _t("open command bridge")} onClick={onOpenCmd}>
+        <button className="btn outlined" title={bridgeHint ? `${OMP_TR("open command bridge")} (${bridgeHint})` : OMP_TR("open command bridge")} onClick={onOpenCmd}>
           <Icon name="command" size={11} />
           {bridgeKeyHint && <span className="kbd" style={{ marginLeft: 2 }}>{bridgeKeyHint}</span>}
         </button>
@@ -716,11 +742,11 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
             {steerable && (
               <button className={`btn outlined${goalMode ? " goal-resume" : ""}`} onClick={send} disabled={pendingImages > 0}
                 style={goalMode ? undefined : { color: "var(--amber)", borderColor: "color-mix(in oklab, var(--amber) 40%, var(--line))" }}>
-                <Icon name={goalMode ? "goal" : "arrow"} size={10} color={goalMode ? "var(--lilac)" : "var(--amber)"} /> {goalMode ? _t("start goal") : _t("steer")}
+                <Icon name={goalMode ? "goal" : "arrow"} size={10} color={goalMode ? "var(--lilac)" : "var(--amber)"} /> {goalMode ? OMP_TR("start goal") : OMP_TR("steer")}
               </button>
             )}
             <button className="btn danger" onClick={onAbort}>
-              <Icon name="stop" size={10} /> {_t("abort")} {abortHint && <span className="kbd">{abortHint}</span>}
+              <Icon name="stop" size={10} /> {OMP_TR("abort")} {abortHint && <span className="kbd">{abortHint}</span>}
             </button>
           </>
         ) : (
@@ -728,16 +754,16 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
             {planMode && (
               <button className="btn outlined" onClick={onApprove}
                 style={{ color: "var(--amber)", borderColor: "color-mix(in oklab, var(--amber) 40%, var(--line))" }}>
-                <Icon name="play" size={10} color="var(--amber)" /> {_t("approve")}
+                <Icon name="play" size={10} color="var(--amber)" /> {OMP_TR("approve")}
               </button>
             )}
             <button className={`btn primary${goalMode ? " goal-start" : ""}`} onClick={send}
               disabled={!sendable || pendingImages > 0}>
               {goalMode
-                ? _t("start goal")
+                ? OMP_TR("start goal")
                 : planMode
-                ? `${_t("send feedback")}${annotationCount > 0 ? ` · ${annotationCount} ${_t(annotationCount !== 1 ? "comments" : "comment")}` : ""}`
-                : _t("send")}
+                ? `${OMP_TR("send feedback")}${annotationCount > 0 ? ` · ${window.OMP_I18N.plural(annotationCount, "{n} comment", "{n} comments", { n: annotationCount })}` : ""}`
+                : OMP_TR("send")}
               {" "}<Icon name="arrow" size={11} />
             </button>
           </>
@@ -753,39 +779,39 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
         <ThinkingMenu key={sessionId} model={currentModel} level={thinking}
           cycleHint={cycleThinkingHint} onLoad={onLoadThinkingLevels} onSet={onSetThinking} />
         <button className={`composer-pill ${planMode ? "on" : ""}`} onClick={onTogglePlan}
-          disabled={!!planBlocked && !planMode} title={planBlocked && !planMode ? planBlocked : undefined}>
+          disabled={!!planBlocked && !planMode} title={planBlocked && !planMode ? OMP_TR(planBlocked) : undefined}>
           <Icon name="plan" size={11} color={planMode ? "var(--amber)" : "var(--fg-3)"} />
-          <span style={{ color: planMode ? "var(--amber)" : "var(--fg-2)" }}>{_t("plan mode")}</span>
+          <span style={{ color: planMode ? "var(--amber)" : "var(--fg-2)" }}>{OMP_TR("plan mode")}</span>
         </button>
         <button className={`composer-pill goal-pill${goalMode ? " on" : ""}`} onClick={onToggleGoal}
           disabled={!!goalBlocked && !goalMode}
-          title={goalBlocked && !goalMode ? goalBlocked : _t("goal mode: your next message becomes a goal the agent works toward")}>
+          title={goalBlocked && !goalMode ? OMP_TR(goalBlocked) : OMP_TR("goal mode: your next message becomes a goal the agent works toward")}>
           <Icon name="goal" size={11} color={goalMode ? "var(--lilac)" : "var(--fg-3)"} />
-          <span style={{ color: goalMode ? "var(--lilac)" : "var(--fg-2)" }}>{_t("goal")}</span>
+          <span style={{ color: goalMode ? "var(--lilac)" : "var(--fg-2)" }}>{OMP_TR("goal")}</span>
         </button>
         <button className={`composer-pill btw-pill${btwOpen || btwRunning ? " on" : ""}`} onClick={onToggleBtw}
-          title={_t("side question (/btw) — asks without touching the main context")}>
+          title={OMP_TR("side question (/btw) — asks without touching the main context")}>
           {btwRunning
             ? <span className="dot live" />
             : <Icon name="sparkle" size={11} color={btwOpen ? "var(--cyan)" : "var(--fg-3)"} />}
-          <span style={{ color: btwOpen || btwRunning ? "var(--cyan)" : "var(--fg-2)" }}>{_t("btw")}</span>
+          <span style={{ color: btwOpen || btwRunning ? "var(--cyan)" : "var(--fg-2)" }}>{OMP_TR("btw")}</span>
           {btwCount > 0 && <span className="mono" style={{ color: "var(--fg-4)", fontSize: 10 }}>{btwCount}</span>}
         </button>
         <div style={{ flex: 1 }} />
         {backgroundWork && (
-          <span className="composer-bg-note" title={_t("omp reports background work (an async bash, task or eval job) whose result will wake the agent")}>
+          <span className="composer-bg-note" title={OMP_TR("omp reports background work (an async bash, task or eval job) whose result will wake the agent")}>
             <TabRunDot state="background" />
-            {_t("background job running · the agent resumes when it finishes")}
+            {OMP_TR("background job running · the agent resumes when it finishes")}
           </span>
         )}
         <span className="mono" style={{ color: "var(--fg-4)", fontSize: "var(--d-text-xs)" }}>
           {[
             ...(isStreaming && steerable
-              ? [goalMode ? `${sendHints.send} ${_t("start goal")}` : `${sendHints.send} ${_t("steer")}`]
-              : [goalMode ? `${sendHints.send} ${_t("start goal")}` : `${sendHints.send} ${_t("send")}`, `${sendHints.newline} ${_t("newline")}`]),
+              ? [goalMode ? `${sendHints.send} ${OMP_TR("start goal")}` : `${sendHints.send} ${OMP_TR("steer")}`]
+              : [goalMode ? `${sendHints.send} ${OMP_TR("start goal")}` : `${sendHints.send} ${OMP_TR("send")}`, `${sendHints.newline} ${OMP_TR("newline")}`]),
             // Dropped entirely when unbound rather than showing a keyless
             // "abort" segment that advertises a shortcut that isn't there.
-            ...(abortHint ? [`${abortHint} ${_t("abort")}`] : []),
+            ...(abortHint ? [`${abortHint} ${OMP_TR("abort")}`] : []),
           ].join(" · ")}
         </span>
       </div>
@@ -867,52 +893,52 @@ function CommandBridge({ open, onClose, onPick, onPickModel, currentModelId, pro
         <span style={{ color: m.id === currentModelId ? "var(--accent)" : "var(--fg)" }}>{m.name}</span>
         <span className="mono" style={{ color: "var(--fg-4)" }}>{m.id}</span>
         <span style={{ color: "var(--fg-3)" }}>· {m.note}</span>
-        <span className="chip muted" style={{ marginLeft: "auto" }}>{m.latency}ms</span>
+        <span className="chip muted" style={{ marginLeft: "auto" }}>{m.latency}{OMP_TR("ms")}</span>
       </button>
     );
     return (
       <div className="bridge-scrim" onClick={onClose}>
         <div className="bridge slide-in" onClick={(e) => e.stopPropagation()}>
           <div className="bridge-input-row">
-            <button className="btn icon ghost" title={_t("back")}
+            <button className="btn icon ghost" title={OMP_TR("back")}
               onClick={() => { setView("commands"); setQ(""); }}
               style={{ marginRight: 4 }}>
               <Icon name="chevR" size={12} color="var(--fg-3)"
                 style={{ transform: "rotate(180deg)", display: "block" }} />
             </button>
             <input ref={inputRef} className="bridge-input mono"
-              placeholder={_t("filter models…")} value={q}
+              placeholder={OMP_TR("filter models…")} value={q}
               onChange={(e) => setQ(e.target.value)} />
-            <span className="kbd">esc</span>
+            <span className="kbd">{OMP_TR("esc")}</span>
           </div>
           <div className="bridge-body">
             {recentHits.length > 0 && (
               <div className="bridge-group">
-                <div className="bridge-group-head mono">{_t("recently used")}</div>
+                <div className="bridge-group-head mono">{OMP_TR("recently used")}</div>
                 {recentHits.map((m) => modelRow(m, "recent"))}
               </div>
             )}
             <div className="bridge-group">
               <div className="bridge-group-head mono" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                {_t("all models")}
+                {OMP_TR("all models")}
                 <span style={{ color: "var(--fg-4)" }}>
-                  tauri:{window.__TAURI__ ? "✓" : "✗"}
-                  · connected:{window.OMP_BRIDGE?.isConnected ? "✓" : "✗"}
-                  · models:{window.OMP_DATA.models.length}
+                  {OMP_TR("tauri:")}{window.__TAURI__ ? "✓" : "✗"}
+                  {OMP_TR("· connected:")}{window.OMP_BRIDGE?.isConnected ? "✓" : "✗"}
+                  {OMP_TR("· models:")}{window.OMP_DATA.models.length}
                 </span>
                 <button className="btn ghost" style={{ marginLeft: "auto", height: 18, fontSize: "var(--d-text-xs)", padding: "0 6px" }}
                   onClick={() => window.OMP_BRIDGE?.refreshModels()}>
-                  {_t("refresh")}
+                  {OMP_TR("refresh")}
                 </button>
               </div>
               {modelHits.map((m) => modelRow(m, "all"))}
-              {modelHits.length === 0 && <div className="bridge-empty">{_t("no models found")}</div>}
+              {modelHits.length === 0 && <div className="bridge-empty">{OMP_TR("no models found")}</div>}
             </div>
           </div>
           <div className="bridge-foot mono">
-            <span className="kbd">↑↓</span> {_t("navigate")}
-            <span className="kbd">↵</span> {_t("switch")}
-            <span className="kbd">esc</span> {_t("back")}
+            <span className="kbd">↑↓</span> {OMP_TR("navigate")}
+            <span className="kbd">↵</span> {OMP_TR("switch")}
+            <span className="kbd">{OMP_TR("esc")}</span> {OMP_TR("back")}
           </div>
         </div>
       </div>
@@ -925,25 +951,25 @@ function CommandBridge({ open, onClose, onPick, onPickModel, currentModelId, pro
       <div className="bridge-scrim" onClick={onClose}>
         <div className="bridge slide-in" onClick={(e) => e.stopPropagation()}>
           <div className="bridge-input-row">
-            <button className="btn icon ghost" title={_t("back")}
+            <button className="btn icon ghost" title={OMP_TR("back")}
               onClick={() => { setView("commands"); setQ(""); }}
               style={{ marginRight: 4 }}>
               <Icon name="chevR" size={12} color="var(--fg-3)"
                 style={{ transform: "rotate(180deg)", display: "block" }} />
             </button>
             <span className="bridge-input mono" style={{ cursor: "default", lineHeight: "normal" }}>
-              {_t("login")}
+              {OMP_TR("login")}
             </span>
-            <span className="kbd">esc</span>
+            <span className="kbd">{OMP_TR("esc")}</span>
           </div>
           <div className="bridge-body">
             <div className="bridge-group">
-              <div className="bridge-group-head mono">{_t("select provider")}</div>
+              <div className="bridge-group-head mono">{OMP_TR("select provider")}</div>
               {loginProviders === null && (
-                <div className="bridge-empty" style={{ padding: "16px 32px" }}>{_t("loading providers…")}</div>
+                <div className="bridge-empty" style={{ padding: "16px 32px" }}>{OMP_TR("loading providers…")}</div>
               )}
               {loginProviders !== null && loginProviders.length === 0 && (
-                <div className="bridge-empty">{_t("no providers available")}</div>
+                <div className="bridge-empty">{OMP_TR("no providers available")}</div>
               )}
               {loginProviders !== null && loginProviders.map((p) => (
                 <button key={p.id}
@@ -959,15 +985,15 @@ function CommandBridge({ open, onClose, onPick, onPickModel, currentModelId, pro
                   </span>
                   <span className="mono" style={{ color: "var(--fg-4)" }}>{p.id}</span>
                   <span className="chip muted" style={{ marginLeft: "auto" }}>
-                    {p.authenticated ? _t("logged in") : p.available ? _t("available") : _t("unavailable")}
+                    {p.authenticated ? OMP_TR("logged in") : p.available ? OMP_TR("available") : OMP_TR("unavailable")}
                   </span>
                 </button>
               ))}
             </div>
           </div>
           <div className="bridge-foot mono">
-            <span className="kbd">↵</span> {_t("authenticate")}
-            <span className="kbd">esc</span> {_t("back")}
+            <span className="kbd">↵</span> {OMP_TR("authenticate")}
+            <span className="kbd">{OMP_TR("esc")}</span> {OMP_TR("back")}
           </div>
         </div>
       </div>
@@ -987,14 +1013,14 @@ function CommandBridge({ open, onClose, onPick, onPickModel, currentModelId, pro
         <div className="bridge-input-row">
           <Icon name="command" size={14} color="var(--accent)" />
           <input ref={inputRef} className="bridge-input mono"
-            placeholder={_t("cross the bridge — type to filter…")} value={q}
+            placeholder={OMP_TR("cross the bridge — type to filter…")} value={q}
             onChange={(e) => setQ(e.target.value)} />
-          <span className="kbd">esc</span>
+          <span className="kbd">{OMP_TR("esc")}</span>
         </div>
         <div className="bridge-body">
           {Object.entries(groups).map(([g, list]) => (
             <div key={g} className="bridge-group">
-              <div className="bridge-group-head mono">{g.toLowerCase()}</div>
+              <div className="bridge-group-head mono">{OMP_TR(g).toLowerCase()}</div>
               {list.map((c) => {
                 const isModel = c.name === "model";
                 const isLogin = c.name === "login";
@@ -1009,7 +1035,7 @@ function CommandBridge({ open, onClose, onPick, onPickModel, currentModelId, pro
                     }}>
                     <span className="bridge-glyph">{c.icon}</span>
                     <span className="bridge-cmd-name mono" style={{ color: "var(--accent)" }}>/{c.name}</span>
-                    <span className="bridge-cmd-hint" style={{ color: "var(--fg-3)" }} title={c.hint}>{c.hint}</span>
+                    <span className="bridge-cmd-hint" style={{ color: "var(--fg-3)" }} title={isDesktop(c) ? OMP_TR(c.hint) : c.hint}>{isDesktop(c) ? OMP_TR(c.hint) : c.hint}</span>
                     {isModel && (
                       <span className="mono" style={{ color: "var(--fg-4)", marginLeft: "auto" }}>
                         {activeModelName}
@@ -1023,14 +1049,14 @@ function CommandBridge({ open, onClose, onPick, onPickModel, currentModelId, pro
             </div>
           ))}
           {cmdHits.length === 0 && (
-            <div className="bridge-empty">{_t("no luck — try `plan`, `branch`, `model`…")}</div>
+            <div className="bridge-empty">{OMP_TR("no luck — try `plan`, `branch`, `model`…")}</div>
           )}
         </div>
         <div className="bridge-foot mono">
-          <span className="kbd">↑↓</span> {_t("navigate")}
-          <span className="kbd">↵</span> {_t("run")}
-          <span className="kbd">esc</span> {_t("close")}
-          <span style={{ marginLeft: "auto", color: "var(--fg-4)" }}>{_t(window.OMP_DATA.microcopy.paletteTip)}</span>
+          <span className="kbd">↑↓</span> {OMP_TR("navigate")}
+          <span className="kbd">↵</span> {OMP_TR("run")}
+          <span className="kbd">{OMP_TR("esc")}</span> {OMP_TR("close")}
+          <span style={{ marginLeft: "auto", color: "var(--fg-4)" }}>{OMP_TR(window.OMP_DATA.microcopy.paletteTip)}</span>
         </div>
       </div>
     </div>
@@ -1147,19 +1173,19 @@ function BtwPopover({ open, records = [], initialQuestion = "", initialNonce = 0
     <div className="btw-pop slide-in" onClick={e => e.stopPropagation()}>
       <div className="btw-head">
         <span className="btw-badge mono">/btw</span>
-        <span className="btw-title">{_t("Side Questions (/btw)")}</span>
+        <span className="btw-title">{OMP_TR("Side Questions (/btw)")}</span>
         {runningRec && (
           <span className="chip mono" style={{ color: "var(--cyan)", borderColor: "color-mix(in oklab, var(--cyan) 35%, var(--line))" }}>
-            <span className="dot live" /> {_t("Answering…")}
+            <span className="dot live" /> {OMP_TR("Answering…")}
           </span>
         )}
         <div style={{ flex: 1 }} />
         <button className={`btn ghost${selectedId === "__new__" || !activeRec ? " active" : ""}`}
           style={{ height: 22, padding: "0 8px", fontSize: "var(--d-text-xs)" }}
           onClick={() => { setSelectedId("__new__"); setError(null); inputRef.current?.focus(); }}>
-          <Icon name="plus" size={10} /> {_t("New question")}
+          <Icon name="plus" size={10} /> {OMP_TR("New question")}
         </button>
-        <button className="btn ghost icon" onClick={onClose} title={`${_t("close")} (Esc)`}>
+        <button className="btn ghost icon" onClick={onClose} title={`${OMP_TR("close")} (Esc)`}>
           <Icon name="close" size={11} />
         </button>
       </div>
@@ -1188,10 +1214,10 @@ function BtwPopover({ open, records = [], initialQuestion = "", initialNonce = 0
         {!activeRec ? (
           <div className="btw-empty">
             <div style={{ color: "var(--fg-2)", fontWeight: 500, marginBottom: 4 }}>
-              {_t("Ask a quick side question using the current context — never enters the main conversation.")}
+              {OMP_TR("Ask a quick side question using the current context — never enters the main conversation.")}
             </div>
             <div style={{ color: "var(--fg-4)", fontSize: "var(--d-text-xs)" }}>
-              {_t("Type below to ask while the agent works, or anytime.")}
+              {OMP_TR("Type below to ask while the agent works, or anytime.")}
             </div>
           </div>
         ) : (
@@ -1206,25 +1232,25 @@ function BtwPopover({ open, records = [], initialQuestion = "", initialNonce = 0
                   <MarkdownContent text={turn.answer} streaming={turn.status === "running"} />
                 ) : turn.status === "running" ? (
                   <div className="mono shimmer-text" style={{ fontSize: "var(--d-text-xs)", padding: "4px 0" }}>
-                    {_t("Answering…")}
+                    {OMP_TR("Answering…")}
                   </div>
                 ) : null}
                 {turn.status === "error" && (
-                  <div className="btw-err mono">{turn.error || _t("Error")}</div>
+                  <div className="btw-err mono">{turn.error || OMP_TR("Error")}</div>
                 )}
                 {turn.status === "cancelled" && (
-                  <div className="btw-status-tag mono">{_t("Cancelled")}</div>
+                  <div className="btw-status-tag mono">{OMP_TR("Cancelled")}</div>
                 )}
                 {turn.status === "interrupted" && (
-                  <div className="btw-status-tag mono">{_t("Interrupted")}</div>
+                  <div className="btw-status-tag mono">{OMP_TR("Interrupted")}</div>
                 )}
                 {turn.answer && turn.status !== "running" && (
                   <div className="btw-actions">
-                    <CopyButton text={turn.answer} label={_t("Copy answer")} />
+                    <CopyButton text={turn.answer} label={OMP_TR("Copy answer")} />
                     <button className="btn ghost" style={{ height: 20, padding: "0 6px", fontSize: "var(--d-text-xs)" }}
                       onClick={() => onInsert?.(`> ${turn.question}\n\n${turn.answer}`)}
-                      title={_t("Insert into composer")}>
-                      <Icon name="arrow" size={9} /> {_t("Insert into composer")}
+                      title={OMP_TR("Insert into composer")}>
+                      <Icon name="arrow" size={9} /> {OMP_TR("Insert into composer")}
                     </button>
                   </div>
                 )}
@@ -1241,19 +1267,19 @@ function BtwPopover({ open, records = [], initialQuestion = "", initialNonce = 0
           ref={inputRef}
           rows={1}
           className="btw-input selectable"
-          placeholder={activeRec ? _t("Ask a follow-up in this topic…") : _t("Ask a new side question…")}
+          placeholder={activeRec ? OMP_TR("Ask a follow-up in this topic…") : OMP_TR("Ask a new side question…")}
           value={draft}
           onChange={e => setDraft(e.target.value)}
           onKeyDown={onKeyDown}
         />
         {runningRec ? (
           <button className="btn danger" style={{ height: 26, padding: "0 10px" }} onClick={cancel}>
-            <Icon name="stop" size={10} /> {_t("Cancel")}
+            <Icon name="stop" size={10} /> {OMP_TR("Cancel")}
           </button>
         ) : (
           <button className="btn primary" style={{ height: 26, padding: "0 10px" }}
             disabled={!draft.trim() || isRunning} onClick={submit}>
-            {activeRec ? _t("Follow-up") : _t("ask")} <Icon name="arrow" size={10} />
+            {activeRec ? OMP_TR("Follow-up") : OMP_TR("ask")} <Icon name="arrow" size={10} />
           </button>
         )}
       </div>

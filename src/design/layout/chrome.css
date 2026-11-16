@@ -38,23 +38,21 @@
   display: flex; align-items: center; justify-content: center;
   border-radius: 4px; cursor: default;
 }
-.chrome-title { display: flex; align-items: center; gap: 6px; font-size: var(--d-text-sm); flex: 1; justify-content: center; }
-/* align-items is load-bearing. `.win-ctrl` is full-bar height (38px), so this
-   flex line's cross size is 38px even though `.chrome` centres the box
-   itself; the 24px `.btn` has a definite height, so under the default
-   `stretch` it is placed at cross-start instead. Measured in a real webview:
-   button centre 11.5px vs 18.5px for the window controls and profile chip —
-   a 7px offset, on every platform that renders the controls. */
+/* Baseline, not center: JetBrains Mono ("OMP ·") sits its glyphs higher in
+   the line box than Geist (the project name), so centred boxes misalign the text. */
+.chrome-title { display: flex; align-items: baseline; gap: 6px; font-size: var(--d-text-sm); flex: 1; justify-content: center; }
 .chrome-right { display: flex; align-items: center; gap: 6px; }
 
 /* ── Per-tab profile selector ─────────────────────────────────────────── */
 .profile-menu { position: relative; display: flex; align-items: center; }
-.profile-trigger { display: flex; align-items: center; gap: 6px; max-width: 220px; }
+/* Toolbar height (the menu sits in toolbar.jsx's right cluster). */
+.profile-trigger { display: flex; align-items: center; gap: 6px; max-width: 220px; height: 34px; padding: 0 10px; }
 .profile-trigger-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Dropdown chrome shared by the profile, tab-group and thinking menus
-   (thinking-menu.jsx, positioned in composer.css) and the browser panel's
-   annotate popover (positioned in browser.css). */
-.profile-pop, .tab-group-pop, .thinking-pop, .browser-popover {
+/* Dropdown chrome shared by the profile, tab-group, thinking and branch
+   menus (thinking-menu.jsx, positioned in composer.css; branch-menu.jsx in
+   rail.css) and the browser panel's annotate popover (positioned in
+   browser.css). */
+.profile-pop, .tab-group-pop, .thinking-pop, .branch-pop, .browser-popover {
   position: absolute; z-index: 40;
   padding: 4px;
   display: flex; flex-direction: column; gap: 1px;
@@ -63,9 +61,9 @@
   border-radius: var(--r-2);
   box-shadow: var(--shadow-pop);
 }
-/* Right-anchored, not centred: the trigger sits between a `flex: 1` title
-   and `.chrome-right`, near the window's right edge. Centring the pop under
-   it would push up to 170px (half of max-width) past that edge, and
+/* Right-anchored, not centred: the trigger sits at the toolbar's right
+   end, just before the settings button. Centring the pop under it would
+   push up to 170px (half of max-width) past the window's edge, and
    `.window { overflow: hidden }` clips the overflow silently - no scroll,
    no repositioning. Growing leftward from the trigger's own right edge
    never runs out of room on that side. */
@@ -96,19 +94,27 @@
    the risk gradient has to point the same way.) */
 .profile-row { display: flex; align-items: center; gap: 6px; }
 .profile-row .profile-item { flex: 1; min-width: 0; }
-.profile-item, .thinking-item {
+.profile-item, .thinking-item, .branch-item {
   appearance: none; border: 0; background: transparent;
   display: flex; align-items: center; gap: 8px;
   padding: 5px 8px; border-radius: var(--r-1);
   font-size: var(--d-text-sm); color: var(--fg-2);
   text-align: left; cursor: pointer;
 }
-.profile-item:hover, .thinking-item:hover { background: var(--bg-hover); color: var(--fg); }
+.profile-item:hover, .thinking-item:hover, .branch-item:hover { background: var(--bg-hover); color: var(--fg); }
 /* The row button is not a `.btn`, so it misses the global focus ring in
    styles.css - without this, tabbing lights the two small icon buttons and
    leaves the primary target between them invisible. */
-.profile-item:focus-visible, .thinking-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.profile-item:focus-visible, .thinking-item:focus-visible, .branch-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 .profile-item.active, .thinking-item.active { color: var(--fg); }
+/* The thinking and branch menus (positioned in composer.css / rail.css):
+   a pick in flight, the notes under the rows, and rows whose hint or age
+   sits on the name's baseline. */
+.thinking-pop.busy, .thinking-pop.busy .thinking-item,
+.branch-pop.busy, .branch-pop.busy .branch-item { cursor: progress; }
+.thinking-pop-note, .branch-pop-note { padding: 5px 8px; font-size: var(--d-text-xs); color: var(--fg-3); }
+.thinking-pop-note.error, .branch-pop-note.error { color: var(--rose); overflow-wrap: anywhere; }
+.thinking-item, .branch-item { align-items: baseline; }
 /* Fixed-width gutter so names stay aligned whether or not the row is the
    running one (the mark is rendered only when it is). */
 .profile-item-mark {
@@ -250,8 +256,9 @@
 /* omp is retrying a failed request: an amber ring that spins. */
 .tab-run-dot.retrying { box-sizing: border-box; border: 1.5px solid var(--amber); border-top-color: transparent; animation: spin 1s linear infinite; }
 @keyframes tab-run-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.45; }
+  /* Stepped like every endless loop (styles.css, motion utilities). */
+  0%, 100% { opacity: 1; animation-timing-function: steps(4); }
+  50% { opacity: 0.45; animation-timing-function: steps(4); }
 }
 .tab-close {
   width: 1rem; height: 1rem; padding: 0;
@@ -266,15 +273,6 @@
 /* Not a `.btn`, so no global focus ring. */
 .tab > .tab-close:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: -1px; }
 .tab-close:hover { background: var(--bg-active); color: var(--fg); }
-
-.tab-add {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 32px;
-  background: transparent; border: 0; border-right: 1px solid var(--line-soft);
-  color: var(--fg-3);
-}
-.tab-add:hover { color: var(--accent); background: var(--bg-hover); }
-.tab-add.on { color: var(--accent); }
 
 /* ── Grouped tab chip (#27) ──────────────────────────────────────────── */
 .tab-count {
@@ -319,25 +317,4 @@
 /* Not a `.btn` either, so no global focus ring. */
 .tab-group-row .tab-close:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: -1px; }
 .tab-group-sep { height: 1px; margin: 4px 2px; background: var(--line); }
-
-.tabs-right {
-  display: flex; align-items: center; gap: 8px; padding: 0 12px;
-  font-size: var(--d-text-xs);
-}
-
-/* Tab-bar pill announcing an available update. */
-.btn.update-pill {
-  height: 18px; padding: 0 8px;
-  border-radius: 9px;
-  border-color: color-mix(in oklab, var(--accent) 45%, transparent);
-  color: var(--accent);
-  font-size: var(--d-text-xs);
-}
-/* Running version; click checks for updates. xs like its neighbours —
-   `.btn` alone would bump it to sm. */
-.btn.app-version {
-  height: 18px; padding: 0 4px;
-  color: var(--fg-4);
-  font-size: var(--d-text-xs);
-}
 

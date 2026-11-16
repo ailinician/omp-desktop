@@ -1,8 +1,9 @@
 /* browser-toolbar.jsx — the browser panel's tab strip and control bar
    (browser-panel.jsx renders it). `ui` is app/use-browser.jsx's result.
    Page tabs wear the project tab bar's look (`.tab`, `.tab-name`,
-   `.tab-close`, `.tab-add`; layout/chrome.css), sized down for the panel in
-   layout/browser.css. The name is a button so the keyboard reaches it. */
+   `.tab-close`; layout/chrome.css), sized down for the panel in
+   layout/browser.css, which also styles the `+` (`.tab-add`). The name is
+   a button so the keyboard reaches it. */
 
 const { Icon: _BT_Icon, OMP_BROWSER: _BT } = window;
 
@@ -16,7 +17,7 @@ function BrowserTabs({ ui }) {
             <div key={t.targetId} className={`tab${t.active ? " active" : ""}`} title={t.url || name}
               onClick={() => ui.activateTab(t.targetId)}>
               <button type="button" className="tab-name" aria-current={t.active ? "page" : undefined}>{name}</button>
-              <button type="button" className="tab-close" aria-label={`close ${name}`}
+              <button type="button" className="tab-close" aria-label={OMP_TR("close {name}", { name })}
                 onClick={(e) => { e.stopPropagation(); ui.closeTab(t.targetId); }}>
                 <_BT_Icon name="close" size={9} />
               </button>
@@ -24,7 +25,7 @@ function BrowserTabs({ ui }) {
           );
         })}
       </div>
-      <button type="button" className="tab-add" title="new tab" aria-label="new tab" onClick={() => ui.newTab()}>
+      <button type="button" className="tab-add" title={OMP_TR("new tab")} aria-label={OMP_TR("new tab")} onClick={() => ui.newTab()}>
         <_BT_Icon name="plus" size={11} />
       </button>
     </div>
@@ -56,13 +57,13 @@ function BrowserToolbar({ ui }) {
     <>
       <BrowserTabs ui={ui} />
       <div className="browser-bar">
-        <button className="btn icon ghost" title="back" aria-label="back" disabled={!state.canBack} onClick={() => ui.history(-1)}>
+        <button className="btn icon ghost" title={OMP_TR("back")} aria-label={OMP_TR("back")} disabled={!state.canBack} onClick={() => ui.history(-1)}>
           <_BT_Icon name="back" size={11} />
         </button>
-        <button className="btn icon ghost" title="forward" aria-label="forward" disabled={!state.canForward} onClick={() => ui.history(1)}>
+        <button className="btn icon ghost" title={OMP_TR("forward")} aria-label={OMP_TR("forward")} disabled={!state.canForward} onClick={() => ui.history(1)}>
           <_BT_Icon name="arrow" size={11} />
         </button>
-        <button className="btn icon ghost" title="reload" aria-label="reload" disabled={!state.url} onClick={() => ui.navigate(state.url)}>
+        <button className="btn icon ghost" title={OMP_TR("reload")} aria-label={OMP_TR("reload")} disabled={!state.url} onClick={() => ui.navigate(state.url)}>
           <_BT_Icon name="refresh" size={11} />
         </button>
         <form className={`browser-address${shake ? " shake" : ""}`} onSubmit={submit} onAnimationEnd={() => setShake(false)}>
@@ -70,7 +71,7 @@ function BrowserToolbar({ ui }) {
             name="address"
             className="mono"
             value={draft ?? state.url}
-            placeholder="address or localhost:3000"
+            placeholder={OMP_TR("address or localhost:3000")}
             spellCheck={false}
             autoComplete="off"
             onChange={(e) => setDraft(e.target.value)}
@@ -79,15 +80,6 @@ function BrowserToolbar({ ui }) {
             onKeyDown={onKeyDown}
           />
         </form>
-        <button className={`btn icon ghost${ui.annotate ? " active" : ""}`} title="annotate" aria-label="annotate" aria-pressed={ui.annotate} disabled={state.status !== "running"} onClick={() => ui.setAnnotate(!ui.annotate)}>
-          <_BT_Icon name="edit" size={11} />
-        </button>
-        <button className={`btn icon ghost${ui.fullView ? " active" : ""}`} title="full view" aria-label="full view" aria-pressed={ui.fullView} onClick={() => ui.setFullView(!ui.fullView)}>
-          <_BT_Icon name="focus" size={11} />
-        </button>
-        <button className="btn icon ghost" title="close browser" aria-label="close browser" onClick={ui.close}>
-          <_BT_Icon name="close" size={11} />
-        </button>
       </div>
     </>
   );

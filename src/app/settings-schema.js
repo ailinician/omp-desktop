@@ -6,18 +6,20 @@
 //
 // Two row kinds:
 //   - `tweak`: one key of TWEAK_DEFAULTS (app/constants.js), rendered by the
-//     page itself; `type` is toggle | seg | slider | themes | swatches.
+//     page itself; `type` is toggle | seg | slider | themes | swatches | screens.
 //   - `custom`: rendered by `window.OMP_SETTINGS_ROWS[type]`
 //     (design/settings/rows-*.jsx). `keys` / `keyPrefix` name the tweak keys
 //     the row owns, so its changes count in the badges and the section
 //     reset; Rust-backed rows (shell, chromium, profiles, approvals,
-//     keybindings) own none and never count.
+//     keybindings) and projectAppearance (edits one project's entry; its
+//     own dot and reset) own none and never count.
 // `desc` is schema-authored text; `backtick` segments render as code.
 // Bounds of collapseAfter / promptHistoryLimit / pasteCollapseLines and the
 // fold modes come from OMP_COLLAPSE / OMP_PROMPT_HISTORY / OMP_SESSION_UI,
-// read late (getters), as are OMP_ACCENT (accent comparison), OMP_KEYMAP
-// (shortcut keywords) and TWEAK_DEFAULTS, so load order among the plain
-// app/*.js modules does not matter.
+// the start screens from OMP_BACKDROPS, read late (getters), as are
+// OMP_ACCENT (accent comparison), OMP_KEYMAP (shortcut keywords) and
+// TWEAK_DEFAULTS, so load order among the plain app/*.js modules does not
+// matter.
 (function () {
   const THEMES = Object.freeze([
     { id: "aurora", tone: "dark", accent: "#8AF0C8" },
@@ -34,6 +36,8 @@
   const sessionUi = () => window.OMP_SESSION_UI;
   const opts = (values, labels = {}) => values.map(v => ({ value: v, label: labels[v] ?? String(v) }));
   const foldOptions = () => opts(collapse()?.MODES ?? ["auto", "open", "folded"]);
+  const screenOptions = () => (window.OMP_BACKDROPS?.SCREENS ?? [{ id: "matrix", label: "Matrix", blurb: "" }])
+    .map(s => ({ value: s.id, label: s.label, blurb: s.blurb }));
 
   // Descriptors, not spread: spread would read the bound getters once, now.
   const withExtra = (base, extra) => Object.defineProperties(base, Object.getOwnPropertyDescriptors(extra ?? {}));
@@ -41,14 +45,19 @@
   const custom = (type, label, desc, kw, extra) => withExtra({ kind: "custom", id: `custom:${type}`, type, label, desc, kw }, extra);
 
   const SECTIONS = [
-    { id: "appearance", icon: "sparkle", title: "Appearance", blurb: "Colour theme, accent, density and text size of the whole window.", groups: [
+    { id: "appearance", icon: "sparkle", title: "Appearance", blurb: "Colour theme, accent, start screen, density and text size of the whole window.", groups: [
+      { name: "Language", rows: [
+        tweak("locale", "seg", "Language", "The language of the app's own interface. Messages from omp — replies, tool output, questions — stay as omp writes them.", "language locale english chinese",
+          { options: opts(["auto", "en", "zh"], { auto: "Follow system", en: "English", zh: "中文" }) }),
+      ] },
       { name: "Theme", rows: [
         tweak("theme", "themes", "Theme", "Picking a theme also resets the accent to the theme's own.", "dark light colour color aurora phosphor daylight"),
         tweak("accent", "swatches", "Accent", "Focus rings, the active tab, links and the assistant's marks.", "color colour highlight"),
+        custom("projectAppearance", "Project colours", "Theme and accent for the rendered tab's project; other projects keep the global appearance above.", "per project folder palette brand sidebar"),
+        tweak("startScreen", "screens", "Start screen", "The animated screen behind the logo while no tab is open. It follows the theme and accent.", "welcome backdrop empty animation matrix latent embedding next token sampling agent loop orbit forward pass neural attention transformer self-attention",
+          { get options() { return screenOptions(); } }),
       ] },
       { name: "Text", rows: [
-        tweak("lang", "seg", "Language", "Interface display language.", "language zh en chinese english 语言 中文",
-          { options: [{ value: "zh", label: "中文" }, { value: "en", label: "EN" }] }),
         tweak("density", "seg", "Density", "Row height, padding and the base text size.", "spacing compact",
           { options: opts(["cozy", "compact", "dense"]) }),
         tweak("fontSize", "slider", "Font size", "Scales all text and icons, the terminal's font included.", "zoom scale text",
@@ -63,8 +72,8 @@
         tweak("defaultSide", "seg", "New tabs show", "What the side column of a newly opened tab starts with. The toolbar still switches it per tab.", "conversation tree default browser",
           { options: opts(["rail", "tree", "browser"]) }),
         tweak("sidebar", "toggle", "Project sidebar", "The list of projects and their tabs on the left. `Ctrl+B` toggles it.", "projects"),
-        custom("widths", "Column widths", "Drag a column edge to resize it, double-click the edge to reset one.", "width resize pane sidebar rail tree split browser",
-          { keys: ["sidebarWidth", "railWidth", "treeWidth", "splitWidth", "browserWidth"] }),
+        custom("widths", "Column widths", "Drag a column edge to resize it, double-click the edge to reset one.", "width resize pane sidebar rail tree files split browser",
+          { keys: ["sidebarWidth", "railWidth", "treeWidth", "filesWidth", "splitWidth", "browserWidth"] }),
       ] },
     ] },
     { id: "chat", icon: "thinking", title: "Chat", blurb: "How tool calls and thinking show up in the transcript.", groups: [
@@ -88,10 +97,17 @@
         tweak("followOutput", "toggle", "Follow new output", "Keep the transcript scrolled to the newest message while the agent works. Scrolling up always pauses it.", "auto scroll bottom pin"),
       ] },
     ] },
-    { id: "composer", icon: "edit", title: "Composer", blurb: "Sending, pasting and recalling prompts.", groups: [
+    { id: "composer", icon: "edit", title: "Composer", blurb: "Sending, voice input, pasting and recalling prompts.", groups: [
       { name: "Sending", rows: [
         tweak("submitKey", "seg", "Send with", "In the composer, an ask's answer box and a subagent's steer box; the other chord inserts a newline. One-line fields always send with Enter.", "submit newline shift enter",
           { options: opts(["enter", "ctrl+enter"]) }),
+      ] },
+      { name: "Voice", rows: [
+        tweak("dictationSend", "toggle", "Send voice to text on stop", "Stopping voice to text yourself (the microphone, the panel's stop or a pause below) sends the draft with the dictated text, as Enter would. Off, the text only goes into the draft. A stop caused by switching tabs or opening Settings never sends.", "dictation speech microphone voice auto send submit"),
+        tweak("dictationAutoStop", "seg", "Stop voice to text after a pause", "Stop recording once no new words have come in for this long; until your first words it keeps waiting. Background noise that omp hears as words keeps it going.", "dictation speech microphone voice silence auto stop hands-free",
+          { options: opts([0, 1.5, 2, 3, 5], { 0: "off", 1.5: "1.5 s", 2: "2 s", 3: "3 s", 5: "5 s" }) }),
+        tweak("voiceSpectrumBands", "seg", "Spectrum bars", "How many frequency bars the microphone equalizer above the input draws while voice to text or a live conversation records.", "voice microphone equalizer spectrum fft bands bars",
+          { options: opts([16, 32, 48, 64, 96, 128]) }),
       ] },
       { name: "Pasting", rows: [
         tweak("pasteCollapseLines", "slider", "Collapse pastes longer than", "A longer paste shows as a `[paste #1 +40 lines]` chip; the agent still gets the full text.", "paste chip",
@@ -112,6 +128,7 @@
         tweak("showContext", "toggle", "Context gauge", "How full the model's context window is.", "tokens"),
         tweak("showRadar", "toggle", "Agent radar", "What the agent is doing right now.", "activity"),
         tweak("showSubagents", "toggle", "Subagents", "Running and finished subagents of this tab.", "tasks"),
+        tweak("showChanges", "toggle", "Changes", "Show the PR for this project's current branch. Needs the GitHub CLI (`gh`), signed in with `gh auth login`; the card stays hidden until `gh` is installed. Off also stops PR monitoring and turns off Auto-fix; enabling this card does not enable Auto-fix.", "github pull request pr auto fix ci checks review gh cli"),
         tweak("showMinimap", "toggle", "Minimap", "An overview of the transcript to jump around in.", "overview"),
       ] },
       { name: "Widgets", src: "widgets.json", rows: [
@@ -171,7 +188,7 @@
         custom("remoteDevices", "Paired phones", "Rename a phone or revoke its access.", "devices revoke rename"),
       ] },
       { name: "Notifications", rows: [
-        custom("remotePush", "Push notifications", "Tell the phone when a question waits or a turn finished, even with the page closed.", "web push vapid notification contact"),
+        custom("remotePush", "Push notifications", "Tell the phone when a question waits or a turn finished, even with the page closed.", "web push vapid notification contact locked lock away screen"),
       ] },
     ] },
     { id: "approvals", icon: "check", title: "Approvals", sep: true, blurb: "When the agent asks before it runs a tool.", groups: [
@@ -185,7 +202,7 @@
     { id: "shortcuts", icon: "command", title: "Shortcuts", blurb: "Every app action and its chords. A change to one of omp's own bindings is saved as a desktop override.", groups: [
       { name: "Keyboard shortcuts", src: "keybindings.json", rows: [
         custom("shortcuts", "Key bindings", "Rebind an action, add a second chord or reset it to its default.", "keys hotkeys keybindings chord rebind shortcut",
-          { moreKw: () => (window.OMP_KEYMAP?.KEYMAP_ACTIONS ?? []).map(a => `${a.label} ${a.id}`).join(" ") }),
+          { moreKw: () => (window.OMP_KEYMAP?.KEYMAP_ACTIONS ?? []).map(a => `${a.label} ${tr(a.label)} ${a.id}`).join(" ") }),
       ] },
     ] },
   ];
@@ -214,7 +231,7 @@
       const stepped = row.min + Math.round((n - row.min) / row.step) * row.step;
       return Math.min(row.max, Math.max(row.min, stepped));
     }
-    if (row.type === "seg") return row.options.some(o => o.value === v) ? v : fallback;
+    if (row.options) return row.options.some(o => o.value === v) ? v : fallback;
     if (row.type === "toggle") return typeof v === "boolean" ? v : fallback;
     return v ?? fallback;
   }
@@ -281,8 +298,13 @@
   // `moreKw`: keywords known only at runtime (the shortcut action names).
   // Custom rows show `label` and `desc` too, plus runtime text of their own;
   // `version` shows runtime text as its desc, `shortcuts` only its editor.
+  // Labels, descriptions and action names are indexed in both the source
+  // language and the current one (app/i18n.js, loaded before this file), so
+  // a query in either language finds them.
+  const tr = (s) => window.OMP_I18N.t(s);
   const searchText = (row) =>
-    `${row.label} ${(row.desc ?? "").replace(/`/g, "")} ${row.kw ?? ""} ${row.moreKw?.() ?? ""}`.toLowerCase();
+    (`${row.label} ${(row.desc ?? "").replace(/`/g, "")} ${row.kw ?? ""} ${row.moreKw?.() ?? ""} ` +
+     `${tr(row.label ?? "")} ${tr(row.desc ?? "").replace(/`/g, "")}`).toLowerCase();
 
   /** Visible rows whose label, desc or keywords contain the query,
    *  case-insensitive, grouped by section › group in page order. */

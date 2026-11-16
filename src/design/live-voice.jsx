@@ -1,0 +1,95 @@
+/* Live voice controls and captions for the active tab. */
+function LiveVoicePanel({ voice, error, onAction, dictationActive, codexLogin = null }) {
+  const active = !!voice?.active;
+  const paused = !!voice?.paused;
+  const phase = voice?.phase ?? "idle";
+  const transcripts = voice?.transcripts ?? [];
+  const captionsRef = React.useRef(null);
+  React.useLayoutEffect(() => {
+    const captions = captionsRef.current;
+    if (captions) captions.scrollTop = captions.scrollHeight;
+  }, [voice?.transcripts]);
+  if (!active && !paused && !voice?.error && !error && !transcripts.length) return null;
+
+  const input = window.OMP_LIVE_VOICE.meterLevel(voice?.input);
+  const output = window.OMP_LIVE_VOICE.meterLevel(voice?.output);
+  const resume = window.OMP_LIVE_VOICE.liveButton(voice, dictationActive, codexLogin);
+  return (
+    <section className="live-voice" aria-label={OMP_TR("Live voice")}>
+      <div className="live-voice-head">
+        <span className="live-voice-title">{OMP_TR("live voice")}</span>
+        <span className="live-voice-phase" role="status">{OMP_TR(phase)}</span>
+        {active && <>
+          <label>{OMP_TR("mic")} <meter min="-60" max="0" high="-6" optimum="-20" value={input.value} aria-label={OMP_TR("Microphone level")} aria-valuetext={`${input.text} RMS`} /></label>
+          <label>{OMP_TR("speaker")} <meter min="-60" max="0" high="-6" optimum="-20" value={output.value} aria-label={OMP_TR("Speaker level")} aria-valuetext={`${output.text} RMS`} /></label>
+        </>}
+        <span className="live-voice-spacer" />
+        {active ? <>
+          <button className="btn outlined" onClick={() => onAction(voice.muted ? "unmute" : "mute")}
+            disabled={phase === "connecting" || phase === "stopping"}
+            aria-pressed={!!voice.muted}>{voice.muted ? OMP_TR("unmute") : OMP_TR("mute")}</button>
+          <button className="btn outlined" onClick={() => onAction("pause")}
+            disabled={phase === "connecting" || phase === "stopping"} aria-label={OMP_TR("Pause live conversation")}>{OMP_TR("pause")}</button>
+          <button className="btn outlined" onClick={() => onAction("stop")}
+            disabled={phase === "stopping"} aria-label={phase === "connecting" ? OMP_TR("Cancel live conversation") : OMP_TR("End live conversation")}>{phase === "connecting" ? OMP_TR("cancel") : OMP_TR("end")}</button>
+        </> : paused ? <>
+          <button className="btn outlined" onClick={() => onAction("resume")}
+            disabled={resume.disabled} aria-label={OMP_TR("Resume live conversation")} title={resume.label}>{OMP_TR("resume")}</button>
+          <button className="btn outlined" onClick={() => onAction("stop")}
+            aria-label={OMP_TR("End live conversation")}>{OMP_TR("end")}</button>
+        </> : null}
+      </div>
+      {(error || voice?.error) && <div className="live-voice-error" role="alert">{OMP_TR(error || voice.error)}</div>}
+      {transcripts.length > 0 && <ol ref={captionsRef} className="live-voice-captions" aria-label={OMP_TR("Live voice captions")}>
+        {transcripts.map(item => <li key={`${item.role}-${item.turn}`}>
+          <span className="live-voice-role">{item.role === "user" ? "you" : "assistant"}</span>
+          <span>{item.text}</span>{!item.final && <span className="live-voice-interim">…</span>}
+        </li>)}
+      </ol>}
+    </section>
+  );
+}
+// Each mode stays in place while active so its button can stop or cancel it.
+// Live conversation is omp's Codex call: greyed out without a Codex login.
+function VoiceModeButton({ live, dictation, codexLogin = null, onLiveAction, onDictationAction }) {
+  const dictating = !!dictation?.active;
+  const calling = !!live?.active;
+  const paused = !!live?.paused;
+  const dictationBusy = dictating && (dictation.phase === "starting" || dictation.phase === "stopping");
+  const liveBusy = calling && (live.phase === "connecting" || live.phase === "stopping");
+  const dictationLabel = dictating ? (dictation.phase === "starting" ? "Cancel voice to text" : "Stop voice to text") : "Start voice to text";
+  const liveButton = window.OMP_LIVE_VOICE.liveButton(live, dictating, codexLogin);
+  return <>
+    <button className={`btn icon ghost voice-mode-btn${dictating ? " live-voice-mic-on" : ""}`}
+      title={dictationLabel} aria-label={dictationLabel} aria-pressed={dictating} aria-busy={dictationBusy}
+      disabled={calling || (dictating && dictation.phase === "stopping")}
+      onClick={() => onDictationAction(dictating ? "stop" : "start")}>
+      <window.Icon name="voice" size={13} />
+    </button>
+    <button className={`btn icon ghost voice-mode-btn${calling ? " live-voice-mic-on" : ""}`}
+      title={liveButton.label} aria-label={liveButton.label} aria-pressed={calling} aria-busy={liveBusy}
+      disabled={liveButton.disabled}
+      onClick={() => onLiveAction(calling ? "stop" : paused ? "resume" : "start")}>
+      <window.Icon name="conversation" size={13} />
+    </button>
+  </>;
+}
+
+function DictationPanel({ dictation, error, onAction }) {
+  if (!dictation?.active && !dictation?.error && !error) return null;
+  const phase = dictation?.phase ?? "idle";
+  return <section className="live-voice" aria-label={OMP_TR("Voice to text")}>
+    <div className="live-voice-head">
+      <span className="live-voice-title">{OMP_TR("voice to text")}</span>
+      <span className="live-voice-phase" role="status">{phase === "stopping" ? "transcribing" : phase}</span>
+      <span className="live-voice-spacer" />
+      {dictation?.active && <button className="btn outlined" onClick={() => onAction("stop")} disabled={phase === "stopping"}>
+        {phase === "starting" ? "cancel" : "stop"}
+      </button>}
+    </div>
+    {(error || dictation?.error) && <div className="live-voice-error" role="alert">{error || dictation.error}</div>}
+    {dictation?.active && dictation.text && <div className="dictation-preview" aria-label={OMP_TR("Dictation preview")}>{dictation.text}</div>}
+  </section>;
+}
+
+Object.assign(window, { LiveVoicePanel, VoiceModeButton, DictationPanel });
