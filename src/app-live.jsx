@@ -116,6 +116,8 @@ function App() {
   const [streaming,     setStreaming]     = React.useState(false);
   const [model,         setModelState]    = React.useState(NULL_MODEL);
   const [thinkingLevel, setThinkingLevel] = React.useState(null);
+  const [fastMode,       setFastMode]       = React.useState(false);
+  const [fastModeActive, setFastModeActive] = React.useState(false);
   const [ctx,           setCtx]           = React.useState(data.ctx);
   const [kanban,        setKanban]        = React.useState([]);
   const [planMeta,      setPlanMeta]      = React.useState(data.planMeta);
@@ -186,7 +188,7 @@ function App() {
   useBridgeSnapshot(bridge, {
     setMessages, setStreaming, setCtx, setKanban, setPlanMeta,
     setModels, setActivity, setSparkline,
-    setModelState, setThinkingLevel,
+    setModelState, setThinkingLevel, setFastMode, setFastModeActive,
     setSessions, setActiveSessionId, setProfiles, setStartupProfileId, setRecentProjects,
     setNoTabProfileId, setWorkspaceNotes, setApprovalModes, setCloseConfirm,
     setPromptHistory, setSubagents, setSubagentTranscripts, setQueue, setQueueSending, setGoal, setExtWidgets, setBtwRecords, setLiveVoice, setDictation, setCodexLogin, setDictationCompleted,
@@ -621,6 +623,11 @@ function App() {
     }
   };
   const cycleThinking    = () => bridge?.cycleThinking();
+  const toggleFastMode = async (force) => {
+    if (!bridge) return;
+    const res = await bridge.setFastMode(typeof force === "boolean" ? force : undefined);
+    if (res && !res.ok && res.error) bridge.addAssistantMessage(res.error);
+  };
 
   // Extracted so both the global keymap handler and the composer prop share
   // the same implementation (plan §7: "extract into a togglePlanMode callback").
@@ -764,6 +771,12 @@ function App() {
     // composer, budget still to pick; Enter starts it. Blocked (plan mode,
     // a goal already open), the text still comes back.
     else if (c.name === "goal")      { goalUi.enter(); if (args) setPromptInsert({ text: args, nonce: Date.now() }); }
+    else if (c.name === "fast")      {
+      const sub = args.trim().toLowerCase();
+      if (sub === "on") toggleFastMode(true);
+      else if (sub === "off") toggleFastMode(false);
+      else toggleFastMode();
+    }
     else if (c.name === "btw")       {
       setBtwOpen(true);
       if (args.trim()) setBtwInit({ q: args.trim(), nonce: Date.now() });
@@ -1175,6 +1188,10 @@ function App() {
                     thinking={thinkingLevel}
                     onLoadThinkingLevels={() => bridge.thinkingLevels()}
                     onSetThinking={level => bridge.setThinkingLevel(level)}
+                    fastMode={fastMode}
+                    fastModeActive={fastModeActive}
+                    fastTariff={liveCtx?.tariff}
+                    onToggleFast={() => toggleFastMode()}
                     isStreaming={streaming}
                     backgroundWork={activeProject.runState === "background"}
                     onAbort={handleAbort}

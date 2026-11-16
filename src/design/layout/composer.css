@@ -8,6 +8,30 @@
   padding: 10px 16px 8px;
 }
 .composer.plan-on { background: linear-gradient(180deg, color-mix(in oklab, var(--amber) 8%, transparent), transparent); }
+.composer.fast-on {
+  border-top-color: color-mix(in oklab, #FFD04D 52%, var(--line));
+  background: linear-gradient(180deg, color-mix(in oklab, #FFD04D 7%, transparent), transparent);
+}
+.composer.fast-on::before {
+  content: "";
+  position: absolute;
+  top: -1px; left: 10%; right: 10%; height: 1px;
+  background: linear-gradient(90deg, transparent, #FFD04D, var(--cyan), #FFD04D, transparent);
+  opacity: 0.85;
+  pointer-events: none;
+}
+.composer.fast-on .composer-row {
+  border-color: color-mix(in oklab, #FFD04D 42%, var(--line-bright));
+  box-shadow: 0 0 14px -4px color-mix(in oklab, #FFD04D 25%, transparent);
+}
+.composer.fast-on .composer-row:focus-within {
+  border-color: #FFD04D;
+  box-shadow: 0 0 0 3px color-mix(in oklab, #FFD04D 18%, transparent), 0 0 18px -3px color-mix(in oklab, #FFD04D 32%, transparent);
+}
+.btn.primary.fast-send {
+  border-color: color-mix(in oklab, #FFD04D 55%, var(--accent));
+  box-shadow: 0 0 12px -2px color-mix(in oklab, #FFD04D 35%, transparent);
+}
 /* An image file dragged over the composer (#50): the whole composer is the
    drop target. An overlay with an inset ring, so it never shifts the layout
    and never competes with the plan/goal tints for `background`. */
@@ -162,6 +186,33 @@
 }
 .composer-pill:hover { border-color: var(--line-bright); background: var(--bg-hover); }
 .composer-pill.on { border-color: color-mix(in oklab, var(--amber) 50%, var(--line)); background: color-mix(in oklab, var(--amber) 12%, transparent); }
+.composer-pill.fast-pill.on {
+  border-color: color-mix(in oklab, #FFD04D 60%, var(--line));
+  background: linear-gradient(135deg, color-mix(in oklab, #FFD04D 18%, transparent), color-mix(in oklab, var(--cyan) 8%, transparent));
+  box-shadow: 0 0 10px -2px color-mix(in oklab, #FFD04D 30%, transparent);
+}
+.composer-pill.fast-pill.streaming svg {
+  filter: drop-shadow(0 0 4px #FFD04D);
+}
+.fast-verify-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-size: 9.5px; line-height: 1;
+  padding: 1px 4px; border-radius: 999px; font-weight: 600;
+}
+.fast-verify-badge.ok {
+  color: #3fb950;
+  background: color-mix(in oklab, #3fb950 18%, transparent);
+  border: 1px solid color-mix(in oklab, #3fb950 45%, transparent);
+}
+.fast-verify-badge.warn {
+  color: var(--rose);
+  background: color-mix(in oklab, var(--rose) 18%, transparent);
+  border: 1px solid color-mix(in oklab, var(--rose) 45%, transparent);
+}
+.fast-verify-badge.pending {
+  color: #FFD04D;
+  background: color-mix(in oklab, #FFD04D 15%, transparent);
+}
 
 /* The agent yielded and a background job will wake it (run state
    `background`); the dot is the tab bar's. */

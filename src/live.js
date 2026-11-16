@@ -56,6 +56,8 @@
     isStreaming:    false,
     model:          null,
     thinkingLevel:  null,
+    fastMode:       false,
+    fastModeActive: false,
     ctx:            { ...DEFAULT_DATA.ctx },
     kanban:         [],
     planMeta:       { ...DEFAULT_DATA.planMeta },
@@ -398,6 +400,8 @@
       isStreaming:     state.isStreaming,
       model:           state.model,
       thinkingLevel:   state.thinkingLevel,
+      fastMode:        state.fastMode,
+      fastModeActive:  state.fastModeActive,
       ctx:             state.ctx,
       kanban:          state.kanban,
       planMeta:        state.planMeta,
@@ -840,6 +844,8 @@
       isStreaming:   false,
       model:         null,
       thinkingLevel: null,
+      fastMode:      false,
+      fastModeActive: false,
       ctx:           { ...DEFAULT_DATA.ctx },
       kanban:        [],
       planMeta:      { ...DEFAULT_DATA.planMeta },
@@ -895,6 +901,8 @@
       isStreaming:   state.isStreaming,
       model:         state.model,
       thinkingLevel: state.thinkingLevel,
+      fastMode:      state.fastMode,
+      fastModeActive: state.fastModeActive,
       ctx:           { ...state.ctx },
       kanban:        state.kanban,
       planMeta:      state.planMeta,
@@ -945,6 +953,8 @@
       isStreaming:   snap.isStreaming,
       model:         snap.model,
       thinkingLevel: snap.thinkingLevel,
+      fastMode:      snap.fastMode ?? false,
+      fastModeActive: snap.fastModeActive ?? false,
       ctx:           snap.ctx,
       kanban:        snap.kanban,
       planMeta:      snap.planMeta,
@@ -3014,6 +3024,8 @@
       state.messages = state.messages.filter(m => !m.streaming);
     }
     state.thinkingLevel = _effectiveThinking(rpcState.thinkingLevel);
+    state.fastMode       = rpcState.fastModeEnabled === true;
+    state.fastModeActive = rpcState.fastModeActive === true;
     // The queue as of this get_state; later `queue_update`s follow it in
     // the same stream, so the last one written wins.
     state.queue = QUEUE.fromSnapshot(rpcState.queuedMessages, state.queue);
@@ -4208,6 +4220,22 @@
      *  pick) arrives before it, as `thinking_level_changed`. */
     setThinkingLevel(level) {
       return _sendWithResponse({ type: "set_thinking_level", level }, QUICK_CMD_TIMEOUT_MS);
+    },
+    async setFastMode(enabled) {
+      const want = typeof enabled === "boolean" ? enabled : !state.fastMode;
+      try {
+        const data = await _sendWithResponse({ type: "set_fast_mode", enabled: want }, QUICK_CMD_TIMEOUT_MS);
+        state.fastMode       = data?.enabled === true;
+        state.fastModeActive = data?.active === true;
+        if (state.rpcState) {
+          state.rpcState = { ...state.rpcState, fastModeEnabled: state.fastMode, fastModeActive: state.fastModeActive };
+        }
+        _refreshCtx();
+        notify();
+        return { ok: true, enabled: state.fastMode, active: state.fastModeActive };
+      } catch (e) {
+        return { ok: false, error: String(e?.message ?? e) };
+      }
     },
     compact() {
       const id  = "cmpct-" + (_nextCmdId++);

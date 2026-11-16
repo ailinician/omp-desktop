@@ -1070,5 +1070,8 @@ window.OMP_I18N.add("zh", {
   "Ask a new side question…": "输入新的旁路问题…",
   "Cancel": "取消生成",
   "Follow-up": "追问",
+  "toggle fast (priority) service tier": "切换快速 (Priority 优先) 服务通道",
+  "fast": "快速",
+  "fast mode (/fast) — priority service tier to reduce queuing and 429s": "快速模式 (/fast) — 开启优先服务通道 (Priority)，缓解排队与 429 限流",
 });
 

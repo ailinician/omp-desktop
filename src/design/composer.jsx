@@ -40,7 +40,7 @@ function hintKeyFor(actionId, fallback) {
 // ── The composer (input + plan/steer modes + send) ────────────────────
 // `submitKey` ("enter" | "ctrl+enter") and `pasteCollapseLines` come from the
 // tweaks (Settings › Composer); the defaults match TWEAK_DEFAULTS.
-function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, btwOpen = false, btwRunning = false, btwCount = 0, onToggleBtw, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow, browserChips = [], onRemoveBrowserChip, onBrowserChipClick, fileChips = [], onRemoveFileChip, onFileChipClick, submitKey = "enter", pasteCollapseLines = 5, liveVoice, liveError, onLiveAction, codexLogin = null, voiceSpectrum = null, dictation, dictationError, onDictationAction, dictationCompleted, onAckDictation }) {
+function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, btwOpen = false, btwRunning = false, btwCount = 0, onToggleBtw, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, fastMode = false, fastModeActive = false, fastTariff = null, onToggleFast, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow, browserChips = [], onRemoveBrowserChip, onBrowserChipClick, fileChips = [], onRemoveFileChip, onFileChipClick, submitKey = "enter", pasteCollapseLines = 5, liveVoice, liveError, onLiveAction, codexLogin = null, voiceSpectrum = null, dictation, dictationError, onDictationAction, dictationCompleted, onAckDictation }) {
   // Drafts are per tab (issue #28). The composer stays mounted across tab
   // switches and keeps one draft per session id (app/session-ui.js
   // DRAFT_IDLE): text, pending image attachments (sent alongside the next
@@ -600,7 +600,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const sendHints = _CMP_SEND_HINTS[submitKey] ?? _CMP_SEND_HINTS.enter;
 
   return (
-    <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}${dropActive ? " drop-on" : ""}`}
+    <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}${fastMode ? " fast-on" : ""}${dropActive ? " drop-on" : ""}`}
       onDragEnter={onFileDrag} onDragOver={onFileDrag} onDragLeave={onFileDrag} onDrop={onFileDrag}>
       {planMode && (
         <div className="plan-strip">
@@ -757,8 +757,9 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
                 <Icon name="play" size={10} color="var(--amber)" /> {OMP_TR("approve")}
               </button>
             )}
-            <button className={`btn primary${goalMode ? " goal-start" : ""}`} onClick={send}
+            <button className={`btn primary${goalMode ? " goal-start" : ""}${fastMode && !goalMode && !planMode ? " fast-send" : ""}`} onClick={send}
               disabled={!sendable || pendingImages > 0}>
+              {fastMode && !goalMode && !planMode && <><Icon name="bolt" size={11} color="#FFD04D" dotColor="#FFF5CC" />{" "}</>}
               {goalMode
                 ? OMP_TR("start goal")
                 : planMode
@@ -778,6 +779,26 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
         </button>
         <ThinkingMenu key={sessionId} model={currentModel} level={thinking}
           cycleHint={cycleThinkingHint} onLoad={onLoadThinkingLevels} onSet={onSetThinking} />
+        <button
+          className={`composer-pill fast-pill${fastMode ? " on" : ""}${fastMode && isStreaming ? " streaming" : ""}`}
+          onClick={onToggleFast}
+          title={
+            fastMode && (fastTariff?.kind === "priority" || fastTariff?.kind === "priority_miss")
+              ? (OMP_TR("fast") === "快速" ? fastTariff.titleZh : fastTariff.titleEn)
+              : OMP_TR("fast mode (/fast) — priority service tier to reduce queuing and 429s")
+          }>
+          <Icon name="bolt" size={11} color={fastMode ? "#FFD04D" : "var(--fg-3)"} dotColor={fastMode ? "#FFF5CC" : undefined} />
+          <span style={{ color: fastMode ? "#FFD04D" : "var(--fg-2)", fontWeight: fastMode ? 600 : undefined }}>{OMP_TR("fast")}</span>
+          {fastMode && (
+            fastTariff?.kind === "priority" && fastTariff?.verified ? (
+              <span className="fast-verify-badge ok" title={OMP_TR("fast") === "快速" ? fastTariff.titleZh : fastTariff.titleEn}>✓</span>
+            ) : fastTariff?.kind === "priority_miss" ? (
+              <span className="fast-verify-badge warn" title={OMP_TR("fast") === "快速" ? fastTariff.titleZh : fastTariff.titleEn}>!</span>
+            ) : (
+              <span className="fast-verify-badge pending">{fastModeActive ? "ON" : "…"}</span>
+            )
+          )}
+        </button>
         <button className={`composer-pill ${planMode ? "on" : ""}`} onClick={onTogglePlan}
           disabled={!!planBlocked && !planMode} title={planBlocked && !planMode ? OMP_TR(planBlocked) : undefined}>
           <Icon name="plan" size={11} color={planMode ? "var(--amber)" : "var(--fg-3)"} />
