@@ -24,6 +24,7 @@ function useBridgeSnapshot(bridge, setters) {
       if (snap.thinkingLevel) setters.setThinkingLevel(snap.thinkingLevel);
       setters.setFastMode?.(snap.fastMode === true);
       setters.setFastModeActive?.(snap.fastModeActive === true);
+      setters.setFastModeScope?.(snap.fastModeScope || "off");
       setters.setSessions(snap.sessions ?? []);
       setters.setPromptHistory(snap.promptHistory ?? []);
       setters.setSubagents(snap.subagents);

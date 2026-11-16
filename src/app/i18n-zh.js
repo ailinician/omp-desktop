@@ -1072,6 +1072,11 @@ window.OMP_I18N.add("zh", {
   "Follow-up": "追问",
   "toggle fast (priority) service tier": "切换快速 (Priority 优先) 服务通道",
   "fast": "快速",
+  "fast · 1x": "快速·单次",
+  "fast · lock": "快速·锁定",
   "fast mode (/fast) — priority service tier to reduce queuing and 429s": "快速模式 (/fast) — 开启优先服务通道 (Priority)，缓解排队与 429 限流",
+  "fast mode (/fast) — click for 1-turn priority boost, click again to lock": "快速模式 (/fast) — 点击开启「单轮优先加速（回复后自动关）」，再点一次「锁定常驻」",
+  "⚡ 1-turn boost active (auto-off after this reply) · click again to lock": "⚡ 单轮加速已开启（本轮回复结束后自动熄火关闭）· 再点一次切换为「锁定常驻」",
+  "⚡📌 Continuous boost locked (stays on across turns, resets on app restart) · click to turn off": "⚡📌 持续加速已锁定（多轮保持开启，重启软件自动归零）· 再点一次关闭",
 });
 

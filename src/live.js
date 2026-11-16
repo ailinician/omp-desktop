@@ -58,6 +58,7 @@
     thinkingLevel:  null,
     fastMode:       false,
     fastModeActive: false,
+    fastModeScope:  "off",
     ctx:            { ...DEFAULT_DATA.ctx },
     kanban:         [],
     planMeta:       { ...DEFAULT_DATA.planMeta },
@@ -402,6 +403,7 @@
       thinkingLevel:   state.thinkingLevel,
       fastMode:        state.fastMode,
       fastModeActive:  state.fastModeActive,
+      fastModeScope:   state.fastModeScope,
       ctx:             state.ctx,
       kanban:          state.kanban,
       planMeta:        state.planMeta,
@@ -844,8 +846,9 @@
       isStreaming:   false,
       model:         null,
       thinkingLevel: null,
-      fastMode:      false,
+      fastMode:       false,
       fastModeActive: false,
+      fastModeScope:  "off",
       ctx:           { ...DEFAULT_DATA.ctx },
       kanban:        [],
       planMeta:      { ...DEFAULT_DATA.planMeta },
@@ -901,8 +904,9 @@
       isStreaming:   state.isStreaming,
       model:         state.model,
       thinkingLevel: state.thinkingLevel,
-      fastMode:      state.fastMode,
+      fastMode:       state.fastMode,
       fastModeActive: state.fastModeActive,
+      fastModeScope:  state.fastModeScope,
       ctx:           { ...state.ctx },
       kanban:        state.kanban,
       planMeta:      state.planMeta,
@@ -953,8 +957,9 @@
       isStreaming:   snap.isStreaming,
       model:         snap.model,
       thinkingLevel: snap.thinkingLevel,
-      fastMode:      snap.fastMode ?? false,
+      fastMode:       snap.fastMode ?? false,
       fastModeActive: snap.fastModeActive ?? false,
+      fastModeScope:  snap.fastModeScope ?? "off",
       ctx:           snap.ctx,
       kanban:        snap.kanban,
       planMeta:      snap.planMeta,
@@ -2973,6 +2978,17 @@
           const failure = TURN.failureOf(last);
           if (failure) _showFailure(() => failure, tsOf(last));
           if (failure || state.messages !== before) notify();
+          if (state.fastModeScope === "once") {
+            state.fastModeScope  = "off";
+            state.fastMode       = false;
+            state.fastModeActive = false;
+            if (state.rpcState) {
+              state.rpcState = { ...state.rpcState, fastModeEnabled: false, fastModeActive: false };
+            }
+            _send({ type: "set_fast_mode", enabled: false });
+            _refreshCtx();
+            notify();
+          }
         }
       }
       _send({ type: "get_state" });
@@ -3024,8 +3040,17 @@
       state.messages = state.messages.filter(m => !m.streaming);
     }
     state.thinkingLevel = _effectiveThinking(rpcState.thinkingLevel);
-    state.fastMode       = rpcState.fastModeEnabled === true;
-    state.fastModeActive = rpcState.fastModeActive === true;
+    if (state.fastModeScope === "off") {
+      if (rpcState.fastModeEnabled === true) {
+        _send({ type: "set_fast_mode", enabled: false });
+      }
+      state.fastMode       = false;
+      state.fastModeActive = false;
+    } else {
+      state.fastMode       = rpcState.fastModeEnabled === true;
+      state.fastModeActive = rpcState.fastModeActive === true;
+      if (!state.fastMode) state.fastModeScope = "off";
+    }
     // The queue as of this get_state; later `queue_update`s follow it in
     // the same stream, so the last one written wins.
     state.queue = QUEUE.fromSnapshot(rpcState.queuedMessages, state.queue);
@@ -4221,19 +4246,32 @@
     setThinkingLevel(level) {
       return _sendWithResponse({ type: "set_thinking_level", level }, QUICK_CMD_TIMEOUT_MS);
     },
-    async setFastMode(enabled) {
-      const want = typeof enabled === "boolean" ? enabled : !state.fastMode;
+    async setFastMode(mode) {
+      let nextScope;
+      if (mode === "once" || mode === "locked" || mode === "off") {
+        nextScope = mode;
+      } else if (typeof mode === "boolean") {
+        nextScope = mode ? "once" : "off";
+      } else {
+        nextScope = state.fastModeScope === "off" ? "once" : state.fastModeScope === "once" ? "locked" : "off";
+      }
+      const want = nextScope !== "off";
+      const prevScope = state.fastModeScope;
+      state.fastModeScope = nextScope;
       try {
         const data = await _sendWithResponse({ type: "set_fast_mode", enabled: want }, QUICK_CMD_TIMEOUT_MS);
         state.fastMode       = data?.enabled === true;
         state.fastModeActive = data?.active === true;
+        if (!state.fastMode) state.fastModeScope = "off";
         if (state.rpcState) {
           state.rpcState = { ...state.rpcState, fastModeEnabled: state.fastMode, fastModeActive: state.fastModeActive };
         }
         _refreshCtx();
         notify();
-        return { ok: true, enabled: state.fastMode, active: state.fastModeActive };
+        return { ok: true, enabled: state.fastMode, active: state.fastModeActive, scope: state.fastModeScope };
       } catch (e) {
+        state.fastModeScope = prevScope;
+        notify();
         return { ok: false, error: String(e?.message ?? e) };
       }
     },

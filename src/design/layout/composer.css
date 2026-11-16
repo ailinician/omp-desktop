@@ -191,6 +191,10 @@
   background: linear-gradient(135deg, color-mix(in oklab, #FFD04D 18%, transparent), color-mix(in oklab, var(--cyan) 8%, transparent));
   box-shadow: 0 0 10px -2px color-mix(in oklab, #FFD04D 30%, transparent);
 }
+.composer-pill.fast-pill.on.locked {
+  border-color: color-mix(in oklab, #FFD04D 80%, var(--line));
+  background: linear-gradient(135deg, color-mix(in oklab, #FFD04D 24%, var(--bg-elevated)), color-mix(in oklab, var(--amber) 14%, var(--bg-elevated)));
+}
 .composer-pill.fast-pill.streaming svg {
   filter: drop-shadow(0 0 4px #FFD04D);
 }

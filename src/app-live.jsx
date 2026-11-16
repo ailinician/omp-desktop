@@ -118,6 +118,7 @@ function App() {
   const [thinkingLevel, setThinkingLevel] = React.useState(null);
   const [fastMode,       setFastMode]       = React.useState(false);
   const [fastModeActive, setFastModeActive] = React.useState(false);
+  const [fastModeScope,  setFastModeScope]  = React.useState("off");
   const [ctx,           setCtx]           = React.useState(data.ctx);
   const [kanban,        setKanban]        = React.useState([]);
   const [planMeta,      setPlanMeta]      = React.useState(data.planMeta);
@@ -188,7 +189,7 @@ function App() {
   useBridgeSnapshot(bridge, {
     setMessages, setStreaming, setCtx, setKanban, setPlanMeta,
     setModels, setActivity, setSparkline,
-    setModelState, setThinkingLevel, setFastMode, setFastModeActive,
+    setModelState, setThinkingLevel, setFastMode, setFastModeActive, setFastModeScope,
     setSessions, setActiveSessionId, setProfiles, setStartupProfileId, setRecentProjects,
     setNoTabProfileId, setWorkspaceNotes, setApprovalModes, setCloseConfirm,
     setPromptHistory, setSubagents, setSubagentTranscripts, setQueue, setQueueSending, setGoal, setExtWidgets, setBtwRecords, setLiveVoice, setDictation, setCodexLogin, setDictationCompleted,
@@ -773,8 +774,9 @@ function App() {
     else if (c.name === "goal")      { goalUi.enter(); if (args) setPromptInsert({ text: args, nonce: Date.now() }); }
     else if (c.name === "fast")      {
       const sub = args.trim().toLowerCase();
-      if (sub === "on") toggleFastMode(true);
-      else if (sub === "off") toggleFastMode(false);
+      if (sub === "once" || sub === "1" || sub === "1x") toggleFastMode("once");
+      else if (sub === "lock" || sub === "locked" || sub === "on") toggleFastMode("locked");
+      else if (sub === "off") toggleFastMode("off");
       else toggleFastMode();
     }
     else if (c.name === "btw")       {
@@ -1190,6 +1192,7 @@ function App() {
                     onSetThinking={level => bridge.setThinkingLevel(level)}
                     fastMode={fastMode}
                     fastModeActive={fastModeActive}
+                    fastModeScope={fastModeScope}
                     fastTariff={liveCtx?.tariff}
                     onToggleFast={() => toggleFastMode()}
                     isStreaming={streaming}

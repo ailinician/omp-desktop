@@ -40,7 +40,7 @@ function hintKeyFor(actionId, fallback) {
 // ── The composer (input + plan/steer modes + send) ────────────────────
 // `submitKey` ("enter" | "ctrl+enter") and `pasteCollapseLines` come from the
 // tweaks (Settings › Composer); the defaults match TWEAK_DEFAULTS.
-function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, btwOpen = false, btwRunning = false, btwCount = 0, onToggleBtw, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, fastMode = false, fastModeActive = false, fastTariff = null, onToggleFast, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow, browserChips = [], onRemoveBrowserChip, onBrowserChipClick, fileChips = [], onRemoveFileChip, onFileChipClick, submitKey = "enter", pasteCollapseLines = 5, liveVoice, liveError, onLiveAction, codexLogin = null, voiceSpectrum = null, dictation, dictationError, onDictationAction, dictationCompleted, onAckDictation }) {
+function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, btwOpen = false, btwRunning = false, btwCount = 0, onToggleBtw, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, fastMode = false, fastModeActive = false, fastModeScope = "off", fastTariff = null, onToggleFast, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow, browserChips = [], onRemoveBrowserChip, onBrowserChipClick, fileChips = [], onRemoveFileChip, onFileChipClick, submitKey = "enter", pasteCollapseLines = 5, liveVoice, liveError, onLiveAction, codexLogin = null, voiceSpectrum = null, dictation, dictationError, onDictationAction, dictationCompleted, onAckDictation }) {
   // Drafts are per tab (issue #28). The composer stays mounted across tab
   // switches and keeps one draft per session id (app/session-ui.js
   // DRAFT_IDLE): text, pending image attachments (sent alongside the next
@@ -780,22 +780,33 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
         <ThinkingMenu key={sessionId} model={currentModel} level={thinking}
           cycleHint={cycleThinkingHint} onLoad={onLoadThinkingLevels} onSet={onSetThinking} />
         <button
-          className={`composer-pill fast-pill${fastMode ? " on" : ""}${fastMode && isStreaming ? " streaming" : ""}`}
+          className={`composer-pill fast-pill${fastMode ? " on" : ""}${fastMode && fastModeScope === "locked" ? " locked" : ""}${fastMode && isStreaming ? " streaming" : ""}`}
           onClick={onToggleFast}
           title={
-            fastMode && (fastTariff?.kind === "priority" || fastTariff?.kind === "priority_miss")
-              ? (OMP_TR("fast") === "快速" ? fastTariff.titleZh : fastTariff.titleEn)
-              : OMP_TR("fast mode (/fast) — priority service tier to reduce queuing and 429s")
+            fastMode
+              ? [
+                  fastModeScope === "locked"
+                    ? OMP_TR("⚡📌 Continuous boost locked (stays on across turns, resets on app restart) · click to turn off")
+                    : OMP_TR("⚡ 1-turn boost active (auto-off after this reply) · click again to lock"),
+                  (fastTariff?.kind === "priority" || fastTariff?.kind === "priority_miss")
+                    ? (OMP_TR("fast") === "快速" ? fastTariff.titleZh : fastTariff.titleEn)
+                    : null,
+                ].filter(Boolean).join("\n")
+              : OMP_TR("fast mode (/fast) — click for 1-turn priority boost, click again to lock")
           }>
           <Icon name="bolt" size={11} color={fastMode ? "#FFD04D" : "var(--fg-3)"} dotColor={fastMode ? "#FFF5CC" : undefined} />
-          <span style={{ color: fastMode ? "#FFD04D" : "var(--fg-2)", fontWeight: fastMode ? 600 : undefined }}>{OMP_TR("fast")}</span>
+          <span style={{ color: fastMode ? "#FFD04D" : "var(--fg-2)", fontWeight: fastMode ? 600 : undefined }}>
+            {fastMode
+              ? (fastModeScope === "locked" ? OMP_TR("fast · lock") : OMP_TR("fast · 1x"))
+              : OMP_TR("fast")}
+          </span>
           {fastMode && (
             fastTariff?.kind === "priority" && fastTariff?.verified ? (
-              <span className="fast-verify-badge ok" title={OMP_TR("fast") === "快速" ? fastTariff.titleZh : fastTariff.titleEn}>✓</span>
+              <span className="fast-verify-badge ok">{fastModeScope === "locked" ? "📌✓" : "✓"}</span>
             ) : fastTariff?.kind === "priority_miss" ? (
-              <span className="fast-verify-badge warn" title={OMP_TR("fast") === "快速" ? fastTariff.titleZh : fastTariff.titleEn}>!</span>
+              <span className="fast-verify-badge warn">{fastModeScope === "locked" ? "📌!" : "!"}</span>
             ) : (
-              <span className="fast-verify-badge pending">{fastModeActive ? "ON" : "…"}</span>
+              <span className="fast-verify-badge pending">{fastModeScope === "locked" ? "📌" : (fastModeActive ? "1x" : "…")}</span>
             )
           )}
         </button>
