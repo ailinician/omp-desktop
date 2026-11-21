@@ -779,9 +779,10 @@ function App() {
     }
     else if (c.name === "slow")      {
       const sub = args.trim().toLowerCase();
-      if (sub === "on") handleSetTier("slow");
+      if (sub === "once" || sub === "1" || sub === "1x") handleSetTier("slow-once");
+      else if (sub === "lock" || sub === "locked" || sub === "on") handleSetTier("slow-locked");
       else if (sub === "off") handleSetTier("auto");
-      else handleSetTier(serviceTier === "slow" ? "auto" : "slow");
+      else handleSetTier(serviceTier === "slow-once" ? "slow-locked" : serviceTier === "slow-locked" ? "auto" : "slow-once");
     }
     else if (c.name === "btw")       {
       setBtwOpen(true);

@@ -9,13 +9,14 @@
 }
 .composer.plan-on { background: linear-gradient(180deg, color-mix(in oklab, var(--amber) 8%, transparent), transparent); }
 .composer.tier-slow { --tier-fx: #34D399; }
+.composer.tier-slow-lock { --tier-fx: #2DD4BF; }
 .composer.tier-fast { --tier-fx: #38BDF8; }
 .composer.tier-lock { --tier-fx: #F5B942; }
-.composer.tier-slow, .composer.tier-fast, .composer.tier-lock {
+.composer.tier-slow, .composer.tier-slow-lock, .composer.tier-fast, .composer.tier-lock {
   border-top-color: color-mix(in oklab, var(--tier-fx) 40%, var(--line));
   background: linear-gradient(180deg, color-mix(in oklab, var(--tier-fx) 5%, transparent), transparent);
 }
-.composer.tier-slow::before, .composer.tier-fast::before, .composer.tier-lock::before {
+.composer.tier-slow::before, .composer.tier-slow-lock::before, .composer.tier-fast::before, .composer.tier-lock::before {
   content: "";
   position: absolute;
   top: -1px; left: 10%; right: 10%; height: 1px;
@@ -23,10 +24,10 @@
   opacity: 0.78;
   pointer-events: none;
 }
-.composer.tier-slow .composer-row, .composer.tier-fast .composer-row, .composer.tier-lock .composer-row {
+.composer.tier-slow .composer-row, .composer.tier-slow-lock .composer-row, .composer.tier-fast .composer-row, .composer.tier-lock .composer-row {
   border-color: color-mix(in oklab, var(--tier-fx) 36%, var(--line-bright));
 }
-.composer.tier-slow .composer-row:focus-within, .composer.tier-fast .composer-row:focus-within, .composer.tier-lock .composer-row:focus-within {
+.composer.tier-slow .composer-row:focus-within, .composer.tier-slow-lock .composer-row:focus-within, .composer.tier-fast .composer-row:focus-within, .composer.tier-lock .composer-row:focus-within {
   border-color: color-mix(in oklab, var(--tier-fx) 78%, var(--line-bright));
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--tier-fx) 16%, transparent);
 }
@@ -191,22 +192,26 @@
   color: var(--fg-2);
   transition: color 120ms;
 }
-.composer-pill.tier-pill.tier-slow { --tier-c: #34D399; }
+.composer-pill.tier-pill.tier-slow-once { --tier-c: #34D399; }
+.composer-pill.tier-pill.tier-slow-locked { --tier-c: #2DD4BF; }
 .composer-pill.tier-pill.tier-fast-once { --tier-c: #38BDF8; }
 .composer-pill.tier-pill.tier-fast-locked { --tier-c: #F5B942; }
-.composer-pill.tier-pill.tier-slow,
+.composer-pill.tier-pill.tier-slow-once,
+.composer-pill.tier-pill.tier-slow-locked,
 .composer-pill.tier-pill.tier-fast-once,
 .composer-pill.tier-pill.tier-fast-locked {
   border-color: color-mix(in oklab, var(--tier-c) 50%, var(--line));
   background: color-mix(in oklab, var(--tier-c) 9%, var(--bg-elevated));
 }
-.composer-pill.tier-pill.tier-slow:hover,
+.composer-pill.tier-pill.tier-slow-once:hover,
+.composer-pill.tier-pill.tier-slow-locked:hover,
 .composer-pill.tier-pill.tier-fast-once:hover,
 .composer-pill.tier-pill.tier-fast-locked:hover {
   border-color: color-mix(in oklab, var(--tier-c) 68%, var(--line));
   background: color-mix(in oklab, var(--tier-c) 14%, var(--bg-elevated));
 }
-.composer-pill.tier-pill.tier-slow .tier-pill-label,
+.composer-pill.tier-pill.tier-slow-once .tier-pill-label,
+.composer-pill.tier-pill.tier-slow-locked .tier-pill-label,
 .composer-pill.tier-pill.tier-fast-once .tier-pill-label,
 .composer-pill.tier-pill.tier-fast-locked .tier-pill-label {
   color: var(--fg);

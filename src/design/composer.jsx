@@ -39,10 +39,11 @@ function hintKeyFor(actionId, fallback) {
 
 // ── Service-tier popover menu (mirrors ThinkingMenu) ─────────────────
 const _TIER_OPTS = [
-  { id: "auto",        icon: "bolt",  color: "var(--fg-3)", label: "tier · auto",  rate: "0.5x~1x",   hint: "off-peak 0.5x automatically, standard 1.0x at peak" },
-  { id: "slow",        icon: "clock", color: "#34D399",     label: "tier · slow",  rate: "0.5x",      hint: "Flex queued half-price all day, higher latency (/slow)" },
-  { id: "fast-once",   icon: "bolt",  color: "#38BDF8",     label: "tier · 1x",    rate: "1.8x · 1x", hint: "priority lane for this turn only, auto-resets after reply" },
-  { id: "fast-locked", icon: "bolt",  color: "#F5B942",     label: "tier · lock",  rate: "1.8x",      hint: "keep priority across turns, resets on app restart", locked: true },
+  { id: "auto",        icon: "bolt",  color: "var(--fg-3)", label: "tier · auto",      rate: "1.0x",      hint: "default tier (Vertex off-peak 0.5x automatically)" },
+  { id: "slow-once",   icon: "clock", color: "#34D399",     label: "tier · slow 1x",   rate: "0.5x · 1x", hint: "Flex half-price for this turn only, auto-resets after reply" },
+  { id: "slow-locked", icon: "clock", color: "#2DD4BF",     label: "tier · slow lock", rate: "0.5x",      hint: "keep Flex half-price across turns, resets on app restart", locked: true },
+  { id: "fast-once",   icon: "bolt",  color: "#38BDF8",     label: "tier · 1x",        rate: "1.8x · 1x", hint: "priority lane for this turn only, auto-resets after reply" },
+  { id: "fast-locked", icon: "bolt",  color: "#F5B942",     label: "tier · lock",      rate: "1.8x",      hint: "keep priority across turns, resets on app restart", locked: true },
 ];
 const _LockSvg = ({ color }) => (
   <svg className="ui-icon" style={{ "--icon-size": "0.625rem" }} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round">
@@ -675,7 +676,7 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const sendHints = _CMP_SEND_HINTS[submitKey] ?? _CMP_SEND_HINTS.enter;
 
   const isFastTier = serviceTier === "fast-once" || serviceTier === "fast-locked";
-  const tierClass = serviceTier === "slow" ? " tier-slow" : serviceTier === "fast-once" ? " tier-fast" : serviceTier === "fast-locked" ? " tier-lock" : "";
+  const tierClass = serviceTier === "slow-once" ? " tier-slow" : serviceTier === "slow-locked" ? " tier-slow-lock" : serviceTier === "fast-once" ? " tier-fast" : serviceTier === "fast-locked" ? " tier-lock" : "";
   return (
     <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}${tierClass}${dropActive ? " drop-on" : ""}`}
       onDragEnter={onFileDrag} onDragOver={onFileDrag} onDragLeave={onFileDrag} onDrop={onFileDrag}>

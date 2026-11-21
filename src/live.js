@@ -2968,12 +2968,13 @@
           const failure = TURN.failureOf(last);
           if (failure) _showFailure(() => failure, tsOf(last));
           if (failure || state.messages !== before) notify();
-          if (state.serviceTier === "fast-once") {
+          if (state.serviceTier === "fast-once" || state.serviceTier === "slow-once") {
+            const wasSlow = state.serviceTier === "slow-once";
             state.serviceTier = "auto";
             if (state.rpcState) {
-              state.rpcState = { ...state.rpcState, fastModeEnabled: false, fastModeActive: false };
+              state.rpcState = { ...state.rpcState, fastModeEnabled: false, fastModeActive: false, slowModeEnabled: false };
             }
-            _send({ type: "set_fast_mode", enabled: false });
+            _send({ type: wasSlow ? "set_slow_mode" : "set_fast_mode", enabled: false });
             _refreshCtx();
             notify();
           }
@@ -3031,7 +3032,7 @@
     if (state.serviceTier === "auto") {
       if (rpcState.fastModeEnabled === true) _send({ type: "set_fast_mode", enabled: false });
       if (rpcState.slowModeEnabled === true) _send({ type: "set_slow_mode", enabled: false });
-    } else if (state.serviceTier === "slow") {
+    } else if (state.serviceTier === "slow-once" || state.serviceTier === "slow-locked") {
       if (rpcState.slowModeEnabled !== true) state.serviceTier = "auto";
     } else {
       if (rpcState.fastModeEnabled !== true) state.serviceTier = "auto";
@@ -4233,13 +4234,14 @@
     },
     async setServiceTier(mode) {
       const prev = state.serviceTier;
-      const next = (mode === "auto" || mode === "slow" || mode === "fast-once" || mode === "fast-locked")
+      const VALID = ["auto", "slow-once", "slow-locked", "fast-once", "fast-locked"];
+      const next = VALID.includes(mode)
         ? mode
         : (prev === "auto" ? "fast-once" : prev === "fast-once" ? "fast-locked" : "auto");
       state.serviceTier = next;
       try {
         if (next === "auto") {
-          if (prev === "slow" || state.rpcState?.slowModeEnabled) {
+          if (prev === "slow-once" || prev === "slow-locked" || state.rpcState?.slowModeEnabled) {
             await _sendWithResponse({ type: "set_slow_mode", enabled: false }, QUICK_CMD_TIMEOUT_MS);
           }
           if (prev === "fast-once" || prev === "fast-locked" || state.rpcState?.fastModeEnabled) {
@@ -4248,7 +4250,7 @@
           if (state.rpcState) {
             state.rpcState = { ...state.rpcState, fastModeEnabled: false, fastModeActive: false, slowModeEnabled: false };
           }
-        } else if (next === "slow") {
+        } else if (next === "slow-once" || next === "slow-locked") {
           const data = await _sendWithResponse({ type: "set_slow_mode", enabled: true }, QUICK_CMD_TIMEOUT_MS);
           if (data?.enabled !== true) state.serviceTier = "auto";
           if (state.rpcState) {
