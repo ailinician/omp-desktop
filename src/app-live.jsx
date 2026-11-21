@@ -116,9 +116,7 @@ function App() {
   const [streaming,     setStreaming]     = React.useState(false);
   const [model,         setModelState]    = React.useState(NULL_MODEL);
   const [thinkingLevel, setThinkingLevel] = React.useState(null);
-  const [fastMode,       setFastMode]       = React.useState(false);
-  const [fastModeActive, setFastModeActive] = React.useState(false);
-  const [fastModeScope,  setFastModeScope]  = React.useState("off");
+  const [serviceTier,   setServiceTier]   = React.useState("auto");
   const [ctx,           setCtx]           = React.useState(data.ctx);
   const [kanban,        setKanban]        = React.useState([]);
   const [planMeta,      setPlanMeta]      = React.useState(data.planMeta);
@@ -189,7 +187,7 @@ function App() {
   useBridgeSnapshot(bridge, {
     setMessages, setStreaming, setCtx, setKanban, setPlanMeta,
     setModels, setActivity, setSparkline,
-    setModelState, setThinkingLevel, setFastMode, setFastModeActive, setFastModeScope,
+    setModelState, setThinkingLevel, setServiceTier,
     setSessions, setActiveSessionId, setProfiles, setStartupProfileId, setRecentProjects,
     setNoTabProfileId, setWorkspaceNotes, setApprovalModes, setCloseConfirm,
     setPromptHistory, setSubagents, setSubagentTranscripts, setQueue, setQueueSending, setGoal, setExtWidgets, setBtwRecords, setLiveVoice, setDictation, setCodexLogin, setDictationCompleted,
@@ -624,9 +622,9 @@ function App() {
     }
   };
   const cycleThinking    = () => bridge?.cycleThinking();
-  const toggleFastMode = async (force) => {
+  const handleSetTier = async (mode) => {
     if (!bridge) return;
-    const res = await bridge.setFastMode(typeof force === "boolean" ? force : undefined);
+    const res = await bridge.setServiceTier(mode);
     if (res && !res.ok && res.error) bridge.addAssistantMessage(res.error);
   };
 
@@ -774,10 +772,16 @@ function App() {
     else if (c.name === "goal")      { goalUi.enter(); if (args) setPromptInsert({ text: args, nonce: Date.now() }); }
     else if (c.name === "fast")      {
       const sub = args.trim().toLowerCase();
-      if (sub === "once" || sub === "1" || sub === "1x") toggleFastMode("once");
-      else if (sub === "lock" || sub === "locked" || sub === "on") toggleFastMode("locked");
-      else if (sub === "off") toggleFastMode("off");
-      else toggleFastMode();
+      if (sub === "once" || sub === "1" || sub === "1x") handleSetTier("fast-once");
+      else if (sub === "lock" || sub === "locked" || sub === "on") handleSetTier("fast-locked");
+      else if (sub === "off") handleSetTier("auto");
+      else handleSetTier();
+    }
+    else if (c.name === "slow")      {
+      const sub = args.trim().toLowerCase();
+      if (sub === "on") handleSetTier("slow");
+      else if (sub === "off") handleSetTier("auto");
+      else handleSetTier(serviceTier === "slow" ? "auto" : "slow");
     }
     else if (c.name === "btw")       {
       setBtwOpen(true);
@@ -1190,11 +1194,9 @@ function App() {
                     thinking={thinkingLevel}
                     onLoadThinkingLevels={() => bridge.thinkingLevels()}
                     onSetThinking={level => bridge.setThinkingLevel(level)}
-                    fastMode={fastMode}
-                    fastModeActive={fastModeActive}
-                    fastModeScope={fastModeScope}
-                    fastTariff={liveCtx?.tariff}
-                    onToggleFast={() => toggleFastMode()}
+                    serviceTier={serviceTier}
+                    tierTariff={liveCtx?.tariff}
+                    onSetServiceTier={handleSetTier}
                     isStreaming={streaming}
                     backgroundWork={activeProject.runState === "background"}
                     onAbort={handleAbort}

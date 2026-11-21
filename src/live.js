@@ -56,9 +56,7 @@
     isStreaming:    false,
     model:          null,
     thinkingLevel:  null,
-    fastMode:       false,
-    fastModeActive: false,
-    fastModeScope:  "off",
+    serviceTier:    "auto",
     ctx:            { ...DEFAULT_DATA.ctx },
     kanban:         [],
     planMeta:       { ...DEFAULT_DATA.planMeta },
@@ -401,9 +399,7 @@
       isStreaming:     state.isStreaming,
       model:           state.model,
       thinkingLevel:   state.thinkingLevel,
-      fastMode:        state.fastMode,
-      fastModeActive:  state.fastModeActive,
-      fastModeScope:   state.fastModeScope,
+      serviceTier:     state.serviceTier,
       ctx:             state.ctx,
       kanban:          state.kanban,
       planMeta:        state.planMeta,
@@ -846,9 +842,7 @@
       isStreaming:   false,
       model:         null,
       thinkingLevel: null,
-      fastMode:       false,
-      fastModeActive: false,
-      fastModeScope:  "off",
+      serviceTier:   "auto",
       ctx:           { ...DEFAULT_DATA.ctx },
       kanban:        [],
       planMeta:      { ...DEFAULT_DATA.planMeta },
@@ -904,9 +898,7 @@
       isStreaming:   state.isStreaming,
       model:         state.model,
       thinkingLevel: state.thinkingLevel,
-      fastMode:       state.fastMode,
-      fastModeActive: state.fastModeActive,
-      fastModeScope:  state.fastModeScope,
+      serviceTier:   state.serviceTier,
       ctx:           { ...state.ctx },
       kanban:        state.kanban,
       planMeta:      state.planMeta,
@@ -957,9 +949,7 @@
       isStreaming:   snap.isStreaming,
       model:         snap.model,
       thinkingLevel: snap.thinkingLevel,
-      fastMode:       snap.fastMode ?? false,
-      fastModeActive: snap.fastModeActive ?? false,
-      fastModeScope:  snap.fastModeScope ?? "off",
+      serviceTier:   snap.serviceTier ?? "auto",
       ctx:           snap.ctx,
       kanban:        snap.kanban,
       planMeta:      snap.planMeta,
@@ -2978,10 +2968,8 @@
           const failure = TURN.failureOf(last);
           if (failure) _showFailure(() => failure, tsOf(last));
           if (failure || state.messages !== before) notify();
-          if (state.fastModeScope === "once") {
-            state.fastModeScope  = "off";
-            state.fastMode       = false;
-            state.fastModeActive = false;
+          if (state.serviceTier === "fast-once") {
+            state.serviceTier = "auto";
             if (state.rpcState) {
               state.rpcState = { ...state.rpcState, fastModeEnabled: false, fastModeActive: false };
             }
@@ -3040,16 +3028,13 @@
       state.messages = state.messages.filter(m => !m.streaming);
     }
     state.thinkingLevel = _effectiveThinking(rpcState.thinkingLevel);
-    if (state.fastModeScope === "off") {
-      if (rpcState.fastModeEnabled === true) {
-        _send({ type: "set_fast_mode", enabled: false });
-      }
-      state.fastMode       = false;
-      state.fastModeActive = false;
+    if (state.serviceTier === "auto") {
+      if (rpcState.fastModeEnabled === true) _send({ type: "set_fast_mode", enabled: false });
+      if (rpcState.slowModeEnabled === true) _send({ type: "set_slow_mode", enabled: false });
+    } else if (state.serviceTier === "slow") {
+      if (rpcState.slowModeEnabled !== true) state.serviceTier = "auto";
     } else {
-      state.fastMode       = rpcState.fastModeEnabled === true;
-      state.fastModeActive = rpcState.fastModeActive === true;
-      if (!state.fastMode) state.fastModeScope = "off";
+      if (rpcState.fastModeEnabled !== true) state.serviceTier = "auto";
     }
     // The queue as of this get_state; later `queue_update`s follow it in
     // the same stream, so the last one written wins.
@@ -4246,31 +4231,41 @@
     setThinkingLevel(level) {
       return _sendWithResponse({ type: "set_thinking_level", level }, QUICK_CMD_TIMEOUT_MS);
     },
-    async setFastMode(mode) {
-      let nextScope;
-      if (mode === "once" || mode === "locked" || mode === "off") {
-        nextScope = mode;
-      } else if (typeof mode === "boolean") {
-        nextScope = mode ? "once" : "off";
-      } else {
-        nextScope = state.fastModeScope === "off" ? "once" : state.fastModeScope === "once" ? "locked" : "off";
-      }
-      const want = nextScope !== "off";
-      const prevScope = state.fastModeScope;
-      state.fastModeScope = nextScope;
+    async setServiceTier(mode) {
+      const prev = state.serviceTier;
+      const next = (mode === "auto" || mode === "slow" || mode === "fast-once" || mode === "fast-locked")
+        ? mode
+        : (prev === "auto" ? "fast-once" : prev === "fast-once" ? "fast-locked" : "auto");
+      state.serviceTier = next;
       try {
-        const data = await _sendWithResponse({ type: "set_fast_mode", enabled: want }, QUICK_CMD_TIMEOUT_MS);
-        state.fastMode       = data?.enabled === true;
-        state.fastModeActive = data?.active === true;
-        if (!state.fastMode) state.fastModeScope = "off";
-        if (state.rpcState) {
-          state.rpcState = { ...state.rpcState, fastModeEnabled: state.fastMode, fastModeActive: state.fastModeActive };
+        if (next === "auto") {
+          if (prev === "slow" || state.rpcState?.slowModeEnabled) {
+            await _sendWithResponse({ type: "set_slow_mode", enabled: false }, QUICK_CMD_TIMEOUT_MS);
+          }
+          if (prev === "fast-once" || prev === "fast-locked" || state.rpcState?.fastModeEnabled) {
+            await _sendWithResponse({ type: "set_fast_mode", enabled: false }, QUICK_CMD_TIMEOUT_MS);
+          }
+          if (state.rpcState) {
+            state.rpcState = { ...state.rpcState, fastModeEnabled: false, fastModeActive: false, slowModeEnabled: false };
+          }
+        } else if (next === "slow") {
+          const data = await _sendWithResponse({ type: "set_slow_mode", enabled: true }, QUICK_CMD_TIMEOUT_MS);
+          if (data?.enabled !== true) state.serviceTier = "auto";
+          if (state.rpcState) {
+            state.rpcState = { ...state.rpcState, fastModeEnabled: false, fastModeActive: false, slowModeEnabled: data?.enabled === true };
+          }
+        } else {
+          const data = await _sendWithResponse({ type: "set_fast_mode", enabled: true }, QUICK_CMD_TIMEOUT_MS);
+          if (data?.enabled !== true) state.serviceTier = "auto";
+          if (state.rpcState) {
+            state.rpcState = { ...state.rpcState, fastModeEnabled: data?.enabled === true, fastModeActive: data?.active === true, slowModeEnabled: false };
+          }
         }
         _refreshCtx();
         notify();
-        return { ok: true, enabled: state.fastMode, active: state.fastModeActive, scope: state.fastModeScope };
+        return { ok: true, tier: state.serviceTier };
       } catch (e) {
-        state.fastModeScope = prevScope;
+        state.serviceTier = prev;
         notify();
         return { ok: false, error: String(e?.message ?? e) };
       }

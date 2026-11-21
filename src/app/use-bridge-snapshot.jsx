@@ -22,9 +22,7 @@ function useBridgeSnapshot(bridge, setters) {
       setters.setSparkline(snap.sparkline);
       setters.setModelState(snap.model || _UB_NULL_MODEL);
       if (snap.thinkingLevel) setters.setThinkingLevel(snap.thinkingLevel);
-      setters.setFastMode?.(snap.fastMode === true);
-      setters.setFastModeActive?.(snap.fastModeActive === true);
-      setters.setFastModeScope?.(snap.fastModeScope || "off");
+      setters.setServiceTier?.(snap.serviceTier || "auto");
       setters.setSessions(snap.sessions ?? []);
       setters.setPromptHistory(snap.promptHistory ?? []);
       setters.setSubagents(snap.subagents);

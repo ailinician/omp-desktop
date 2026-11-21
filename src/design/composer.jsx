@@ -37,10 +37,85 @@ function hintKeyFor(actionId, fallback) {
   return window.OMP_KEYMAP ? window.OMP_KEYMAP.hintKeyFor(actionId) : fallback;
 }
 
+// ── Service-tier popover menu (mirrors ThinkingMenu) ─────────────────
+const _TIER_OPTS = [
+  { id: "auto",        icon: "bolt",  color: "var(--fg-3)", label: "tier · auto",  rate: "0.5x~1x",   hint: "off-peak 0.5x automatically, standard 1.0x at peak" },
+  { id: "slow",        icon: "clock", color: "#34D399",     label: "tier · slow",  rate: "0.5x",      hint: "Flex queued half-price all day, higher latency (/slow)" },
+  { id: "fast-once",   icon: "bolt",  color: "#38BDF8",     label: "tier · 1x",    rate: "1.8x · 1x", hint: "priority lane for this turn only, auto-resets after reply" },
+  { id: "fast-locked", icon: "bolt",  color: "#F5B942",     label: "tier · lock",  rate: "1.8x",      hint: "keep priority across turns, resets on app restart", locked: true },
+];
+const _LockSvg = ({ color }) => (
+  <svg className="ui-icon" style={{ "--icon-size": "0.625rem" }} viewBox="0 0 16 16" fill="none" stroke={color} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3.5" y="7.5" width="9" height="6.5" rx="1.5" />
+    <path d="M5.5 7.5V5.5a2.5 2.5 0 0 1 5 0v2" />
+  </svg>
+);
+function TierMenu({ model, tier = "auto", tariff = null, isStreaming = false, onSet }) {
+  const [open, setOpen] = React.useState(false);
+  const rootRef = React.useRef(null);
+  const popRef = React.useRef(null);
+  const triggerRef = React.useRef(null);
+  const close = (refocus = true) => { setOpen(false); if (refocus) triggerRef.current?.focus(); };
+  window.usePopoverDismiss(open, rootRef, () => close(false), close);
+  const onPopKey = e => window.menuKeyNav(e, popRef.current, '[role="menuitemradio"]', close);
+  const cur = _TIER_OPTS.find(o => o.id === tier) || _TIER_OPTS[0];
+  const isZh = OMP_TR("tier · auto") === "常规";
+  const receiptLine = tariff ? (isZh ? tariff.titleZh : tariff.titleEn) : null;
+  const pick = (id) => { close(true); if (id !== tier) onSet?.(id); };
+  return (
+    <div className="thinking-menu" ref={rootRef}>
+      <button
+        ref={triggerRef}
+        className={`composer-pill tier-pill tier-${tier}${isStreaming && tier !== "auto" ? " streaming" : ""}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={receiptLine || OMP_TR("service tier (/fast · /slow)")}
+        onClick={() => (open ? close() : setOpen(true))}>
+        <Icon name={cur.icon} size={11} color={cur.color} dotColor="transparent" />
+        <span className="tier-pill-label">{OMP_TR(cur.label)}</span>
+        {cur.locked && <_LockSvg color={cur.color} />}
+        <Icon name="chev" size={10} color="var(--fg-4)" dotColor="transparent" />
+      </button>
+      {open && (
+        <div ref={popRef} className="thinking-pop tier-pop" role="menu" aria-label={OMP_TR("service tier")} onKeyDown={onPopKey}>
+          <div className="thinking-pop-head mono" role="none">{OMP_TR("tier ·")} {model?.name}</div>
+          {_TIER_OPTS.map(opt => {
+            const active = opt.id === tier;
+            return (
+              <button
+                key={opt.id}
+                className={`thinking-item tier-item${active ? " active" : ""}`}
+                role="menuitemradio"
+                aria-checked={active}
+                onClick={() => pick(opt.id)}>
+                <span className="thinking-item-mark">
+                  {active && <Icon name="check" size={10} color={opt.id === "auto" ? "var(--accent)" : opt.color} dotColor="transparent" />}
+                </span>
+                <Icon name={opt.icon} size={11} color={opt.color} dotColor="transparent" />
+                <span className="tier-item-name">
+                  {OMP_TR(opt.label)}
+                  {opt.locked && <> <_LockSvg color={opt.color} /></>}
+                </span>
+                <span className="tier-item-rate mono" style={{ color: opt.id === "auto" ? "var(--fg-4)" : opt.color }}>{opt.rate}</span>
+                <span className="thinking-item-hint">{OMP_TR(opt.hint)}</span>
+              </button>
+            );
+          })}
+          {receiptLine && (
+            <div className="thinking-pop-foot tier-pop-receipt" role="none">
+              {receiptLine.split("\n").map((line, i) => <div key={i}>{line}</div>)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── The composer (input + plan/steer modes + send) ────────────────────
 // `submitKey` ("enter" | "ctrl+enter") and `pasteCollapseLines` come from the
 // tweaks (Settings › Composer); the defaults match TWEAK_DEFAULTS.
-function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, btwOpen = false, btwRunning = false, btwCount = 0, onToggleBtw, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, fastMode = false, fastModeActive = false, fastModeScope = "off", fastTariff = null, onToggleFast, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow, browserChips = [], onRemoveBrowserChip, onBrowserChipClick, fileChips = [], onRemoveFileChip, onFileChipClick, submitKey = "enter", pasteCollapseLines = 5, liveVoice, liveError, onLiveAction, codexLogin = null, voiceSpectrum = null, dictation, dictationError, onDictationAction, dictationCompleted, onAckDictation }) {
+function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePlan, planBlocked = "", goalMode = false, goalTint = false, onToggleGoal, goalBlocked = "", goalStrip = null, btwOpen = false, btwRunning = false, btwCount = 0, onToggleBtw, onOpenCmd, onOpenModel, currentModel, thinking, onLoadThinkingLevels, onSetThinking, serviceTier = "auto", tierTariff = null, onSetServiceTier, isStreaming, backgroundWork = false, onAbort, onApprove, annotationCount = 0, microcopy, onFollowUp, draftInsert, promptHistory = [], promptInsert, queue, queueSending, onRemoveQueued, onPromoteQueued, onSendQueuedNow, browserChips = [], onRemoveBrowserChip, onBrowserChipClick, fileChips = [], onRemoveFileChip, onFileChipClick, submitKey = "enter", pasteCollapseLines = 5, liveVoice, liveError, onLiveAction, codexLogin = null, voiceSpectrum = null, dictation, dictationError, onDictationAction, dictationCompleted, onAckDictation }) {
   // Drafts are per tab (issue #28). The composer stays mounted across tab
   // switches and keeps one draft per session id (app/session-ui.js
   // DRAFT_IDLE): text, pending image attachments (sent alongside the next
@@ -599,8 +674,10 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
   const cycleThinkingHint = hintFor("app.thinking.cycle", "⇧Tab");
   const sendHints = _CMP_SEND_HINTS[submitKey] ?? _CMP_SEND_HINTS.enter;
 
+  const isFastTier = serviceTier === "fast-once" || serviceTier === "fast-locked";
+  const tierClass = serviceTier === "slow" ? " tier-slow" : serviceTier === "fast-once" ? " tier-fast" : serviceTier === "fast-locked" ? " tier-lock" : "";
   return (
-    <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}${fastMode ? (fastModeScope === "locked" ? " fast-on fast-locked" : " fast-on") : ""}${dropActive ? " drop-on" : ""}`}
+    <div className={`composer${planMode ? " plan-on" : ""}${goalTint ? " goal-on" : ""}${goalMode ? " goal-draft" : ""}${tierClass}${dropActive ? " drop-on" : ""}`}
       onDragEnter={onFileDrag} onDragOver={onFileDrag} onDragLeave={onFileDrag} onDrop={onFileDrag}>
       {planMode && (
         <div className="plan-strip">
@@ -757,9 +834,9 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
                 <Icon name="play" size={10} color="var(--amber)" /> {OMP_TR("approve")}
               </button>
             )}
-            <button className={`btn primary${goalMode ? " goal-start" : ""}${fastMode && !goalMode && !planMode ? " fast-send" : ""}`} onClick={send}
+            <button className={`btn primary${goalMode ? " goal-start" : ""}${isFastTier && !goalMode && !planMode ? " fast-send" : ""}`} onClick={send}
               disabled={!sendable || pendingImages > 0}>
-              {fastMode && !goalMode && !planMode && <><Icon name="bolt" size={11} color="currentColor" />{" "}</>}
+              {isFastTier && !goalMode && !planMode && <><Icon name="bolt" size={11} color="currentColor" dotColor="transparent" />{" "}</>}
               {goalMode
                 ? OMP_TR("start goal")
                 : planMode
@@ -779,39 +856,8 @@ function Composer({ sessionId, sessionIds, onSend, onPick, planMode, onTogglePla
         </button>
         <ThinkingMenu key={sessionId} model={currentModel} level={thinking}
           cycleHint={cycleThinkingHint} onLoad={onLoadThinkingLevels} onSet={onSetThinking} />
-        <button
-          className={`composer-pill fast-pill${fastMode ? " on" : ""}${fastMode && fastModeScope === "locked" ? " locked" : ""}${fastMode && isStreaming ? " streaming" : ""}`}
-          onClick={onToggleFast}
-          title={
-            fastMode
-              ? [
-                  fastModeScope === "locked"
-                    ? OMP_TR("⚡📌 Continuous boost locked (stays on across turns, resets on app restart) · click to turn off")
-                    : OMP_TR("⚡ 1-turn boost active (auto-off after this reply) · click again to lock"),
-                  (fastTariff?.kind === "priority" || fastTariff?.kind === "priority_miss")
-                    ? (OMP_TR("fast") === "快速" ? fastTariff.titleZh : fastTariff.titleEn)
-                    : null,
-                ].filter(Boolean).join("\n")
-              : OMP_TR("fast mode (/fast) — click for 1-turn priority boost, click again to lock")
-          }>
-          <Icon name="bolt" size={11} color={fastMode ? "#FFD84D" : "var(--fg-3)"} dotColor={fastMode ? "#FFFDF0" : undefined} />
-          <span className="fast-pill-label">
-            {fastMode
-              ? (fastModeScope === "locked" ? OMP_TR("fast · lock") : OMP_TR("fast · 1x"))
-              : OMP_TR("fast")}
-          </span>
-          {fastMode && (
-            fastTariff?.kind === "priority" && fastTariff?.verified ? (
-              <span className="fast-verify-badge ok">{fastModeScope === "locked" ? "📌✓" : "✓"}</span>
-            ) : fastTariff?.kind === "priority_miss" ? (
-              <span className="fast-verify-badge warn">{fastModeScope === "locked" ? "📌!" : "!"}</span>
-            ) : (
-              <span className={`fast-verify-badge ${fastModeScope === "locked" ? "locked" : "pending"}`}>
-                {fastModeScope === "locked" ? "📌" : (fastModeActive ? "1x" : "…")}
-              </span>
-            )
-          )}
-        </button>
+        <TierMenu key={`tier-${sessionId}`} model={currentModel} tier={serviceTier} tariff={tierTariff}
+          isStreaming={isStreaming} onSet={onSetServiceTier} />
         <button className={`composer-pill ${planMode ? "on" : ""}`} onClick={onTogglePlan}
           disabled={!!planBlocked && !planMode} title={planBlocked && !planMode ? OMP_TR(planBlocked) : undefined}>
           <Icon name="plan" size={11} color={planMode ? "var(--amber)" : "var(--fg-3)"} />

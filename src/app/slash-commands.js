@@ -32,6 +32,7 @@
     { name: "plan",      hint: "draft a plan before writing code",             icon: "◇", group: "Mode"    },
     { name: "goal",      hint: "start a goal the agent works on until done",   icon: "◎", group: "Mode"    },
     { name: "fast",      hint: "toggle fast (priority) service tier",          icon: "⚡", group: "Mode"    },
+    { name: "slow",      hint: "toggle slow (flex 0.5x) service tier",         icon: "◷", group: "Mode"    },
     { name: "live",      hint: "live voice: start, pause, resume, stop, mute, unmute", icon: "◉", group: "Mode"    },
     { name: "steer",     hint: "interrupt and redirect mid-tool",              icon: "↺", group: "Mode"    },
     { name: "btw",       hint: "ask a side question without touching the main context", icon: "💬", group: "Session" },

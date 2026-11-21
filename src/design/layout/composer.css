@@ -8,36 +8,30 @@
   padding: 10px 16px 8px;
 }
 .composer.plan-on { background: linear-gradient(180deg, color-mix(in oklab, var(--amber) 8%, transparent), transparent); }
-.composer.fast-on {
-  --fast-fx: #38BDF8;
-  --fast-fx-2: var(--accent);
-  border-top-color: color-mix(in oklab, var(--fast-fx) 48%, var(--line));
-  background: linear-gradient(180deg, color-mix(in oklab, var(--fast-fx) 7%, transparent), transparent);
+.composer.tier-slow { --tier-fx: #34D399; }
+.composer.tier-fast { --tier-fx: #38BDF8; }
+.composer.tier-lock { --tier-fx: #F5B942; }
+.composer.tier-slow, .composer.tier-fast, .composer.tier-lock {
+  border-top-color: color-mix(in oklab, var(--tier-fx) 40%, var(--line));
+  background: linear-gradient(180deg, color-mix(in oklab, var(--tier-fx) 5%, transparent), transparent);
 }
-.composer.fast-on.fast-locked {
-  --fast-fx: #FF7849;
-  --fast-fx-2: #38BDF8;
-}
-.composer.fast-on::before {
+.composer.tier-slow::before, .composer.tier-fast::before, .composer.tier-lock::before {
   content: "";
   position: absolute;
-  top: -1px; left: 8%; right: 8%; height: 1px;
-  background: linear-gradient(90deg, transparent, var(--fast-fx), var(--fast-fx-2), var(--fast-fx), transparent);
-  opacity: 0.9;
+  top: -1px; left: 10%; right: 10%; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--tier-fx), transparent);
+  opacity: 0.78;
   pointer-events: none;
 }
-.composer.fast-on .composer-row {
-  border-color: color-mix(in oklab, var(--fast-fx) 42%, var(--line-bright));
-  box-shadow: 0 0 16px -4px color-mix(in oklab, var(--fast-fx) 24%, transparent);
+.composer.tier-slow .composer-row, .composer.tier-fast .composer-row, .composer.tier-lock .composer-row {
+  border-color: color-mix(in oklab, var(--tier-fx) 36%, var(--line-bright));
 }
-.composer.fast-on .composer-row:focus-within {
-  border-color: var(--fast-fx);
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--fast-fx) 18%, transparent), 0 0 20px -4px color-mix(in oklab, var(--fast-fx) 32%, transparent);
+.composer.tier-slow .composer-row:focus-within, .composer.tier-fast .composer-row:focus-within, .composer.tier-lock .composer-row:focus-within {
+  border-color: color-mix(in oklab, var(--tier-fx) 78%, var(--line-bright));
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--tier-fx) 16%, transparent);
 }
 .btn.primary.fast-send {
-  background: linear-gradient(135deg, var(--accent), color-mix(in oklab, #38BDF8 35%, var(--accent)));
-  border-color: color-mix(in oklab, #38BDF8 50%, var(--accent));
-  box-shadow: 0 0 12px -2px color-mix(in oklab, #38BDF8 38%, transparent);
+  box-shadow: 0 0 12px -3px color-mix(in oklab, var(--tier-fx, var(--accent)) 45%, transparent);
 }
 /* An image file dragged over the composer (#50): the whole composer is the
    drop target. An overlay with an inset ring, so it never shifts the layout
@@ -193,52 +187,45 @@
 }
 .composer-pill:hover { border-color: var(--line-bright); background: var(--bg-hover); }
 .composer-pill.on { border-color: color-mix(in oklab, var(--amber) 50%, var(--line)); background: color-mix(in oklab, var(--amber) 12%, transparent); }
-.fast-pill-label {
+.tier-pill-label {
   color: var(--fg-2);
   transition: color 120ms;
 }
-.composer-pill.fast-pill.on {
-  border-color: color-mix(in oklab, #38BDF8 58%, var(--line));
-  background: linear-gradient(135deg, color-mix(in oklab, #38BDF8 18%, var(--bg-elevated)), color-mix(in oklab, var(--accent) 10%, var(--bg-elevated)));
-  box-shadow: 0 0 12px -3px color-mix(in oklab, #38BDF8 32%, transparent), 0 1px 0 rgba(255, 255, 255, 0.06) inset;
+.composer-pill.tier-pill.tier-slow { --tier-c: #34D399; }
+.composer-pill.tier-pill.tier-fast-once { --tier-c: #38BDF8; }
+.composer-pill.tier-pill.tier-fast-locked { --tier-c: #F5B942; }
+.composer-pill.tier-pill.tier-slow,
+.composer-pill.tier-pill.tier-fast-once,
+.composer-pill.tier-pill.tier-fast-locked {
+  border-color: color-mix(in oklab, var(--tier-c) 50%, var(--line));
+  background: color-mix(in oklab, var(--tier-c) 9%, var(--bg-elevated));
 }
-.composer-pill.fast-pill.on .fast-pill-label {
+.composer-pill.tier-pill.tier-slow:hover,
+.composer-pill.tier-pill.tier-fast-once:hover,
+.composer-pill.tier-pill.tier-fast-locked:hover {
+  border-color: color-mix(in oklab, var(--tier-c) 68%, var(--line));
+  background: color-mix(in oklab, var(--tier-c) 14%, var(--bg-elevated));
+}
+.composer-pill.tier-pill.tier-slow .tier-pill-label,
+.composer-pill.tier-pill.tier-fast-once .tier-pill-label,
+.composer-pill.tier-pill.tier-fast-locked .tier-pill-label {
   color: var(--fg);
-  font-weight: 600;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  font-weight: 500;
 }
-.composer-pill.fast-pill.on.locked {
-  border-color: color-mix(in oklab, #FF7849 68%, var(--line));
-  background: linear-gradient(135deg, color-mix(in oklab, #FF7849 22%, var(--bg-elevated)), color-mix(in oklab, #38BDF8 12%, var(--bg-elevated)));
-  box-shadow: 0 0 12px -3px color-mix(in oklab, #FF7849 36%, transparent), 0 1px 0 rgba(255, 255, 255, 0.06) inset;
+.composer-pill.tier-pill.streaming .ui-icon:first-child {
+  filter: drop-shadow(0 0 4px var(--tier-c, var(--accent)));
 }
-.composer-pill.fast-pill.streaming svg {
-  filter: drop-shadow(0 0 5px #FFD84D);
+.tier-pop { min-width: 340px; max-width: min(460px, calc(100vw - 32px)); }
+.tier-item { gap: 7px; }
+.tier-item-name {
+  display: inline-flex; align-items: center; gap: 4px; flex: none;
+  color: var(--fg); font-weight: 500; min-width: 78px;
 }
-.fast-verify-badge {
-  display: inline-flex; align-items: center; justify-content: center;
-  font-family: var(--font-mono); font-size: 9.5px; line-height: 1;
-  padding: 1.5px 4.5px; border-radius: 999px; font-weight: 600;
+.tier-item-rate {
+  flex: none; font-size: var(--d-text-xs); min-width: 54px;
 }
-.fast-verify-badge.ok {
-  color: #4ADE80;
-  background: color-mix(in oklab, #22C55E 20%, rgba(0, 0, 0, 0.25));
-  border: 1px solid color-mix(in oklab, #4ADE80 50%, transparent);
-}
-.fast-verify-badge.warn {
-  color: var(--rose);
-  background: color-mix(in oklab, var(--rose) 20%, rgba(0, 0, 0, 0.25));
-  border: 1px solid color-mix(in oklab, var(--rose) 50%, transparent);
-}
-.fast-verify-badge.pending {
-  color: #7DD3FC;
-  background: color-mix(in oklab, #38BDF8 20%, rgba(0, 0, 0, 0.25));
-  border: 1px solid color-mix(in oklab, #38BDF8 42%, transparent);
-}
-.fast-verify-badge.locked {
-  color: #FDBA74;
-  background: color-mix(in oklab, #FF7849 22%, rgba(0, 0, 0, 0.25));
-  border: 1px solid color-mix(in oklab, #FF7849 48%, transparent);
+.tier-pop-receipt {
+  white-space: normal; line-height: 1.45; color: var(--fg-3);
 }
 /* The agent yielded and a background job will wake it (run state
    `background`); the dot is the tab bar's. */
